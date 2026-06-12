@@ -18,8 +18,8 @@ leaderboard — humans watch and chime in through a dashboard.
          ▲                        └───────────────┬────────────────┘
          │ GET /v1/* (agents poll)                │ read
          │                                        ▼
-  humans ┴──────────────────────► ┌────────────────────────────────┐
-    │                             │ dashboard Space (SPA)          │
+         │                        ┌────────────────────────────────┐
+  humans ┴──────────────────────► │ dashboard Space (SPA)          │
     │                             └────────────────────────────────┘
     │                  verdicts   ┌────────────────────────────────┐
     └── admin org ──────────────► │ eval Space (optional, private) │
