@@ -5,7 +5,10 @@ verification command; don't continue past a failed check.
 
 ## 0. Human prerequisites (cannot be automated — do all of these now)
 
-Collect these up front so the bootstrap is one-shot:
+Collect these up front so the bootstrap is one-shot. **Decide step 0b
+(verification mode) before minting the token** — jobs-based verification or
+participant benchmark jobs require an extra token scope that's easiest to
+grant at creation time.
 
 1. **Create TWO HF orgs** at https://huggingface.co/organizations/new:
    - the **challenge org** (e.g. `my-challenge`) — participants join this
@@ -14,16 +17,45 @@ Collect these up front so the bootstrap is one-shot:
      hosts the private audit bucket and (if used) the eval Space.
      Participants must **never** be members of the admin org: that boundary
      is what keeps audit records and eval logic/secrets unreadable to them.
-2. **Mint a fine-grained token** at https://huggingface.co/settings/tokens
-   scoped to **both orgs** (repo + bucket read/write on each; `job.write` on
-   the challenge org **only if** you enable benchmark jobs). It is stored as
-   a secret on the Spaces, so keep its scope minimal — the two-org pattern
-   exists precisely so no personal-account permissions are ever needed.
+2. **Mint a fine-grained token** scoped to **both orgs**. This is required,
+   not a preference: the token is stored as a secret on the deployed Spaces,
+   and the two-org pattern exists precisely so it never needs personal-account
+   permissions.
+
+   > **If you are a coding agent running this setup:** do NOT proceed with a
+   > cached personal/broad token, even if one is present. Ask the step 0b
+   > verification question FIRST (it determines the token scopes), then
+   > prompt the user to create the fine-grained token and provide it:
+   >
+   > 1. Go to https://huggingface.co/settings/tokens → **Create new token** →
+   >    type **Fine-grained**.
+   > 2. Under **Organization permissions**, add BOTH orgs and grant each:
+   >    read/write access to repos and buckets ("Write access to contents/
+   >    settings of all repos in selected organizations").
+   > 3. **If HF Jobs will be used** — `verification.mode: jobs` OR
+   >    `jobs.enabled: true` (participant benchmark runs) — additionally
+   >    grant **Jobs write** on the challenge org. Without it, every launch
+   >    fails with `JOB_LAUNCH_FAILED`, and fixing it means minting a new
+   >    token and re-running bootstrap.
+   > 4. Provide it WITHOUT pasting it into the conversation, in a way other
+   >    processes can read (a plain `export` in your own terminal is NOT
+   >    visible to an agent's shell). Either:
+   >    - run `hf auth login` in your terminal and paste the token at the
+   >      prompt (stores it in HF's standard token file), or
+   >    - write `HF_TOKEN=hf_...` as a line in `.env` at the repo root
+   >      (gitignored; the bootstrap reads it).
+   >    Then tell the agent it's ready — it can verify via `whoami` without
+   >    ever seeing the token value.
 3. **Create a challenge-org invite link** (the dashboard's "Add your agent"
    modal shows it as step 1 for new participants): org page → Settings →
-   Members → Share invite link. Goes into `challenge.yaml →
-   dashboard.invite_url`. The only truly optional input — leaving it empty
-   hides that modal step, and you can add it later by re-running bootstrap.
+   Members → Share invite link. **Set the default role to `contributor` —
+   important.** The entire trust model rests on it: contributors can read
+   org buckets but write only buckets they themselves create, which is what
+   makes the central bucket tamper-proof and bucket ownership usable as
+   identity. An invite that grants `write` would let participants bypass the
+   API entirely. Goes into `challenge.yaml → dashboard.invite_url`. The only
+   truly optional input — leaving it empty hides that modal step, and you
+   can add it later by re-running bootstrap.
 
 ## 0b. Choosing a verification mode — DECISION POINT
 

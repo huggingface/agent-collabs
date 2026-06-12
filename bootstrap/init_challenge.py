@@ -105,9 +105,30 @@ def load_config(path: Path) -> dict:
 
 
 def resolve_token() -> str:
-    token = get_token()
+    # Explicit beats ambient: HF_TOKEN env var, then the repo's .env
+    # (gitignored — the deliberate hand-over file for agent-driven setups),
+    # then the standard HF token file (`hf auth login`). A stale broad token
+    # cached by an earlier login must not shadow a fine-grained token the
+    # user explicitly provided in .env.
+    import os
+
+    token = os.environ.get("HF_TOKEN")
     if not token:
-        sys.exit("no HF token: export HF_TOKEN=hf_... (org-admin token)")
+        env_file = REPO_ROOT / ".env"
+        if env_file.exists():
+            for line in env_file.read_text().splitlines():
+                key, sep, value = line.strip().partition("=")
+                if sep and key.strip() == "HF_TOKEN":
+                    token = value.strip().strip("'\"")
+                    break
+    if not token:
+        token = get_token()
+    if not token:
+        sys.exit(
+            "no HF token found. Provide one via `hf auth login`, or write\n"
+            "  HF_TOKEN=hf_...\n"
+            f"to {REPO_ROOT / '.env'} (gitignored)."
+        )
     return token
 
 
@@ -351,6 +372,32 @@ def main() -> int:
     user = me.get("name") if isinstance(me, dict) else None
     orgs = {o.get("name") for o in (me.get("orgs") or []) if isinstance(o, dict)} if isinstance(me, dict) else set()
     print(f"token: {user} (orgs: {', '.join(sorted(orgs)) or 'none'})")
+    auth = (me.get("auth") or {}).get("accessToken") or {} if isinstance(me, dict) else {}
+    role = auth.get("role")
+    if role in ("write", "read"):
+        print(
+            f"  ⚠ this is a broad personal '{role}' token. It will be stored as a "
+            "secret on the Spaces — use a FINE-GRAINED token scoped to the two "
+            "challenge orgs instead (see SETUP.md step 0.2)."
+        )
+    # Fine-grained tokens: fail BEFORE creating anything if either org is
+    # missing from the token's scopes (e.g. a similarly-named org was
+    # selected by mistake in the token UI).
+    scoped = (auth.get("fineGrained") or {}).get("scoped") or []
+    if scoped:
+        writable = {
+            s.get("entity", {}).get("name")
+            for s in scoped
+            if "repo.write" in (s.get("permissions") or [])
+        }
+        missing = [o for o in (ch["org"], ch["admin_org"]) if o not in writable]
+        if missing:
+            sys.exit(
+                f"the fine-grained token has no write scope on: {', '.join(missing)}\n"
+                f"(it is scoped to: {', '.join(sorted(n for n in writable if n)) or 'nothing'})\n"
+                "→ edit the token at https://huggingface.co/settings/tokens and add "
+                "write access for the missing org(s)."
+            )
     for org, role in ((ch["org"], "challenge"), (ch["admin_org"], "admin")):
         if org not in orgs:
             print(f"  ⚠ token user is not visibly a member of the {role} org "

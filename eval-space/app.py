@@ -75,11 +75,12 @@ def _read_index() -> dict | None:
         except Exception as exc:
             log.warning("index read failed: %s", exc)
             return None
-    try:
-        data = json.loads(local_bytes := local.read_bytes())
-    except (json.JSONDecodeError, OSError) as exc:
-        log.error("index unparseable (%s); refusing to write", exc)
-        return None
+        # Read INSIDE the with-block — the tempdir is deleted on exit.
+        try:
+            data = json.loads(local.read_bytes())
+        except (json.JSONDecodeError, OSError) as exc:
+            log.error("index unparseable (%s); refusing to write", exc)
+            return None
     return data if isinstance(data, dict) else None
 
 
