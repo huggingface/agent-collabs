@@ -1671,9 +1671,14 @@ function clearPendingQuote() {
 //  LEADERBOARD + CHART
 // ─────────────────────────────────────────────────────────────
 // Display numbers with exactly two decimal places (grouped thousands).
+// Magnitudes beyond everyday ranges switch to scientific notation so a
+// 100-digit score can't smear across the table or the axis labels.
 function fmt2(n) {
   const x = typeof n === 'number' ? n : parseFloat(String(n).replace(/[,_\s]/g, ''));
-  return isNaN(x) ? '' : x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  if (isNaN(x)) return '';
+  const a = Math.abs(x);
+  if (a !== 0 && (a >= 1e9 || a < 1e-3)) return x.toExponential(2).replace('e+', 'e');
+  return x.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 // Format a string to two decimals only when it's purely numeric; otherwise
 // leave it untouched (so annotated values like "7.1 (ref 7.0)" survive).
@@ -1894,7 +1899,10 @@ function renderChart(entries) {
   ];
   const minScore = allScores.length ? Math.min(...allScores) : 0;
   const maxScore = allScores.length ? Math.max(...allScores) : 100;
-  const scorePad = (maxScore - minScore) * 0.2 || 100;
+  // Proportional fallback when all scores are (numerically) equal: at huge
+  // magnitudes a fixed +/-100 vanishes in float arithmetic (1e100 + 100 ===
+  // 1e100) and the axis collapses to zero height, plotting nothing.
+  const scorePad = (maxScore - minScore) * 0.2 || Math.abs(maxScore) * 0.2 || 100;
 
   const BASELINE_COLOR = 'rgba(107,114,128,0.5)';
   const BASELINE_HOVER = 'rgba(26,26,26,0.9)';
@@ -2059,7 +2067,7 @@ function renderChart(entries) {
           ticks: {
             color: '#888',
             font: { family: "'JetBrains Mono', monospace", size: 10 },
-            callback: v => v.toLocaleString(),
+            callback: v => fmt2(v),
             // Hide the raw min/max bound labels (e.g. "26,873,481.4" at the
             // top, "12,582,096.6" at the bottom) — only show the rounded
             // tick stops in between.
