@@ -12,10 +12,7 @@ Collect these up front so the bootstrap is one-shot:
 2. **Mint an org-admin token** at https://huggingface.co/settings/tokens with:
    - write access to contents/settings of repos in the org,
    - bucket read/write in the org,
-   - `job.write` on the org **only if** you enable benchmark jobs,
-   - and it must be able to create a **private bucket under your personal
-     account** (the audit bucket lives outside the org on purpose — org
-     members must never read it).
+   - `job.write` on the org **only if** you enable benchmark jobs.
 
    Prefer a **dedicated fine-grained token** over your personal write token:
    it is stored as a secret on both Spaces, and a scoped token limits the
@@ -42,10 +39,15 @@ python3 -m venv .venv && ./.venv/bin/pip install -r bootstrap/requirements.txt
 Edit [`challenge.yaml`](challenge.yaml) — every field is commented. Minimum:
 
 - `challenge.org` / `challenge.slug` / `challenge.title` / `challenge.tagline`
-- `storage.audit_bucket` → `<your-username>/<org>-audit` (NOT inside the org)
 - `spaces.backend` / `spaces.dashboard` → repo ids inside the org
 - `scoring.*` → what field results are ranked on and in which direction
 - `dashboard.invite_url` → the invite link from step 0.3
+
+`storage.audit_bucket` defaults into the org (`{org}/{slug}-audit`). Point it
+at a bucket under a personal account instead when org members must not be
+able to read it: audit records carry caller IPs/user agents, and the
+verifier's private eval set lives there. (If you do, the token also needs
+bucket write on that account.)
 
 Leave `jobs.enabled` / `verifier.enabled` as `false` for a first launch; both
 can be flipped later by editing the file and re-running bootstrap.

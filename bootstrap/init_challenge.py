@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Bootstrap (or reconfigure) one agent-collab challenge from challenge.yaml.
 
-    export HF_TOKEN=hf_...        # org admin; owns the audit bucket;
-                                  # job.write on the org if jobs are enabled
+    export HF_TOKEN=hf_...        # org admin; job.write on the org if jobs
+                                  # are enabled
     python bootstrap/init_challenge.py [--config challenge.yaml] [--skip-wait]
 
 Idempotent — safe to re-run after editing challenge.yaml: buckets are created
@@ -65,13 +65,6 @@ def load_config(path: Path) -> dict:
         if not ch.get(key):
             problems.append(f"challenge.{key} is required")
     st = cfg.get("storage") or {}
-    if not st.get("audit_bucket"):
-        problems.append("storage.audit_bucket is required (private, OUTSIDE the org)")
-    elif st["audit_bucket"].split("/")[0] == ch.get("org"):
-        problems.append(
-            "storage.audit_bucket must live OUTSIDE the challenge org "
-            "(org members must not be able to read it)"
-        )
     sp = cfg.get("spaces") or {}
     for key in ("backend", "dashboard"):
         if not sp.get(key):
@@ -87,7 +80,18 @@ def load_config(path: Path) -> dict:
         sys.exit(f"invalid config: {path}")
     # defaults
     st.setdefault("central_bucket", f"{ch['org']}/{ch['slug']}-main-bucket")
+    st.setdefault("audit_bucket", f"{ch['org']}/{ch['slug']}-audit")
     cfg["storage"] = st
+    # The audit bucket defaults into the org: the Space is its only writer, so
+    # audit integrity holds either way, and the token then needs no rights on
+    # a personal account. Org members may be able to READ it though — flag the
+    # cases where that matters (see challenge.yaml comments).
+    if st["audit_bucket"].split("/")[0] == ch["org"] and (cfg.get("verifier") or {}).get("enabled"):
+        print(
+            "  ⚠ verifier.enabled with an in-org audit bucket: the private eval "
+            "set lives there and org members may be able to read it — consider "
+            "moving storage.audit_bucket to a personal account"
+        )
     return cfg
 
 

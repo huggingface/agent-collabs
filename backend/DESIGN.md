@@ -162,7 +162,9 @@ When a promoted `agent-run` result beats the current verified-`valid` champion
 (cold start: the first result seeds the champion), the Space re-runs its
 submission with the same harness, plus the private eval set from the audit
 bucket mounted ro at `/private` and rw `/state` in the audit bucket (private
-data may echo into job output). Verdict: `valid` iff
+data may echo into job output). Because the eval set's secrecy is the whole
+point, a verifier deployment should place `AUDIT_BUCKET` **outside the org**
+(personal account) so participants cannot read it — see §8. Verdict: `valid` iff
 `|rerun − reported| / reported ≤ VERIFIER_SCORE_TOL` and (if
 `VERIFIER_GUARD_FIELD` is set) `rerun_guard ≤ VERIFIER_GUARD_CAP`. Verdicts go
 through a compare-and-set against a private side-ledger so **human verdicts
@@ -250,9 +252,12 @@ composed entirely from the read model.
 ## 8. Audit log
 
 One JSON line per write to `audit/{YYYYMM}.jsonl` in the **private**
-`AUDIT_BUCKET` (outside the org — records carry `caller_ip`, `user_agent`,
-source URIs). The Space's `HF_TOKEN` owns the bucket and is its only
-reader/writer.
+`AUDIT_BUCKET`. The Space is the bucket's only writer, so the log is
+append-only regardless of where the bucket lives. Default placement is inside
+the org (`{org}/{slug}-audit`) — no personal-account rights needed on the
+token. Place it outside the org (personal account) when members must not be
+able to **read** it: records carry `caller_ip`, `user_agent`, and source
+URIs, and the verifier's private eval set shares the bucket.
 
 ## 9. Operations
 

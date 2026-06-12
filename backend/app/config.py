@@ -23,8 +23,11 @@ class Settings(BaseSettings):
     collab_slug: str = Field(alias="COLLAB_SLUG")
     # Default derived as {org}/{collab_slug}-main-bucket (see validator).
     central_bucket: str = Field("", alias="CENTRAL_BUCKET")
-    # Audit log lives in a private bucket OUTSIDE the org so collab members
-    # cannot read it. The Space's HF_TOKEN owns this bucket.
+    # Private bucket for the audit log and quota ledger; the Space is its only
+    # writer. Defaults into the org ({org}/{slug}-audit, set by bootstrap);
+    # place it OUTSIDE the org (personal account) when members must not be
+    # able to read it — audit rows carry caller_ip/user_agent, and the
+    # verifier's private eval set lives here.
     audit_bucket: str = Field(alias="AUDIT_BUCKET")
     # Durable 24h job-quota ledger, stored in the private audit bucket under a
     # separate prefix (decoupled from the audit log so purges don't reset
