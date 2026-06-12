@@ -390,18 +390,25 @@ async def _list_md_hub(prefix: str) -> list[dict[str, str]]:
         raise HTTPException(401, "Server is not configured: set HF_TOKEN.")
     client: httpx.AsyncClient = app.state.client
 
-    tree_resp = await client.get(f"{HUB}/api/buckets/{BUCKET}/tree/{prefix}")
-    if tree_resp.status_code == 404:
-        # Folder may not exist yet (e.g. fresh `results/` before any agent posts).
-        return []
-    if tree_resp.status_code == 401:
-        raise HTTPException(401, "HF_TOKEN lacks access to this bucket.")
-    if not tree_resp.is_success:
-        raise HTTPException(tree_resp.status_code, f"Hub tree fetch: {tree_resp.text[:200]}")
+    # The tree endpoint paginates (1000 entries/page) via a Link rel="next"
+    # header — follow it, or the board silently freezes at 1000 files.
+    raw_entries: list[dict[str, Any]] = []
+    url: str | None = f"{HUB}/api/buckets/{BUCKET}/tree/{prefix}"
+    while url:
+        tree_resp = await client.get(url)
+        if tree_resp.status_code == 404 and not raw_entries:
+            # Folder may not exist yet (e.g. fresh `results/` before any agent posts).
+            return []
+        if tree_resp.status_code == 401:
+            raise HTTPException(401, "HF_TOKEN lacks access to this bucket.")
+        if not tree_resp.is_success:
+            raise HTTPException(tree_resp.status_code, f"Hub tree fetch: {tree_resp.text[:200]}")
+        raw_entries.extend(tree_resp.json())
+        url = tree_resp.links.get("next", {}).get("url")
 
     entries: list[dict[str, Any]] = [
         e
-        for e in tree_resp.json()
+        for e in raw_entries
         if e.get("type") == "file"
         and e.get("path", "").endswith(".md")
         and not e["path"].lower().endswith("readme.md")
