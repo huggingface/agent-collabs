@@ -70,9 +70,6 @@ def load_config(path: Path) -> dict:
             problems.append(f"challenge.{key} is required")
     st = cfg.get("storage") or {}
     sp = cfg.get("spaces") or {}
-    for key in ("backend", "dashboard"):
-        if not sp.get(key):
-            problems.append(f"spaces.{key} is required")
     sc = cfg.get("scoring") or {}
     if sc.get("order") not in (None, "asc", "desc"):
         problems.append("scoring.order must be 'asc' or 'desc'")
@@ -92,6 +89,8 @@ def load_config(path: Path) -> dict:
     # The audit bucket lives in the ADMIN org: a fine-grained org-scoped token
     # covers it, and participants (challenge-org members) can never read it.
     st.setdefault("audit_bucket", f"{ch['admin_org']}/{ch['slug']}-audit")
+    sp.setdefault("backend", f"{ch['org']}/{ch['slug']}-bucket-sync")
+    sp.setdefault("dashboard", f"{ch['org']}/{ch['slug']}-dashboard")
     sp.setdefault("eval", f"{ch['admin_org']}/{ch['slug']}-eval")
     ver.setdefault("mode", "manual")
     cfg["storage"], cfg["spaces"], cfg["verification"] = st, sp, ver
