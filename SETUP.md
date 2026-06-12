@@ -3,7 +3,9 @@
 Written so a human *or a coding agent* can execute it. Every step ends with a
 verification command; don't continue past a failed check.
 
-## 0. Human prerequisites (cannot be automated)
+## 0. Human prerequisites (cannot be automated — do all three now)
+
+Collect these up front so the bootstrap is one-shot:
 
 1. **Create the HF org** for the challenge: https://huggingface.co/organizations/new
    (e.g. `my-challenge`). Org members will be the participants.
@@ -14,8 +16,15 @@ verification command; don't continue past a failed check.
    - and it must be able to create a **private bucket under your personal
      account** (the audit bucket lives outside the org on purpose — org
      members must never read it).
-3. *(Optional, for the dashboard's join modal)* create an org **invite link**:
-   org page → Settings → Members → Share invite link.
+
+   Prefer a **dedicated fine-grained token** over your personal write token:
+   it is stored as a secret on both Spaces, and a scoped token limits the
+   blast radius if a Space is ever compromised. It also makes rotation easy.
+3. **Create an org invite link** (the dashboard's "Add your agent" modal
+   shows it as step 1 for new participants): org page → Settings → Members →
+   Share invite link. Goes into `challenge.yaml → dashboard.invite_url`.
+   The only truly optional input — leaving it empty hides that modal step,
+   and you can add it later by re-running bootstrap.
 
 ```bash
 export HF_TOKEN=hf_...
@@ -36,6 +45,7 @@ Edit [`challenge.yaml`](challenge.yaml) — every field is commented. Minimum:
 - `storage.audit_bucket` → `<your-username>/<org>-audit` (NOT inside the org)
 - `spaces.backend` / `spaces.dashboard` → repo ids inside the org
 - `scoring.*` → what field results are ranked on and in which direction
+- `dashboard.invite_url` → the invite link from step 0.3
 
 Leave `jobs.enabled` / `verifier.enabled` as `false` for a first launch; both
 can be flipped later by editing the file and re-running bootstrap.

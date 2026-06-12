@@ -19,9 +19,12 @@ What it does, in order:
      results/verification_status.json
   6. restart both Spaces and poll their health endpoints
 
-The two steps that can NOT be automated (do them first, once):
-  - create the HF org and mint an org-admin token
-  - (optional) create an org invite link for challenge.dashboard.invite_url
+The three inputs that can NOT be automated (collect them first, once):
+  - create the HF org
+  - mint an org-admin token (prefer a dedicated fine-grained one — it is
+    stored as a secret on both Spaces)
+  - create an org invite link (org page → Settings → Members → Share invite
+    link) for challenge.dashboard.invite_url
 """
 from __future__ import annotations
 
@@ -323,6 +326,10 @@ def main() -> int:
     if ch["org"] not in orgs:
         print(f"  ⚠ token user is not visibly a member of '{ch['org']}' — "
               "continuing, but bucket/Space creation may fail")
+    if not (cfg.get("dashboard") or {}).get("invite_url"):
+        print("  ⚠ dashboard.invite_url is empty — the join modal will skip the "
+              "org-invite step. Create one (org → Settings → Members → Share "
+              "invite link), add it to challenge.yaml, and re-run.")
 
     # 1 ── buckets
     print(f"central bucket  {st['central_bucket']}")
@@ -381,15 +388,30 @@ def main() -> int:
         if not (ok_b and ok_d):
             return 1
 
-    print(f"""
-done. remaining manual steps (org settings on huggingface.co/{ch['org']}):
-  - create an org invite link and put it in challenge.yaml → dashboard.invite_url,
-    then re-run this script (it only updates Space variables — cheap)""" + ("""
-  - grant org contributors Jobs *read* (NOT write) so they can view their jobs""" if (cfg.get("jobs") or {}).get("enabled") else "") + ("""
-  - upload the job harness to {bucket}/{prefix}/ and the private eval set to
-    the audit bucket under eval_dataset/, and register the verifier agent""".format(
-        bucket=st["central_bucket"], prefix=(cfg.get("jobs") or {}).get("harness_prefix", "shared_resources/harness"))
-        if (cfg.get("verifier") or {}).get("enabled") else ""))
+    remaining = []
+    if not (cfg.get("dashboard") or {}).get("invite_url"):
+        remaining.append(
+            "create an org invite link, put it in challenge.yaml → "
+            "dashboard.invite_url, and re-run this script (cheap — variables only)"
+        )
+    if (cfg.get("jobs") or {}).get("enabled"):
+        remaining.append(
+            "grant org contributors Jobs *read* (NOT write) so they can view their jobs"
+        )
+        harness = (cfg.get("jobs") or {}).get("harness_prefix", "shared_resources/harness")
+        remaining.append(
+            f"upload the job harness to {st['central_bucket']}/{harness}/"
+        )
+    if (cfg.get("verifier") or {}).get("enabled"):
+        remaining.append(
+            "upload the private eval set to the audit bucket under "
+            "eval_dataset/, and register the verifier agent"
+        )
+    print("\ndone.")
+    if remaining:
+        print(f"remaining manual steps (org settings on huggingface.co/{ch['org']}):")
+        for step in remaining:
+            print(f"  - {step}")
     return 0
 
 
