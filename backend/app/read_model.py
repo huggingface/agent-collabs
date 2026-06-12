@@ -147,7 +147,18 @@ class ReadModel:
     def records(self, folder: str) -> list[Record]:
         """Parsed records for every .md file under ``folder`` (READMEs
         excluded), ascending by filename. Cold misses are batch-fetched."""
-        entries = self._md_entries(folder)
+        out = self._resolve_many(self._md_entries(folder))
+        return [out[p] for p in sorted(out)]
+
+    def records_for(self, folder: str, paths: list[str]) -> dict[str, Record]:
+        """Resolve specific files from ``folder``'s listing through the content
+        cache, keyed by rel_path. For files ``records`` excludes by convention
+        (READMEs) or selective reads over a tree listing (taskforces, §18).
+        Unlisted paths are silently absent from the result."""
+        by_path = {e.rel_path: e for e in self.listing(folder)}
+        return self._resolve_many([by_path[p] for p in paths if p in by_path])
+
+    def _resolve_many(self, entries: list[ListedFile]) -> dict[str, Record]:
         out: dict[str, Record] = {}
         misses: list[ListedFile] = []
         with self._content_lock:
@@ -167,7 +178,7 @@ class ReadModel:
                     if raw is None:
                         continue  # transient download failure; heals next pass
                     out[e.rel_path] = self._insert(e, raw)
-        return [out[p] for p in sorted(out)]
+        return out
 
     def record(self, folder: str, filename: str) -> Record | None:
         """One file, resolved through the cache; None if it isn't listed."""
@@ -217,10 +228,18 @@ class ReadModel:
 
     # ───────────────────────── write-through ─────────────────────────
 
-    def write_through(self, path: str, frontmatter: dict, body: str, size: int) -> None:
+    def write_through(
+        self, path: str, frontmatter: dict, body: str, size: int,
+        folder: str | None = None,
+    ) -> None:
         """Insert a just-written central-bucket file so read-after-write is
-        exact regardless of listing TTL. Call right after the bucket write."""
-        folder, _, _filename = path.rpartition("/")
+        exact regardless of listing TTL. Call right after the bucket write.
+
+        ``folder`` pins which folder cache gets the listing overlay when it is
+        not the file's immediate parent — taskforce files live under one shared
+        ``taskforces`` tree listing whatever their subdirectory (§18.4)."""
+        if folder is None:
+            folder, _, _filename = path.rpartition("/")
         f = self._folder(folder)
         now = self._clock()
         with f.lock:

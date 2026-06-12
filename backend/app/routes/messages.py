@@ -2,9 +2,10 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request
 
 from app.audit import AuditLogger
+from app.auth import extract_bearer
 from app.config import Settings
 from app.dedup import PromotionLRU, content_hash
 from app.deps import (
@@ -18,9 +19,11 @@ from app.deps import (
 )
 from app.errors import (
     AlreadyPromoted,
+    IdentityMismatch,
     NotFound,
     NotRegistered,
     RateLimited,
+    Unauthorized,
 )
 from app.announce import promote_message
 from app.frontmatter import merge, parse
@@ -35,7 +38,12 @@ from app.models import (
 from app.naming import registration_path, stamp_yaml, utc_now
 from app.rate_limit import CompoundLimiter
 from app.read_model import ReadModel
-from app.validation import resolve_source, validate_agent_id
+from app.validation import (
+    HUMAN_HANDLE_PREFIX,
+    is_human_handle,
+    resolve_source,
+    validate_agent_id,
+)
 
 
 router = APIRouter()
@@ -52,6 +60,40 @@ def require_registered(read_model: ReadModel, hub: HubClient, agent_id: str) -> 
         raise NotRegistered(agent_id)
 
 
+def _verify_human_author(
+    handle: str, authorization: str | None, settings: Settings, hub: HubClient
+) -> None:
+    """Identity check for human-<name> posts (§5.4a).
+
+    Humans never register (the namespace is reserved at registration), so the
+    proof is per call: the bearer token must resolve via whoami to an org
+    member whose lowercased hf_user matches the handle. The handle is never
+    taken on faith from the client — the dashboard forwards the signed-in
+    user's own OAuth token, and a forged handle fails the comparison here.
+    """
+    token = extract_bearer(authorization)
+    if not token:
+        raise Unauthorized(
+            "posting as human-<name> requires Authorization: Bearer <hf_token>",
+            hint="the dashboard forwards the signed-in user's OAuth token",
+        )
+    try:
+        hf_user, orgs = hub.whoami_user_and_orgs(token)
+    except Exception:
+        raise Unauthorized(
+            "could not resolve caller identity via whoami; check your token"
+        )
+    if settings.org not in orgs:
+        raise IdentityMismatch(
+            f"hf user '{hf_user}' is not a member of '{settings.org}'"
+        )
+    expected = f"{HUMAN_HANDLE_PREFIX}{hf_user.lower()}"
+    if handle != expected:
+        raise IdentityMismatch(
+            f"agent_id '{handle}' does not match caller identity '{expected}'"
+        )
+
+
 def _server_message_fm(agent_id: str, via: str, dt: datetime) -> dict:
     return {
         "agent": agent_id,
@@ -64,6 +106,7 @@ def _server_message_fm(agent_id: str, via: str, dt: datetime) -> dict:
 def post_message(
     req: MessagePostRequest,
     request: Request,
+    authorization: str | None = Header(default=None),
     settings: Settings = Depends(get_settings_dep),
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
@@ -129,16 +172,26 @@ def post_message(
     # raw variant
     assert req.agent_id is not None and req.body is not None
     validate_agent_id(req.agent_id)
-    require_registered(read_model, hub, req.agent_id)
+    if is_human_handle(req.agent_id):
+        # Human-authored post (§5.4a) — e.g. the dashboard composer. Humans
+        # cannot register, so instead of the registration gate the caller
+        # proves the identity per call with their own HF token.
+        _verify_human_author(req.agent_id, authorization, settings, hub)
+        via = "dashboard"
+        default_type = "user"
+    else:
+        require_registered(read_model, hub, req.agent_id)
+        via = "raw"
+        default_type = "agent"
 
     allowed, retry = raw_limiter.try_consume(req.agent_id)
     if not allowed:
         raise RateLimited(retry)
 
-    client_fm: dict = {"type": req.type or "agent"}
+    client_fm: dict = {"type": req.type or default_type}
     if req.refs is not None:
         client_fm["refs"] = req.refs
-    server_fm = _server_message_fm(req.agent_id, "raw", now)
+    server_fm = _server_message_fm(req.agent_id, via, now)
     merged = merge(client_fm, server_fm)
 
     target, filename, recipients, nbytes = promote_message(
@@ -154,7 +207,7 @@ def post_message(
     audit.write(
         agent_id=req.agent_id,
         route="/v1/messages",
-        via="raw",
+        via=via,
         source=None,
         target_path=target,
         bytes_count=nbytes,
@@ -165,7 +218,7 @@ def post_message(
     )
 
     return MessageResponse(
-        filename=filename, via="raw", path=target, mentions_delivered=recipients
+        filename=filename, via=via, path=target, mentions_delivered=recipients
     )
 
 

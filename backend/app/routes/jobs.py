@@ -129,35 +129,36 @@ def run_benchmark_job(
     # harness validates them and fails fast, and its logs land in
     # run_prefix/job_logs.txt for the participant to debug.
 
-    # check → launch → record runs under one lock so two concurrent requests
-    # cannot both pass `check` on the same pre-launch ledger state. The quota
-    # is durable (a ledger in the private audit bucket), so the counts survive
-    # Space restarts.
-    with quota.serialized():
-        decision = quota.check(req.agent_id, hf_user)
-        if not decision.agent_ok:
-            raise RateLimited(
-                decision.agent_retry,
-                f"agent '{req.agent_id}' has hit its limit of "
-                f"{settings.job_per_agent_per_day} jobs per 24h; retry after {decision.agent_retry}s",
-            )
-        if not decision.user_ok:
-            raise RateLimited(
-                decision.user_retry,
-                f"hf_user '{hf_user}' has hit its limit of "
-                f"{settings.job_per_user_per_day} jobs per 24h; retry after {decision.user_retry}s",
-            )
-
-        job_id, job_url = runner.launch_benchmark(
+    # Both quotas must have room before we spend org credits on a launch. The
+    # quota is durable (a ledger in the private audit bucket), so these counts
+    # survive Space restarts. Check, launch, and record run under one quota
+    # lock so concurrent requests cannot both pass the check against the same
+    # pre-launch ledger state and overshoot the caps; the launch is only
+    # counted if it actually succeeded.
+    decision, launched, agent_remaining, user_remaining = quota.launch_within_quota(
+        req.agent_id,
+        hf_user,
+        lambda: runner.launch_benchmark(
             agent_id=req.agent_id,
             hf_user=hf_user,
             bucket=bucket,
             submission_prefix=submission_prefix,
             run_prefix=run_prefix,
+        ),
+    )
+    if not decision.agent_ok:
+        raise RateLimited(
+            decision.agent_retry,
+            f"agent '{req.agent_id}' has hit its limit of "
+            f"{settings.job_per_agent_per_day} jobs per 24h; retry after {decision.agent_retry}s",
         )
-
-        # Count the launch against both windows only after it actually succeeded.
-        agent_remaining, user_remaining = quota.record(req.agent_id, hf_user)
+    if not decision.user_ok:
+        raise RateLimited(
+            decision.user_retry,
+            f"hf_user '{hf_user}' has hit its limit of "
+            f"{settings.job_per_user_per_day} jobs per 24h; retry after {decision.user_retry}s",
+        )
+    job_id, job_url = launched
 
     status_file = f"hf://buckets/{bucket}/{run_prefix}/job_status.json"
     logs_file = f"hf://buckets/{bucket}/{run_prefix}/job_logs.txt"

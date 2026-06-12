@@ -23,6 +23,11 @@ class FakeHub:
         self.download_calls = 0
         self.batch_writes: list[list[str]] = []
         self.fail_listings = False
+        # Scripted whoami identity for token-authenticated paths
+        # (registration handshake, human message posts).
+        self.whoami_user = "test-user"
+        self.whoami_orgs: set[str] = {settings.org}
+        self.whoami_fails = False
 
     # ── helpers ──────────────────────────────────────────────────────
     def _central(self) -> dict[str, bytes]:
@@ -114,7 +119,12 @@ class FakeHub:
         return bucket in self.buckets
 
     def whoami_for_token(self, token: str) -> str:
-        return "test-user"
+        return self.whoami_user
+
+    def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
+        if self.whoami_fails:
+            raise ValueError("whoami did not return a `name` field")
+        return self.whoami_user, set(self.whoami_orgs)
 
 
 class FakeJobRunner:

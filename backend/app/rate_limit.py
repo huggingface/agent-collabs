@@ -56,18 +56,22 @@ class TokenBucket:
             return False, retry_after
 
     def refund(self, key: str, n: int = 1) -> None:
-        """Return tokens consumed by a try_consume that was later rolled back."""
+        """Return n tokens to key's bucket, capped at capacity. Used when a
+        sibling bucket in a CompoundLimiter rejected after this one consumed."""
         with self._lock:
             b = self._buckets.get(key)
-            if b is not None:
-                b.tokens = min(b.capacity, b.tokens + n)
+            if b is None:
+                return
+            b.tokens = min(b.capacity, b.tokens + n)
 
 
 class CompoundLimiter:
     """Apply multiple TokenBuckets to the same key; the strictest wins.
 
-    A rejection refunds the buckets that had already allowed the request, so
-    hammering past one limit cannot also drain the others.
+    A rejection must not burn tokens in the buckets that did allow — otherwise
+    a client hammering past one limit would also drain its allowance under the
+    others and be throttled harder than configured — so on rejection the
+    already-consumed buckets are refunded.
     """
 
     def __init__(self, *buckets: TokenBucket):
@@ -82,7 +86,7 @@ class CompoundLimiter:
                 consumed.append(b)
             else:
                 worst_retry = max(worst_retry, retry)
-        if worst_retry > 0:
+        if worst_retry:
             for b in consumed:
                 b.refund(key, n)
             return False, worst_retry

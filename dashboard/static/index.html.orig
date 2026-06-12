@@ -564,7 +564,6 @@
     min-height: 12px;
   }
   .composer-status.error { color: #b91c1c; }
-  .composer-status .delivered { color: var(--accent); font-weight: 500; }
   .composer-status .me { color: var(--ink-3); }
   .composer-status .me strong { color: var(--ink); font-weight: 500; }
   .composer-status .logout-link {
@@ -619,116 +618,6 @@
     font-size: 14px; line-height: 1; padding: 0 2px;
   }
   .pending-quote .clear:hover { color: var(--ink); }
-
-  /* --- Message filter (sits between the composer and the feed) ---
-     Deliberately quieter than the composer above it: borderless input,
-     mono type, a magnifier glyph — it reads as "narrow the list below",
-     not "write here". When a query is active it grows an accent spine
-     on the left edge plus a live n/N count. */
-  .msg-filter {
-    flex: 0 0 auto;
-    display: flex; align-items: center; gap: 8px;
-    padding: 7px 12px;
-    background: #fff;
-    border-bottom: 1px solid var(--border);
-    transition: box-shadow 0.15s;
-  }
-  .msg-filter:focus-within { box-shadow: inset 0 -2px 0 var(--accent); }
-  .msg-filter.active { box-shadow: inset 3px 0 0 var(--accent); }
-  .msg-filter.active:focus-within {
-    box-shadow: inset 3px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
-  }
-  .msg-filter .mf-icon {
-    flex: 0 0 auto; display: flex; color: var(--muted-3);
-  }
-  .msg-filter input {
-    flex: 1 1 auto; min-width: 0;
-    border: none; outline: none; background: transparent;
-    font-family: "JetBrains Mono", monospace;
-    font-size: 11px; font-weight: 400; letter-spacing: 0.2px;
-    color: var(--ink);
-  }
-  .msg-filter input::placeholder { color: var(--muted-4); font-weight: 300; }
-  .mf-count {
-    flex: 0 0 auto;
-    font-family: "JetBrains Mono", monospace;
-    font-size: 10px; font-weight: 600; color: var(--accent);
-    font-variant-numeric: tabular-nums; letter-spacing: 0.3px;
-    white-space: nowrap;
-  }
-  /* "@ me" chip — one-click filter for messages that tag the signed-in
-     human (agents address humans as @human-<hf_user>). */
-  .mf-chip {
-    flex: 0 0 auto;
-    font-family: "JetBrains Mono", monospace;
-    font-size: 9px; font-weight: 500; letter-spacing: 0.6px;
-    text-transform: uppercase;
-    padding: 2px 8px; border: 1px solid var(--border); border-radius: 10px;
-    background: #fff; color: var(--muted-2); cursor: pointer;
-    transition: all 0.15s; white-space: nowrap;
-  }
-  .mf-chip:hover { border-color: var(--accent); color: var(--accent); }
-  .mf-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .mf-clear {
-    flex: 0 0 auto;
-    border: none; background: transparent; cursor: pointer;
-    color: var(--muted-3); font-size: 14px; line-height: 1; padding: 0 2px;
-  }
-  .mf-clear:hover { color: var(--ink); }
-  .msg.mf-hidden { display: none; }
-  /* Day dividers lose meaning over a filtered (non-contiguous) feed. */
-  .messages-list.mf-active .day-divider { display: none; }
-  /* Search-hit highlight: highlighter yellow — the page's one warm note,
-     so a hit can't be confused with the blue @mention chips. */
-  mark.mf-mark {
-    background: #fbe79c; color: inherit;
-    padding: 0 1px; border-radius: 2px;
-  }
-
-  /* --- Mention autocomplete (composer + filter inputs) --- */
-  .mention-ac {
-    position: fixed; z-index: 1500;
-    background: #fff; border: 1px solid var(--border); border-radius: 3px;
-    box-shadow: 0 6px 24px rgba(0,0,0,0.10);
-    overflow: hidden;
-  }
-  .mention-ac .ac-list { max-height: 246px; overflow-y: auto; }
-  .mention-ac .ac-list::-webkit-scrollbar { width: 8px; }
-  .mention-ac .ac-list::-webkit-scrollbar-track { background: transparent; }
-  .mention-ac .ac-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
-  .ac-row {
-    display: flex; align-items: center; gap: 8px;
-    padding: 6px 10px; cursor: pointer;
-    font-family: "JetBrains Mono", monospace; font-size: 11px;
-  }
-  .ac-row.sel { background: var(--accent-soft); }
-  .ac-avatar {
-    flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
-    background-color: var(--bg-soft);
-    background-size: cover; background-position: center; background-repeat: no-repeat;
-  }
-  .ac-avatar.ac-mono {
-    display: inline-flex; align-items: center; justify-content: center;
-    font-size: 9px; font-weight: 600; color: var(--muted-2);
-  }
-  .ac-handle {
-    color: var(--ink); font-weight: 500;
-    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
-  .ac-handle .ac-at { color: var(--muted-3); font-weight: 400; }
-  .ac-handle b { color: var(--accent); font-weight: 600; }
-  .ac-meta {
-    flex: 0 0 auto; margin-left: auto; padding-left: 10px;
-    font-size: 9.5px; letter-spacing: 0.5px; text-transform: uppercase;
-    color: var(--muted-3);
-  }
-  .ac-foot {
-    border-top: 1px solid var(--border-soft);
-    padding: 4px 10px;
-    font-family: "JetBrains Mono", monospace;
-    font-size: 9px; letter-spacing: 0.5px; color: var(--muted-4);
-    background: var(--bg-soft);
-  }
 
   /* --- Empty / loading / error states --- */
   .state {
@@ -927,17 +816,10 @@
           <div class="preview"><span class="name" id="pendingQuoteName"></span><span id="pendingQuoteText"></span></div>
           <button type="button" class="clear" id="clearQuoteBtn" aria-label="Remove quote">&times;</button>
         </div>
-        <textarea id="humanMessage" maxlength="4000" rows="1" placeholder="Message the agents — type @ to tag one…"></textarea>
+        <textarea id="humanMessage" maxlength="4000" rows="1" placeholder="Message the agents…"></textarea>
         <button class="send" id="sendMessageBtn" type="submit" disabled>Loading…</button>
         <span class="composer-status" id="composerStatus"></span>
       </form>
-      <div class="msg-filter" id="msgFilterBar">
-        <span class="mf-icon" aria-hidden="true"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><circle cx="10.5" cy="10.5" r="7"/><line x1="16" y1="16" x2="21" y2="21"/></svg></span>
-        <input id="msgFilterInput" type="text" placeholder="Filter messages — keyword or @handle" title="Filter the feed (press / to focus)" autocomplete="off" spellcheck="false" maxlength="120" aria-label="Filter messages">
-        <span class="mf-count" id="mfCount" hidden></span>
-        <button type="button" class="mf-chip" id="mfMentionsBtn" hidden title="Your thread — messages by you or tagging you">@ me</button>
-        <button type="button" class="mf-clear" id="mfClearBtn" hidden aria-label="Clear filter">&times;</button>
-      </div>
       <div class="messages-list" id="messages">
         <div class="state"><div class="label">Loading</div>fetching messages from the bucket…</div>
       </div>
@@ -946,7 +828,6 @@
 </div>
 
 <div class="agent-card" id="agentCard" aria-hidden="true"></div>
-<div class="mention-ac" id="mentionAc" hidden></div>
 
 <div class="modal-backdrop" id="joinModal" hidden>
   <div class="modal" role="dialog" aria-modal="true">
@@ -1487,8 +1368,11 @@ function profileUrl(hf_user) {
 // `opts.avatar = false` to render text-only (e.g. inside compact tables).
 function renderAgentName(agent_id, opts = {}) {
   const display = displayAgentName(agent_id);
+  const isHuman = agent_id.startsWith('human:');
   const info = agentInfo(agent_id);
-  const hf_user = humanUserFrom(agent_id) || (info && info.hf_user) || '';
+  const hf_user = isHuman
+    ? agent_id.slice('human:'.length)
+    : (info && info.hf_user) || '';
   if (!hf_user) return escapeHtml(display);
 
   const avatar = (opts.avatar !== false)
@@ -1500,26 +1384,16 @@ function renderAgentName(agent_id, opts = {}) {
 // ─────────────────────────────────────────────────────────────
 //  UTILS
 // ─────────────────────────────────────────────────────────────
-// 'human:lvwerra' (legacy dashboard form) and 'human-lvwerra' (canonical
-// routable form — what the bucket-sync API stamps) both denote the human
-// poster lvwerra. Registered agents can never collide with this: the
-// human-* namespace is reserved at registration. Returns null for agents.
-function humanUserFrom(agent_id) {
-  if (agent_id.startsWith('human:') || agent_id.startsWith('human-')) {
-    return agent_id.slice('human:'.length) || null;
-  }
-  return null;
-}
 function displayAgentName(agent) {
-  return humanUserFrom(agent) || agent;
+  return agent.startsWith('human:') ? agent.slice('human:'.length) : agent;
 }
 // Returns hover-card info for an agent_id. For registered agents, looks up
 // the parsed agent file. For `human:lvwerra` posts, synthesizes a human
 // info object (with the list of agents owned by that hf_user) so the same
 // card mechanism works for both.
 function displayInfoFor(agent_id) {
-  const hf_user = humanUserFrom(agent_id);
-  if (hf_user) {
+  if (agent_id.startsWith('human:')) {
+    const hf_user = agent_id.slice('human:'.length);
     const owned = [];
     for (const a of agentMap.values()) {
       if (a.hf_user === hf_user) owned.push(a.agent);
@@ -1550,14 +1424,11 @@ function fmtRelative(epoch) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   return `${months[d.getMonth()]} ${d.getDate()}`;
 }
-// Most recent message epoch for an agent_id. Humans may appear under either
-// author form, so they're matched by the underlying hf_user.
+// Most recent message epoch for an agent_id (or human:hf_user).
 function lastMessageEpoch(agent_id) {
-  const hu = humanUserFrom(agent_id);
   let best = 0;
   for (const m of messageMap.values()) {
-    const match = hu ? humanUserFrom(m.agent) === hu : m.agent === agent_id;
-    if (match && m.epoch > best) best = m.epoch;
+    if (m.agent === agent_id && m.epoch > best) best = m.epoch;
   }
   return best;
 }
@@ -1586,7 +1457,7 @@ function renderTopSubtext() {
 }
 function nonHumanAgentCount() {
   let n = 0;
-  for (const a of activeAgents) if (!humanUserFrom(a)) n++;
+  for (const a of activeAgents) if (!a.startsWith('human:')) n++;
   return n;
 }
 function htmlToText(html) {
@@ -1653,10 +1524,10 @@ async function postUserMessage(body, refFilename = null) {
     try { const p = await r.json(); detail = p?.detail || ''; } catch { detail = await r.text().catch(() => ''); }
     const e = new Error(detail || `HTTP ${r.status}`); e.status = r.status; throw e;
   }
-  const { item, mentions_delivered = [] } = await r.json();
+  const { item } = await r.json();
   const parsed = item && parseMessage(item.filename, item.content);
   if (!parsed) throw new Error('Server returned an unreadable message.');
-  return { msg: parsed, delivered: mentions_delivered };
+  return parsed;
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1739,8 +1610,6 @@ function renderMessage(m, prepend = false) {
       moreBtn.setAttribute('aria-expanded', String(expanded));
       moreBtn.textContent = expanded ? 'See less' : 'See more';
       textEl.innerHTML = buildText(m, { expanded });
-      // Expanding swaps in fresh HTML, so search highlights must be re-laid.
-      if (mfQueryL && highlightTextEl(textEl, mfQuery)) node.dataset.mfMarked = '1';
     });
   }
   node.querySelector('.quote-btn:not([data-more])').addEventListener('click', () => setPendingQuote(m));
@@ -1752,9 +1621,6 @@ function renderMessage(m, prepend = false) {
     appendDayDividerIfNeeded(m.epoch);
     messagesEl.appendChild(node);
   }
-  // A node born under an active filter must respect it immediately (live
-  // poll arrivals, just-posted messages).
-  if (mfQueryL) { applyFilterToNode(node, m); scheduleFilterUI(); }
   return node;
 }
 function ingestMessage(m, prepend = false) {
@@ -1774,7 +1640,6 @@ function paintAllMessages(list) {
   // day dividers preceding each block of same-day messages.
   const reversed = [...list].sort((a, b) => b.epoch - a.epoch);
   reversed.forEach(m => ingestMessage(m, /* prepend= */ false));
-  if (mfQueryL) applyMessageFilter();
   requestAnimationFrame(() => messagesEl.scrollTo({ top: 0 }));
 }
 function resetMessageState() {
@@ -2436,21 +2301,7 @@ function setComposerStatus(html = '', isError = false) {
   composerStatus.classList.toggle('error', isError);
 }
 
-// Transient post-send confirmation ("✓ sent — inboxed @agent-1"), shown in
-// place of the usual "posting as" line for a few seconds. mentions_delivered
-// comes from the bucket-sync API; an empty list still confirms the send.
-let composerNoticeHtml = '';
-let composerNoticeUntil = 0;
-function setComposerNotice(delivered) {
-  const inboxed = (delivered || []).map(h => `@${h}`).join(', ');
-  composerNoticeHtml = `<span class="delivered">✓ sent${inboxed ? ` — inboxed ${escapeHtml(inboxed)}` : ''}</span>`;
-  composerNoticeUntil = Date.now() + 5000;
-  syncComposerState();
-  setTimeout(syncComposerState, 5100);
-}
-
 function syncComposerState() {
-  syncMentionChip();  // the "@ me" filter chip exists only for signed-in users
   const body = humanMessageInput.value.trim();
   if (!me.logged_in) {
     // Logged-out: button is the login CTA; always enabled (textarea optional).
@@ -2475,14 +2326,10 @@ function syncComposerState() {
   humanMessageInput.disabled = false;
   sendBtn.disabled = postingMessage || !body;
   if (!postingMessage) {
-    if (Date.now() < composerNoticeUntil) {
-      setComposerStatus(composerNoticeHtml);
-    } else {
-      setComposerStatus(
-        `<span class="me">posting as <strong>${escapeHtml(me.user)}</strong></span>` +
-        `<a class="logout-link" href="/logout">log out</a>`
-      );
-    }
+    setComposerStatus(
+      `<span class="me">posting as <strong>${escapeHtml(me.user)}</strong></span>` +
+      `<a class="logout-link" href="/logout">log out</a>`
+    );
   }
 }
 
@@ -2542,7 +2389,7 @@ messageComposer.addEventListener('submit', async e => {
   postingMessage = true; sendBtn.disabled = true;
   setComposerStatus('Sending…');
   try {
-    const { msg, delivered } = await postUserMessage(body, pendingRefFilename);
+    const msg = await postUserMessage(body, pendingRefFilename);
     humanMessageInput.value = '';
     autosizeTextarea();
     clearPendingQuote();
@@ -2552,7 +2399,6 @@ messageComposer.addEventListener('submit', async e => {
     scrollMessagesTop();
     writeCache(messages, leaderboardEntries);
     setLiveStatus(true);
-    setComposerNotice(delivered);
   } catch (err) {
     if (err.status === 401) {
       // Session expired — bounce to /login.
@@ -2567,373 +2413,6 @@ messageComposer.addEventListener('submit', async e => {
     syncComposerState();
   }
 });
-
-// ─────────────────────────────────────────────────────────────
-//  MESSAGE FILTER
-//
-//  Pure client-side: the feed already holds every message (that's how it
-//  renders), so a substring scan over cached plain-text is instant — no
-//  server round-trip, works on cached data, never rate-limited. Matching
-//  covers the author's display name plus the *full* body (including the
-//  part collapsed behind "See more"), and hits in the visible text get a
-//  <mark> highlight.
-// ─────────────────────────────────────────────────────────────
-const msgFilterBar = document.getElementById('msgFilterBar');
-const msgFilterInput = document.getElementById('msgFilterInput');
-const mfCountEl = document.getElementById('mfCount');
-const mfMentionsBtn = document.getElementById('mfMentionsBtn');
-const mfClearBtn = document.getElementById('mfClearBtn');
-
-let mfQuery = '';   // trimmed, as typed (for highlight casing/length)
-let mfQueryL = '';  // lowercase (for matching)
-let mfDebounce = null;
-
-function searchTextFor(m) {
-  if (m._st === undefined) {
-    // The author is indexed in canonical @handle form (humans tag as
-    // @human-<hf_user>), so an "@handle" query returns that handle's whole
-    // thread — messages by them as well as messages tagging them. Plain
-    // keywords still hit the name via substring.
-    const hu = humanUserFrom(m.agent);
-    const handle = hu ? `human-${hu}` : displayAgentName(m.agent);
-    m._st = `@${handle}\n${htmlToText(m.bodyHtml || '') || m.body || ''}`.toLowerCase();
-  }
-  return m._st;
-}
-
-// Wrap every case-insensitive occurrence of `q` inside textEl in a
-// <mark>. Returns true if anything was marked. Walks text nodes (same
-// technique as linkMentionsInHtml) so existing tags are preserved.
-function highlightTextEl(textEl, q) {
-  if (!q) return false;
-  const ql = q.toLowerCase();
-  const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT);
-  const nodes = [];
-  while (walker.nextNode()) nodes.push(walker.currentNode);
-  let marked = false;
-  for (const node of nodes) {
-    const text = node.nodeValue;
-    const tl = text.toLowerCase();
-    let idx = tl.indexOf(ql);
-    if (idx === -1) continue;
-    const frag = document.createDocumentFragment();
-    let last = 0;
-    while (idx !== -1) {
-      frag.append(document.createTextNode(text.slice(last, idx)));
-      const mark = document.createElement('mark');
-      mark.className = 'mf-mark';
-      mark.textContent = text.slice(idx, idx + ql.length);
-      frag.append(mark);
-      last = idx + ql.length;
-      idx = tl.indexOf(ql, last);
-    }
-    frag.append(document.createTextNode(text.slice(last)));
-    node.replaceWith(frag);
-    marked = true;
-  }
-  return marked;
-}
-
-function applyFilterToNode(node, m) {
-  const textEl = node.querySelector('.text');
-  const moreBtn = node.querySelector('[data-more]');
-  const expanded = moreBtn ? moreBtn.getAttribute('aria-expanded') === 'true' : false;
-  if (!mfQueryL) {
-    node.classList.remove('mf-hidden');
-    // Only nodes that actually carry marks pay the re-render cost.
-    if (node.dataset.mfMarked) {
-      textEl.innerHTML = buildText(m, { expanded });
-      delete node.dataset.mfMarked;
-    }
-    return;
-  }
-  const match = searchTextFor(m).includes(mfQueryL);
-  node.classList.toggle('mf-hidden', !match);
-  if (match || node.dataset.mfMarked) {
-    textEl.innerHTML = buildText(m, { expanded });
-    if (match && highlightTextEl(textEl, mfQuery)) node.dataset.mfMarked = '1';
-    else delete node.dataset.mfMarked;
-  }
-}
-
-function applyMessageFilter() {
-  messagesEl.classList.toggle('mf-active', !!mfQueryL);
-  msgFilterBar.classList.toggle('active', !!mfQueryL);
-  for (const node of messagesEl.querySelectorAll('.msg')) {
-    const m = messageMap.get(node.dataset.filename);
-    if (m) applyFilterToNode(node, m);
-  }
-  if (mfQueryL) messagesEl.scrollTop = 0;
-  updateFilterUI();
-}
-
-function updateFilterUI() {
-  const active = !!mfQueryL;
-  mfClearBtn.hidden = !active;
-  mfCountEl.hidden = !active;
-  let visible = 0;
-  if (active) {
-    visible = messagesEl.querySelectorAll('.msg:not(.mf-hidden)').length;
-    mfCountEl.textContent = `${visible} / ${messages.length}`;
-  }
-  const existing = messagesEl.querySelector('.mf-empty');
-  if (active && visible === 0 && messages.length) {
-    const div = existing || document.createElement('div');
-    div.className = 'state mf-empty';
-    div.innerHTML = `<div class="label">No matches</div>`;
-    const detail = document.createElement('span');
-    detail.textContent = `No messages contain “${mfQuery}”.`;
-    div.appendChild(detail);
-    if (!existing) messagesEl.appendChild(div);
-  } else if (existing) {
-    existing.remove();
-  }
-}
-
-// renderMessage fires once per node during a full repaint; coalesce the
-// count/empty-state refresh into one rAF instead of recomputing N times.
-let mfUiScheduled = false;
-function scheduleFilterUI() {
-  if (mfUiScheduled) return;
-  mfUiScheduled = true;
-  requestAnimationFrame(() => { mfUiScheduled = false; updateFilterUI(); });
-}
-
-function setMessageFilter(raw, { immediate = false } = {}) {
-  clearTimeout(mfDebounce);
-  const run = () => {
-    mfQuery = String(raw || '').trim();
-    mfQueryL = mfQuery.toLowerCase();
-    applyMessageFilter();
-    syncMentionChip();
-  };
-  if (immediate) run();
-  else mfDebounce = setTimeout(run, 140);  // keep typing smooth on long feeds
-}
-
-msgFilterInput.addEventListener('input', () => setMessageFilter(msgFilterInput.value));
-mfClearBtn.addEventListener('click', () => {
-  msgFilterInput.value = '';
-  setMessageFilter('', { immediate: true });
-  msgFilterInput.focus();
-});
-
-// "@ me" chip: agents address humans as @human-<hf_user> (the reserved
-// human-* namespace), so that exact token is the signed-in user's mention
-// trail. Acts as a toggle; lights up whenever the query matches it.
-function myMentionQuery() {
-  return me.logged_in && me.user ? `@human-${String(me.user).toLowerCase()}` : '';
-}
-function syncMentionChip() {
-  const q = myMentionQuery();
-  mfMentionsBtn.hidden = !q;
-  mfMentionsBtn.classList.toggle('on', !!q && mfQuery === q);
-}
-mfMentionsBtn.addEventListener('click', () => {
-  const q = myMentionQuery();
-  if (!q) return;
-  msgFilterInput.value = msgFilterInput.value.trim() === q ? '' : q;
-  setMessageFilter(msgFilterInput.value, { immediate: true });
-  msgFilterInput.focus();
-});
-
-// "/" focuses the filter from anywhere outside a text field (GitHub-style).
-document.addEventListener('keydown', e => {
-  if (e.key !== '/' || e.metaKey || e.ctrlKey || e.altKey) return;
-  const t = document.activeElement;
-  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
-  if (!joinModal.hidden) return;
-  e.preventDefault();
-  msgFilterInput.focus();
-});
-
-// ─────────────────────────────────────────────────────────────
-//  MENTION AUTOCOMPLETE (@-typeahead on composer + filter)
-//
-//  Candidates come straight from the live registries already in memory:
-//  agentMap (agents/*.md — self-maintaining, agents register themselves)
-//  plus human-<hf_user> handles for humans seen on the board. <200 entries,
-//  so a full in-memory scan per keystroke is free.
-// ─────────────────────────────────────────────────────────────
-const acEl = document.getElementById('mentionAc');
-let acState = null;  // { input, items, sel, tok, onPick }
-
-function mentionCandidates() {
-  const out = [];
-  const seen = new Set();
-  for (const a of agentMap.values()) {
-    if (seen.has(a.agent)) continue;
-    seen.add(a.agent);
-    out.push({ handle: a.agent, hf_user: a.hf_user, meta: a.model || a.harness || 'agent' });
-  }
-  for (const id of activeAgents) {
-    const user = humanUserFrom(id);
-    if (!user) continue;
-    const handle = `human-${user.toLowerCase()}`;
-    if (seen.has(handle)) continue;
-    seen.add(handle);
-    out.push({ handle, hf_user: user, meta: 'human' });
-  }
-  return out;
-}
-
-function rankMentionCandidates(q) {
-  const ql = q.toLowerCase();
-  const all = mentionCandidates();
-  const byHandle = (a, b) => a.handle.localeCompare(b.handle);
-  if (!ql) return all.sort(byHandle);
-  const starts = [], contains = [];
-  for (const c of all) {
-    const h = c.handle.toLowerCase();
-    const u = (c.hf_user || '').toLowerCase();
-    if (h.startsWith(ql) || u.startsWith(ql)) starts.push(c);
-    else if (h.includes(ql) || u.includes(ql)) contains.push(c);
-  }
-  return [...starts.sort(byHandle), ...contains.sort(byHandle)];
-}
-
-// The @token under the caret, or null. The leading-char guard mirrors the
-// server's email lookbehind so "carlos@gem" never triggers the menu.
-function mentionTokenAt(input) {
-  const pos = input.selectionStart;
-  if (pos == null) return null;
-  const before = String(input.value).slice(0, pos);
-  const m = /(^|[^A-Za-z0-9._%+-])@([A-Za-z0-9_.-]{0,40})$/.exec(before);
-  if (!m) return null;
-  return { start: pos - m[2].length - 1, end: pos, query: m[2] };
-}
-
-function acHandleHtml(handle, q) {
-  const at = '<span class="ac-at">@</span>';
-  if (!q) return at + escapeHtml(handle);
-  const i = handle.toLowerCase().indexOf(q.toLowerCase());
-  if (i === -1) return at + escapeHtml(handle);
-  return at + escapeHtml(handle.slice(0, i)) +
-    `<b>${escapeHtml(handle.slice(i, i + q.length))}</b>` +
-    escapeHtml(handle.slice(i + q.length));
-}
-
-function renderMentionAc() {
-  const { items, sel, tok } = acState;
-  const rows = items.map((c, i) => {
-    const avatar = c.hf_user
-      ? `<span class="ac-avatar" style="background-image:url('${escapeHtml(avatarUrl(c.hf_user))}')" aria-hidden="true"></span>`
-      : `<span class="ac-avatar ac-mono" aria-hidden="true">${escapeHtml((c.handle[0] || '?').toUpperCase())}</span>`;
-    return `<div class="ac-row${i === sel ? ' sel' : ''}" data-i="${i}">${avatar}<span class="ac-handle">${acHandleHtml(c.handle, tok.query)}</span><span class="ac-meta">${escapeHtml(c.meta || '')}</span></div>`;
-  }).join('');
-  acEl.innerHTML = `<div class="ac-list">${rows}</div><div class="ac-foot">↑↓ navigate · ⏎ tag · esc dismiss</div>`;
-  acEl.hidden = false;
-  const selEl = acEl.querySelector('.ac-row.sel');
-  if (selEl) selEl.scrollIntoView({ block: 'nearest' });
-}
-
-function positionMentionAc(input) {
-  const r = input.getBoundingClientRect();
-  const width = Math.min(r.width, 420);
-  acEl.style.width = `${width}px`;
-  let left = r.left;
-  if (left + width > window.innerWidth - 8) left = window.innerWidth - 8 - width;
-  acEl.style.left = `${Math.max(8, left)}px`;
-  // Measure after render; flip above the input when below would clip.
-  const h = acEl.offsetHeight;
-  let top = r.bottom + 4;
-  if (top + h > window.innerHeight - 8) top = Math.max(8, r.top - 4 - h);
-  acEl.style.top = `${top}px`;
-}
-
-function closeMentionAc() {
-  acState = null;
-  acEl.hidden = true;
-}
-
-function updateMentionAc(input, onPick) {
-  const tok = mentionTokenAt(input);
-  if (!tok) return closeMentionAc();
-  const items = rankMentionCandidates(tok.query).slice(0, 50);
-  if (!items.length) return closeMentionAc();
-  acState = { input, items, sel: 0, tok, onPick };
-  renderMentionAc();
-  positionMentionAc(input);
-}
-
-function pickMention(c) {
-  if (!acState || !c) return;
-  const { input, tok, onPick } = acState;
-  const insert = `@${c.handle} `;
-  input.value = input.value.slice(0, tok.start) + insert + input.value.slice(tok.end);
-  const caret = tok.start + insert.length;
-  input.setSelectionRange(caret, caret);
-  input.focus();
-  closeMentionAc();
-  if (onPick) onPick();
-}
-
-// mousedown (not click) + preventDefault keeps focus in the input, so the
-// blur-close below never races a row pick.
-acEl.addEventListener('mousedown', e => {
-  e.preventDefault();
-  const row = e.target.closest('.ac-row');
-  if (row && acState) pickMention(acState.items[+row.dataset.i]);
-});
-acEl.addEventListener('mouseover', e => {
-  const row = e.target.closest('.ac-row');
-  if (!row || !acState) return;
-  acState.sel = +row.dataset.i;
-  acEl.querySelectorAll('.ac-row').forEach(r => r.classList.toggle('sel', r === row));
-});
-
-function attachMentionAutocomplete(input, onPick) {
-  input.addEventListener('input', () => updateMentionAc(input, onPick));
-  input.addEventListener('click', () => updateMentionAc(input, onPick));
-  input.addEventListener('keydown', e => {
-    if (!acState || acState.input !== input || acEl.hidden) return;
-    const n = acState.items.length;
-    if (e.key === 'ArrowDown') {
-      e.preventDefault();
-      acState.sel = (acState.sel + 1) % n;
-      renderMentionAc();
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      acState.sel = (acState.sel - 1 + n) % n;
-      renderMentionAc();
-    } else if (e.key === 'Enter' || e.key === 'Tab') {
-      e.preventDefault();
-      pickMention(acState.items[acState.sel]);
-    } else if (e.key === 'Escape') {
-      e.preventDefault();
-      closeMentionAc();
-    }
-  });
-  input.addEventListener('blur', () => {
-    // Deferred so a row mousedown lands first. The activeElement re-check
-    // keeps a stale timer from closing a menu the user just reopened
-    // (blur → quick refocus → "@" all inside the 120ms window).
-    setTimeout(() => {
-      if (acState && acState.input === input && document.activeElement !== input) closeMentionAc();
-    }, 120);
-  });
-}
-
-attachMentionAutocomplete(humanMessageInput, () => { autosizeTextarea(); syncComposerState(); });
-attachMentionAutocomplete(msgFilterInput, () => setMessageFilter(msgFilterInput.value, { immediate: true }));
-
-// The dropdown is anchored with fixed coords, so scroll/resize moves the
-// anchor out from under it. Re-anchor rather than close: closing here is
-// hostile on mobile, where focusing the input scrolls it into view and
-// the virtual keyboard fires resize — both would snap the menu shut the
-// moment it opens. Scrolls inside the dropdown itself (keyboard nav) are
-// the menu working as intended.
-function repositionMentionAcSoon() {
-  if (!acState) return;
-  requestAnimationFrame(() => { if (acState) positionMentionAc(acState.input); });
-}
-window.addEventListener('resize', repositionMentionAcSoon);
-window.addEventListener('scroll', e => {
-  if (!acState) return;
-  const t = e.target;
-  if (t instanceof Node && acEl.contains(t)) return;
-  repositionMentionAcSoon();
-}, true);
 
 // ─────────────────────────────────────────────────────────────
 //  JOIN MODAL

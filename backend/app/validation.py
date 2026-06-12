@@ -16,7 +16,7 @@ BLOCKED_TARGETS = {
     "LEADERBOARD.md",
     "shared_resources/README.md",
 }
-BLOCKED_PREFIXES = ("audit/", "inbox/")
+BLOCKED_PREFIXES = ("audit/", "inbox/", "taskforces/")
 
 # The human-* namespace identifies human participants in inbox routing
 # (§16.4): @human-<name> delivers without a registration check, so no agent
@@ -106,15 +106,48 @@ def resolve_source(settings: Settings, source: str) -> tuple[SourceURI, str]:
     return parsed, agent_id
 
 
-def validate_shared_dest_path(dest_path: str, agent_id: str) -> None:
-    validate_path_components(dest_path)
+def _validate_agent_marker(dest_path: str, agent_id: str, what: str) -> None:
+    """Attribution-by-construction: the `_{agent_id}` marker must appear in the
+    dest path, checked against the *resolved* source identity — so only the
+    same agent can overwrite their own file."""
     leaf = dest_path.rsplit("/", 1)[-1]
     marker = f"_{agent_id}"
     leaf_no_ext = leaf.rsplit(".", 1)[0]
     if marker not in leaf_no_ext and marker not in dest_path:
         raise InvalidPath(
-            f"shared_resources dest path must include '_{agent_id}' in the leaf component",
+            f"{what} dest path must include '_{agent_id}' in the leaf component",
             hint=f"e.g. 'tokenizers/{agent_id}_bpe.json' or 'plots/curve_{agent_id}.png'",
         )
+
+
+def validate_shared_dest_path(dest_path: str, agent_id: str) -> None:
+    validate_path_components(dest_path)
+    _validate_agent_marker(dest_path, agent_id, "shared_resources")
     full_target = f"shared_resources/{dest_path}"
     check_dest_not_blocked(full_target)
+
+
+def validate_taskforce_name(name: str) -> None:
+    if name != name.lower():
+        raise InvalidPath(
+            f"taskforce name must be lowercase: {name!r}",
+            hint=f"use '{name.lower()}' instead",
+        )
+    if not SLUG_RE.match(name):
+        raise InvalidPath(
+            f"invalid taskforce name: {name!r}",
+            hint="kebab-case, 1-40 chars: [a-z0-9] with internal hyphens",
+        )
+
+
+def validate_taskforce_dest_path(dest_path: str, agent_id: str) -> None:
+    """Named taskforce files (§18.3): shared-resources marker rule, plus the
+    README leaf is reserved for the create/update endpoint."""
+    validate_path_components(dest_path)
+    leaf = dest_path.rsplit("/", 1)[-1]
+    if leaf.lower() == "readme.md":
+        raise InvalidPath(
+            "README.md is reserved: the taskforce README is managed via POST /v1/taskforces",
+            hint="pick a different filename for your content",
+        )
+    _validate_agent_marker(dest_path, agent_id, "taskforce")

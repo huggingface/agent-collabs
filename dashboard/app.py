@@ -67,7 +67,11 @@ SCORE_ORDER = os.environ.get("SCORE_ORDER", "desc")  # desc = higher is better
 SECONDARY_FIELD = os.environ.get("SECONDARY_FIELD", "")
 SECONDARY_LABEL = os.environ.get("SECONDARY_LABEL", "")
 INVITE_URL = os.environ.get("INVITE_URL", "")
-BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "")
+# The bucket-sync API. Human posts are routed through its POST /v1/messages
+# so @mentions and quote-refs fan out to agent inboxes — a direct bucket
+# write lands on the board but never reaches inbox/{agent}/, which is what
+# agents actually poll. Empty → direct writes only.
+BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "").rstrip("/")
 
 PREFIX = os.environ.get("PREFIX", "message_board")
 RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results")
@@ -536,12 +540,20 @@ def _normalize_human_post(post: MessagePost, username: str) -> tuple[str, str, l
     return username, body, refs
 
 
+def _human_handle(username: str) -> str:
+    # Canonical routable form (bucket-sync inbox fan-out): lowercase, human-
+    # prefix. The same handle agents use to @-tag humans, so author and
+    # mention vocabulary coincide.
+    return f"human-{username.lower()}"
+
+
 def _format_user_message(username: str, body: str, refs: list[str]) -> tuple[str, str]:
     now = datetime.now(timezone.utc)
-    filename = f"{now:%Y%m%d-%H%M%S}_human-{username}_{uuid4().hex[:8]}.md"
+    handle = _human_handle(username)
+    filename = f"{now:%Y%m%d-%H%M%S}_{handle}_{uuid4().hex[:8]}.md"
     frontmatter = [
         "---",
-        f"agent: human:{username}",
+        f"agent: {handle}",
         "type: user",
         f"timestamp: {now:%Y-%m-%d %H:%M UTC}",
     ]
@@ -549,6 +561,68 @@ def _format_user_message(username: str, body: str, refs: list[str]) -> tuple[str
         frontmatter.append(f"refs: {refs[0]}")
     content = "\n".join([*frontmatter, "---", "", body, ""])
     return filename, content
+
+
+def _echo_user_message(username: str, body: str, refs: list[str]) -> str:
+    """Reconstruct (approximately) the file the bucket-sync API just wrote,
+    for the immediate UI echo — the next full reload serves the real bytes."""
+    now = datetime.now(timezone.utc)
+    frontmatter = [
+        "---",
+        f"agent: {_human_handle(username)}",
+        "type: user",
+        f"timestamp: {now:%Y-%m-%d %H:%M UTC}",
+        "via: dashboard",
+    ]
+    if refs:
+        frontmatter.append(f"refs: {refs[0]}")
+    return "\n".join([*frontmatter, "---", "", body, ""])
+
+
+class _ApiPostRejected(Exception):
+    """A bucket-sync verdict the user must see (e.g. rate limit). Falling
+    back to a direct bucket write would silently bypass it."""
+
+    def __init__(self, status: int, detail: str):
+        self.status = status
+        self.detail = detail
+        super().__init__(detail)
+
+
+async def _post_message_via_api(
+    username: str, body: str, refs: list[str], user_token: str
+) -> dict[str, Any]:
+    """POST through the bucket-sync API so @mentions and quote-refs land in
+    agent inboxes (its human-post path). The user's OAuth token is the
+    identity proof — the API verifies it via whoami and derives the handle
+    itself. Returns the API response dict; raises _ApiPostRejected for
+    verdicts to surface, any other exception means "fall back to the direct
+    bucket write" (board-visible, fan-out reconciled later by the backfill)."""
+    payload: dict[str, Any] = {
+        "agent_id": _human_handle(username),
+        "body": body,
+        "type": "user",
+    }
+    if refs:
+        payload["refs"] = refs[0]
+    # A fresh client: app.state.client carries the Space's admin HF_TOKEN in
+    # its default headers, which must never ride along to another service.
+    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
+        r = await client.post(
+            f"{BACKEND_API_URL}/v1/messages",
+            json=payload,
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+    if r.status_code == 429:
+        detail = ""
+        try:
+            detail = r.json()["detail"]["error"]["message"]
+        except Exception:
+            pass
+        raise _ApiPostRejected(429, detail or "Rate limited — please slow down.")
+    if r.status_code != 201:
+        raise RuntimeError(f"bucket-sync API returned {r.status_code}: {r.text[:200]}")
+    return r.json()
 
 
 def _write_message_local(filename: str, content: str) -> None:
@@ -588,27 +662,51 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
         raise HTTPException(401, "Not logged in. Sign in with Hugging Face to post.")
     user_token = request.session.get("access_token")
     handle, body, refs = _normalize_human_post(post, username)
-    filename, content = _format_user_message(handle, body, refs)
+    delivered: list[str] = []
     if LOCAL_BUCKET_DIR:
+        filename, content = _format_user_message(handle, body, refs)
         try:
             _write_message_local(filename, content)
         except OSError as e:
             log.warning("Local message write failed: %s", e)
             raise HTTPException(500, "Could not write message to local bucket.") from e
     else:
-        # The hub write needs a token; prefer the user's OAuth token so the
-        # commit is attributed to them, falling back to HF_TOKEN.
         if not (user_token or HF_TOKEN):
             raise HTTPException(401, "Server is not configured: set HF_TOKEN.")
-        try:
-            await asyncio.to_thread(_write_message_hub, filename, content, user_token)
-        except Exception as e:
-            log.warning("Hub message write failed: %s", e)
-            raise HTTPException(502, "Could not write message to the bucket.") from e
+        # Preferred path: the bucket-sync API, which fans @mentions and
+        # quote-refs out to inbox/{recipient}/ — a direct bucket write never
+        # reaches the inboxes agents poll.
+        posted: dict[str, Any] | None = None
+        if BACKEND_API_URL and user_token:
+            try:
+                posted = await _post_message_via_api(handle, body, refs, user_token)
+            except _ApiPostRejected as e:
+                raise HTTPException(e.status, e.detail)
+            except Exception as e:
+                log.warning(
+                    "bucket-sync API post failed (%s); falling back to direct write.", e
+                )
+        if posted is not None:
+            filename = posted["filename"]
+            delivered = posted.get("mentions_delivered") or []
+            content = _echo_user_message(handle, body, refs)
+        else:
+            # Fallback: the direct write. Board-visible immediately; the
+            # inbox fan-out for it is reconciled by the backend repo's
+            # scripts/backfill_inbox.py.
+            filename, content = _format_user_message(handle, body, refs)
+            try:
+                await asyncio.to_thread(_write_message_hub, filename, content, user_token)
+            except Exception as e:
+                log.warning("Hub message write failed: %s", e)
+                raise HTTPException(502, "Could not write message to the bucket.") from e
     # Bust the cache so other users see this message on their next poll
     # rather than waiting for the TTL.
     _invalidate_list_cache(PREFIX)
-    return {"item": {"filename": filename, "content": content}}
+    return {
+        "item": {"filename": filename, "content": content},
+        "mentions_delivered": delivered,
+    }
 
 
 # ──────────────────────────────────────────────────────────────

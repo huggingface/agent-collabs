@@ -44,6 +44,9 @@ def make_env():
         )
         hub = FakeHub(settings)
         read_model = ReadModel(hub, settings)
+        # One LRU per env, like production's process-wide singleton — a
+        # per-request instance would make cross-request dedup untestable.
+        dedup = PromotionLRU(10_000)
         verification = VerificationStatusStore(
             hub, runs_prefix=settings.verification_runs_prefix
         )
@@ -64,7 +67,7 @@ def make_env():
                 get_hub: lambda: hub,
                 get_read_model: lambda: read_model,
                 get_audit: lambda: AuditLogger(hub),
-                get_dedup: lambda: PromotionLRU(10_000),
+                get_dedup: lambda: dedup,
                 get_verification_status: lambda: verification,
                 get_verifier: lambda: verifier,
                 get_bucket_write_limiter: generous,

@@ -1,26 +1,25 @@
 """Durable 24h job quota.
 
-Unlike the in-memory ``TokenBucket`` (which resets on Space restart), this
-counts launches against a JSONL ledger persisted in the private audit bucket,
-so the per-agent / per-hf_user caps survive restarts and redeploys.
+Unlike the in-memory ``SlidingWindowLimiter`` (which resets on Space restart),
+this counts launches against a JSONL ledger persisted in the private audit
+bucket, so the per-agent / per-hf_user caps survive restarts and redeploys.
 
 One ledger line per successful launch::
 
     {"ts": "<iso8601 UTC>", "agent_id": "...", "hf_user": "..."}
 
-``check`` counts launches in the trailing window; ``record`` appends a line and
-rewrites the file pruned to the window, so it cannot grow without bound. A
-process-wide lock serialises the read-modify-write (the Space runs a single
-uvicorn worker; sync endpoints share a threadpool).
-
-``serialized()`` is a coarser lock the launch route holds across its whole
-check → launch → record sequence, so two concurrent requests cannot both pass
-``check`` before either records. Launches are rare and take seconds; briefly
-serialising them is the simple correct fix for that race.
+``launch_within_quota`` is the single entry point: under one process-wide lock
+it counts launches in the trailing window, runs the launch if both caps have
+room, then appends a line and rewrites the file pruned to the window (so it
+cannot grow without bound). Holding the lock across the whole check -> launch
+-> record sequence means two concurrent requests cannot both pass the check
+against the same pre-launch ledger state and overshoot the caps; launches are
+rare, so serialising them is fine. (The Space runs a single uvicorn worker;
+sync endpoints share a threadpool.)
 
 Fail-closed: if the ledger cannot be READ (a storage error, as opposed to a
-genuinely missing file), ``check`` raises ``QuotaBackendUnavailable`` so we
-never spend org credits on a quota we could not verify. ``record`` failures are
+genuinely missing file), we raise ``QuotaBackendUnavailable`` so we never
+spend org credits on a quota we could not verify. Ledger-write failures are
 non-fatal — the launch already happened, so we log and report best-effort.
 """
 from __future__ import annotations
@@ -28,10 +27,10 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from contextlib import contextmanager
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterator
+from typing import TypeVar
 
 from app.errors import QuotaBackendUnavailable
 from app.hub import HubClient
@@ -39,6 +38,8 @@ from app.naming import stamp_iso, utc_now
 
 
 log = logging.getLogger(__name__)
+
+T = TypeVar("T")
 
 
 @dataclass(frozen=True)
@@ -69,14 +70,6 @@ class DurableJobQuota:
         self._user_limit = user_limit
         self._window = timedelta(seconds=window_seconds)
         self._lock = threading.Lock()
-        self._launch_lock = threading.Lock()
-
-    @contextmanager
-    def serialized(self) -> Iterator[None]:
-        """Hold across check → launch → record so concurrent launches cannot
-        both pass ``check`` on the same pre-launch ledger state."""
-        with self._launch_lock:
-            yield
 
     def _load_within_window(self, now: datetime) -> list[dict]:
         """Ledger records within the trailing window. Raises (fail-closed) on a
@@ -114,44 +107,53 @@ class DurableJobQuota:
         ages_out = times[0] + self._window
         return max(1, int((ages_out - now).total_seconds()) + 1)
 
-    def check(self, agent_id: str, hf_user: str) -> QuotaDecision:
-        now = utc_now()
-        with self._lock:
-            recs = self._load_within_window(now)
-        agent_ok = self._count(recs, "agent_id", agent_id) < self._agent_limit
-        user_ok = self._count(recs, "hf_user", hf_user) < self._user_limit
-        return QuotaDecision(
-            agent_ok=agent_ok,
-            agent_retry=0 if agent_ok else self._retry_after(recs, "agent_id", agent_id, now),
-            user_ok=user_ok,
-            user_retry=0 if user_ok else self._retry_after(recs, "hf_user", hf_user, now),
-        )
+    def launch_within_quota(
+        self,
+        agent_id: str,
+        hf_user: str,
+        launch: Callable[[], T],
+    ) -> tuple[QuotaDecision, T | None, int, int]:
+        """Check both caps, run ``launch``, and record it — under one lock.
 
-    def record(self, agent_id: str, hf_user: str) -> tuple[int, int]:
-        """Commit one launch. Returns (agent_remaining, user_remaining).
+        Returns ``(decision, result, agent_remaining, user_remaining)``.
+        ``result`` is whatever ``launch()`` returned, or None when the decision
+        rejects (``launch`` is never called). If ``launch`` raises, nothing is
+        recorded and the exception propagates.
 
-        Non-fatal on storage failure: the launch already happened, so we don't
-        clobber the ledger (read failed) or fail the response — we log and
-        return the full limits as a best-effort, unknown remaining.
+        Raises ``QuotaBackendUnavailable`` if the ledger cannot be read
+        (fail-closed, before launching). A failed ledger WRITE is non-fatal:
+        the launch already happened, so we log and return the full limits as a
+        best-effort, unknown remaining.
         """
         now = utc_now()
         with self._lock:
-            try:
-                recs = self._load_within_window(now)
-            except QuotaBackendUnavailable:
-                log.warning(
-                    "job-quota ledger unreadable at record time; launch %s/%s not persisted",
-                    agent_id, hf_user,
+            recs = self._load_within_window(now)
+            agent_used = self._count(recs, "agent_id", agent_id)
+            user_used = self._count(recs, "hf_user", hf_user)
+            agent_ok = agent_used < self._agent_limit
+            user_ok = user_used < self._user_limit
+            decision = QuotaDecision(
+                agent_ok=agent_ok,
+                agent_retry=0 if agent_ok else self._retry_after(recs, "agent_id", agent_id, now),
+                user_ok=user_ok,
+                user_retry=0 if user_ok else self._retry_after(recs, "hf_user", hf_user, now),
+            )
+            if not (agent_ok and user_ok):
+                return (
+                    decision,
+                    None,
+                    max(0, self._agent_limit - agent_used),
+                    max(0, self._user_limit - user_used),
                 )
-                return self._agent_limit, self._user_limit
-            recs.append({"ts": stamp_iso(now), "agent_id": agent_id, "hf_user": hf_user})
+            result = launch()
+            recs.append({"ts": stamp_iso(utc_now()), "agent_id": agent_id, "hf_user": hf_user})
             body = "".join(json.dumps(r, separators=(",", ":")) + "\n" for r in recs)
             try:
                 self._hub.write_bytes_audit(self._path, body.encode("utf-8"))
             except Exception as exc:
                 log.warning("job-quota ledger write failed; launch %s/%s not persisted: %s",
                             agent_id, hf_user, exc)
-                return self._agent_limit, self._user_limit
-        agent_remaining = max(0, self._agent_limit - self._count(recs, "agent_id", agent_id))
-        user_remaining = max(0, self._user_limit - self._count(recs, "hf_user", hf_user))
-        return agent_remaining, user_remaining
+                return decision, result, self._agent_limit, self._user_limit
+        agent_remaining = max(0, self._agent_limit - agent_used - 1)
+        user_remaining = max(0, self._user_limit - user_used - 1)
+        return decision, result, agent_remaining, user_remaining

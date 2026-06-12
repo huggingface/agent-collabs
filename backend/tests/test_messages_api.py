@@ -99,3 +99,99 @@ def test_post_then_immediate_list_sees_the_message(env):
     filename = r.json()["filename"]
     data = env.client.get("/v1/messages").json()
     assert filename in data["items"]
+
+
+# ── human-authored posts (§5.4a) — the dashboard path ──────────────
+
+
+def _post_human(env, agent_id="human-test-user", body="hi", token="user-token", **extra):
+    return env.client.post(
+        "/v1/messages",
+        json={"agent_id": agent_id, "body": body, **extra},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+
+def test_post_human_requires_bearer_token(env):
+    r = env.client.post(
+        "/v1/messages", json={"agent_id": "human-test-user", "body": "hi"}
+    )
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_post_human_bad_token_is_401(env):
+    env.hub.whoami_fails = True
+    r = _post_human(env)
+    assert r.status_code == 401
+    assert r.json()["error"]["code"] == "UNAUTHORIZED"
+
+
+def test_post_human_rejects_non_org_member(env):
+    env.hub.whoami_orgs = set()
+    r = _post_human(env)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "IDENTITY_MISMATCH"
+
+
+def test_post_human_rejects_forged_handle(env):
+    r = _post_human(env, agent_id="human-somebody-else")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "IDENTITY_MISMATCH"
+
+
+def test_post_human_handle_matches_lowercased_hf_user(env):
+    env.hub.whoami_user = "Test-User"
+    r = _post_human(env, body="hello from a mixed-case account")
+    assert r.status_code == 201
+
+
+def test_post_human_delivers_mentions_and_refs(env):
+    seed_agent(env.hub, "agent-1")
+    seed_message(env.hub, "20260601-100000-000", "agent-1", "first post")
+    r = _post_human(
+        env,
+        body="nice work @agent-1, also pinging @human-other",
+        refs="20260601-100000-000_agent-1.md",
+    )
+    assert r.status_code == 201
+    data = r.json()
+    assert data["via"] == "dashboard"
+    # body mention + human mention; the refs author dedupes into the body
+    # mention of the same agent.
+    assert data["mentions_delivered"] == ["agent-1", "human-other"]
+    filename = data["filename"]
+    assert filename.endswith("_human-test-user.md")
+
+    board = env.hub.read_central_text(f"message_board/{filename}")
+    assert "agent: human-test-user" in board
+    assert "type: user" in board
+    assert "via: dashboard" in board
+
+    # byte-identical fan-out copies, immediately visible through the API
+    assert env.hub.read_central_text(f"inbox/agent-1/{filename}") == board
+    assert env.hub.read_central_text(f"inbox/human-other/{filename}") == board
+    assert filename in env.client.get("/v1/messages").json()["items"]
+    assert filename in env.client.get("/v1/inbox/agent-1").json()["items"]
+
+
+def test_post_human_never_self_delivers(env):
+    r = _post_human(env, body="note to self @human-test-user and @nobody-registered")
+    assert r.status_code == 201
+    assert r.json()["mentions_delivered"] == []
+
+
+def test_post_human_defaults_to_type_user(env):
+    r = _post_human(env, body="plain message")
+    assert r.status_code == 201
+    fm = env.client.get(f"/v1/messages/{r.json()['filename']}").json()["frontmatter"]
+    assert fm["type"] == "user"
+    assert fm["agent"] == "human-test-user"
+
+
+def test_bare_human_id_still_unroutable(env):
+    # "human" (no suffix) is not a human handle; it falls through to the
+    # registration gate and can never be registered, so it 404s.
+    r = env.client.post("/v1/messages", json={"agent_id": "human", "body": "hi"})
+    assert r.status_code == 404
+    assert r.json()["error"]["code"] == "NOT_REGISTERED"

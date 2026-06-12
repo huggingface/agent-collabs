@@ -69,6 +69,29 @@ class AgentIdTaken(APIError):
         )
 
 
+class TaskforceNotFound(APIError):
+    def __init__(self, name: str):
+        super().__init__(
+            404,
+            "TASKFORCE_NOT_FOUND",
+            f"no such taskforce: '{name}'",
+            "create it via POST /v1/taskforces with the name and README content; "
+            "GET /v1/taskforces lists what exists",
+        )
+
+
+class TaskforceExists(APIError):
+    def __init__(self, name: str, creator: str | None):
+        super().__init__(
+            409,
+            "TASKFORCE_EXISTS",
+            f"taskforce '{name}' already exists"
+            + (f" (creator: {creator})" if creator else ""),
+            "only the creator can update the README; contribute via "
+            f"POST /v1/taskforces/{name}/files, or pick another name",
+        )
+
+
 class AlreadyPromoted(APIError):
     def __init__(self, existing_filename: str):
         super().__init__(

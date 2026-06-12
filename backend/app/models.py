@@ -60,7 +60,7 @@ class MessagePostRequest(BaseModel):
 
 class MessageResponse(BaseModel):
     filename: str
-    via: Literal["bucket", "raw"]
+    via: Literal["bucket", "raw", "dashboard"]
     path: str
     # Inbox fan-out: the recipients that actually got a copy — registered
     # @-mentions, human-* handles, and `refs` authors, post-cap.
@@ -118,6 +118,102 @@ class SyncResponse(BaseModel):
 class SharedResourceSyncRequest(BaseModel):
     source: str
     dest_path: str
+
+
+# ───────────────────────── Taskforces ─────────────────────────
+
+
+class TaskforceCreateRequest(BaseModel):
+    name: str
+    source: str | None = None
+    agent_id: str | None = None
+    body: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_variant(self) -> "TaskforceCreateRequest":
+        has_source = self.source is not None
+        has_raw = self.body is not None or self.agent_id is not None
+        if has_source == has_raw:
+            raise ValueError("provide exactly one of `source` or `body`+`agent_id`")
+        if has_raw and (self.agent_id is None or self.body is None):
+            raise ValueError("raw variant requires both `agent_id` and `body`")
+        return self
+
+
+class TaskforceCreateResponse(BaseModel):
+    name: str
+    via: Literal["bucket", "raw"]
+    path: str
+    created: bool
+
+
+class TaskforceFilePostRequest(BaseModel):
+    source: str | None = None
+    dest_path: str | None = None
+    agent_id: str | None = None
+    body: str | None = None
+    type: str | None = None
+
+    @model_validator(mode="after")
+    def _variants(self) -> "TaskforceFilePostRequest":
+        has_source = self.source is not None
+        has_raw = self.body is not None or self.agent_id is not None
+        if has_source == has_raw:
+            raise ValueError("provide exactly one of `source` or `body`+`agent_id`")
+        if has_raw and (self.agent_id is None or self.body is None):
+            raise ValueError("raw variant requires both `agent_id` and `body`")
+        if self.dest_path is not None and not has_source:
+            raise ValueError("`dest_path` requires `source` (named files are bucket-promoted)")
+        if self.dest_path is not None and self.type is not None:
+            raise ValueError("`type` applies to notes; named files are copied byte-identical")
+        return self
+
+
+class TaskforceFileResponse(BaseModel):
+    kind: Literal["note", "file"]
+    filename: str  # stamped leaf for notes; dest_path for named files
+    via: Literal["bucket", "raw"]
+    path: str  # full central-bucket path
+
+
+class TaskforceFileInfo(BaseModel):
+    path: str  # relative to taskforces/{name}/
+    size: int
+
+
+class TaskforceFileListing(BaseModel):
+    count: int
+    items: list[TaskforceFileInfo]
+
+
+class TaskforceSummary(BaseModel):
+    name: str
+    creator: str | None = None
+    created: str | None = None
+    readme_excerpt: str = ""
+    contributors: list[str] = Field(default_factory=list)
+    file_count: int
+    note_count: int
+    # Compact stamp of the newest note; None for a taskforce with no notes yet.
+    last_activity: str | None = None
+
+
+class TaskforceListing(BaseModel):
+    count: int
+    matched: int
+    items: list[TaskforceSummary]
+
+
+class TaskforceDetail(BaseModel):
+    name: str
+    creator: str | None = None
+    created: str | None = None
+    updated: str | None = None
+    readme: MessageRecord
+    contributors: list[str]
+    file_count: int
+    note_count: int
+    recent_notes: list[MessageRecord]
 
 
 # ───────────────────────── Benchmark jobs ─────────────────────────
@@ -220,8 +316,14 @@ class DigestInbox(BaseModel):
     items: list[MessageRecord]
 
 
+class DigestTaskforces(BaseModel):
+    count: int
+    newest: list[str]
+
+
 class DigestResponse(BaseModel):
     agents: DigestAgents
+    taskforces: DigestTaskforces
     leaderboard: list[LeaderboardRow]
     recent_messages: list[MessageRecord]
     recent_results: list[ResultRecord]

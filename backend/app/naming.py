@@ -77,6 +77,22 @@ def inbox_path(agent_id: str, filename: str) -> str:
     return f"inbox/{agent_id}/{filename}"
 
 
+def taskforce_dir(name: str) -> str:
+    return f"taskforces/{name}"
+
+
+def taskforce_readme_path(name: str) -> str:
+    return f"taskforces/{name}/README.md"
+
+
+def taskforce_note_path(name: str, agent_id: str, dt: datetime) -> str:
+    return f"taskforces/{name}/{stamp_filename(agent_id, dt)}"
+
+
+def taskforce_file_path(name: str, dest_path: str) -> str:
+    return f"taskforces/{name}/{dest_path}"
+
+
 def agent_from_filename(filename: str) -> str | None:
     # message/result filenames: {YYYYMMDD-HHmmss-mmm}_{agent_id}.md
     # agent filenames: {agent_id}.md

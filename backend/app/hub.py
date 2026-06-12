@@ -71,6 +71,19 @@ class HubClient:
             return info["name"]
         raise ValueError("whoami did not return a `name` field")
 
+    def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
+        """Resolve a caller token to (hf_user, org names). Used by the human
+        message path (§5.4a), where org membership gates the write."""
+        info = whoami(token=token)
+        if not isinstance(info, dict) or not info.get("name"):
+            raise ValueError("whoami did not return a `name` field")
+        orgs = {
+            o["name"]
+            for o in (info.get("orgs") or [])
+            if isinstance(o, dict) and o.get("name")
+        }
+        return info["name"], orgs
+
     # ───────────────────────── Reads ─────────────────────────
 
     def read_bytes(self, uri: SourceURI | str) -> bytes:
