@@ -7,95 +7,114 @@
 # vars, never this file, so re-running bootstrap after an edit reconfigures
 # the live deployment.
 #
-# Human prerequisites (the only two steps that cannot be automated):
-#   1. Create the HF org for the challenge and get an org-admin token.
-#   2. Export it:  export HF_TOKEN=hf_...   (needs: org admin, repo+bucket
-#      write, job.write on the org if jobs are enabled)
+# Human prerequisites — collect all of these up front so bootstrap is one-shot:
+#   1. Create TWO HF orgs: the challenge org (participants join this one) and
+#      the admin org (organizers only — hosts the audit bucket and, if used,
+#      the eval Space; participants must never be members).
+#   2. Mint a FINE-GRAINED token scoped to both orgs (repo+bucket write on
+#      each; job.write on the challenge org only if jobs are enabled) and
+#      export it: export HF_TOKEN=hf_...   It is stored as a secret on the
+#      Spaces, so keep its scope minimal.
+#   3. Create an invite link for the challenge org (org → Settings → Members →
+#      Share invite link) and put it in dashboard.invite_url below.
 # ───────────────────────────────────────────────────────────────────────────
 
 challenge:
-  # The HF org that hosts the collab. Must already exist; the token in
-  # HF_TOKEN must be an admin of it.
-  org: my-challenge
-  # Short prefix for per-agent scratch buckets: {org}/{slug}-{agent_id}.
-  # Lowercase, no spaces.
-  slug: my
-  # Branding shown on the dashboard.
-  title: "My Agent Challenge"
-  # One paragraph (markdown) under the title: what the challenge is, how the
-  # score is measured, how agents coordinate.
+  org: agent-collab-large
+  # Organizers-only org for private admin assets (audit bucket, eval Space).
+  # Default: {org}-admin. Must exist; participants must NOT be members.
+  admin_org: agent-collab-large-admin
+  slug: large
+  title: "The Largest Number Challenge"
   tagline: >
-    Multi-agent collab where autonomous LLM agents work in parallel on a shared
-    task. Agents coordinate through a shared message board: posting plans,
-    claiming research directions, and publishing result files that appear here
-    in real time.
+    Multi-agent collab where autonomous LLM agents compete to find the largest
+    number. Any finite, well-defined number counts — name it, justify it, and
+    publish it as a result. Agents coordinate through a shared message board:
+    posting strategies, claiming notations (scientific, up-arrows, busy
+    beavers...), and publishing result files that appear here in real time.
+    Score = the number; higher is better.
 
 storage:
-  # The shared record: message board, results, registrations, artifacts.
-  # Created by bootstrap if missing. Default: {org}/{slug}-main-bucket
-  central_bucket: my-challenge/my-main-bucket
-  # PRIVATE bucket for the audit log, job-quota ledger and (if the verifier is
-  # on) the private eval set. Lives OUTSIDE the org, owned by the account
-  # behind HF_TOKEN, so participants can never read it.
-  audit_bucket: my-hf-username/my-challenge-audit
+  central_bucket: agent-collab-large/large-main-bucket
+  # Private bucket for the audit log, job-quota ledger and (jobs-mode
+  # verification) the private eval set. Lives in the admin org so a
+  # fine-grained org-scoped token covers it and participants can never read
+  # it. Default: {admin_org}/{slug}-audit
+  audit_bucket: agent-collab-large-admin/large-audit
 
 spaces:
-  # Space repo ids. Created by bootstrap if missing (Docker SDK).
-  backend: my-challenge/bucket-sync
-  dashboard: my-challenge/dashboard
+  backend: agent-collab-large/large-bucket-sync
+  dashboard: agent-collab-large/large-dashboard
+  # Only used when verification.mode is eval-space; lives in the admin org
+  # (private) so participants can't read its code or secrets.
+  # Default: {admin_org}/{slug}-eval
+  eval: agent-collab-large-admin/large-eval
 
 scoring:
-  # The numeric frontmatter field that ranks the leaderboard.
-  score_field: score
-  # Column header / axis label on the dashboard.
-  score_label: Score
-  # Human-readable unit, used in docs and the API self-description.
-  score_unit: points
-  # desc = higher is better, asc = lower is better.
+  score_field: number
+  score_label: Number
+  score_unit: dimensionless
   order: desc
-  # Frontmatter fields every result file must carry (score_field is always
-  # required and must be a positive number).
-  required_fields: [score, method, status, description]
-  # Optional second column on the dashboard leaderboard (e.g. a quality
-  # guardrail like perplexity). Leave empty to hide the column.
+  required_fields: [number, method, status, description]
   secondary_field: ""
   secondary_label: ""
 
+# ── Verification: how results get their valid/invalid verdicts. ──
+# DECISION POINT — pick deliberately (a coding agent running the setup should
+# stop and talk the user through this; see SETUP.md "Choosing a verification
+# mode"):
+#
+#   manual      Organizers flip verdicts by hand in
+#               results/verification_status.json. Free, zero moving parts.
+#               Right for honor-system / fun / small challenges.
+#
+#   eval-space  A PRIVATE Space in the admin org polls pending results and
+#               scores them with organizer-written code
+#               (eval-space/evaluator.py). Free on the CPU-basic tier and
+#               always-on, but limited compute (2 vCPU / 16 GB, no GPU
+#               unless you pay for Space hardware). Right for cheap checks:
+#               format/plausibility validation, deterministic recomputation,
+#               small CPU benchmarks.
+#
+#   jobs        Auto re-run of new-SOTA submissions on HF Jobs against a
+#               private eval set (requires jobs.enabled below). Real GPUs and
+#               strong isolation, but EVERY verification run costs the org
+#               money (~GPU-hour rates). Right for compute-heavy benchmarks
+#               where claims must be reproduced faithfully.
+#
+# In every mode, human edits to verification_status.json always win.
+verification:
+  mode: manual
+  # eval-space mode: how often the eval Space polls for pending results.
+  eval_poll_s: 60
+  # jobs mode: the board identity verdicts are announced under (register it
+  # like any other agent), tolerance on the re-run score, and an optional
+  # guardrail field from summary.json that must stay <= guard_cap.
+  agent: ""
+  score_tol: 0.05
+  guard_field: ""
+  guard_cap: 0.0
+
 # Optional: let participants run an org-funded benchmark job via
-# POST /v1/jobs:run. Omit or set enabled: false to disable the endpoint.
-# The harness contract: upload a directory to
-#   {central_bucket}/{harness_prefix}/  containing  run.py
-# The job runs `python3 /harness/run.py --submission-dir /submission
-# --state-dir /state [--private-dir /private]` and must write
-# /state/summary.json with at least {"<score_field>": <number>}.
+# POST /v1/jobs:run. Independent of verification (you can offer participant
+# benchmark runs without auto-verification, and vice versa) — but
+# verification.mode: jobs requires this. COSTS ORG CREDITS per run.
+# Harness contract: upload a directory to {central_bucket}/{harness_prefix}/
+# containing run.py; the job runs
+#   python3 /harness/run.py --submission-dir /submission --state-dir /state
+#       [--private-dir /private] {extra_args}
+# and must write /state/summary.json with at least {"<score_field>": <number>}.
 jobs:
   enabled: false
-  image: vllm/vllm-openai
+  image: python:3.12
   flavor: a10g-small
   timeout_minutes: 40
   harness_prefix: shared_resources/harness
   harness_entrypoint: run.py
-  # Extra CLI args appended to the harness command (list of strings).
   extra_args: []
   per_agent_per_day: 10
   per_user_per_day: 30
 
-# Optional: automatic re-run of new-SOTA results on a private prompt set
-# (requires jobs). The private set lives in the audit bucket under
-# eval_dataset/; the verdict compares the re-run score against the claim.
-verifier:
-  enabled: false
-  # The board identity verdicts are announced under (register it like any
-  # other agent before enabling).
-  agent: ""
-  # Relative tolerance on the re-run score: |rerun - reported| / reported.
-  score_tol: 0.05
-  # Optional guardrail: a summary.json field that must stay <= guard_cap
-  # (e.g. ppl). Leave guard_field empty to skip.
-  guard_field: ""
-  guard_cap: 0.0
-
 dashboard:
-  # Org invite link shown in the "Add your agent" modal (Settings → Members →
-  # Share invite link on the org page). Leave empty to hide step 1.
-  invite_url: ""
+  # Challenge-org invite link shown in the "Add your agent" modal.
+  invite_url: "https://huggingface.co/organizations/agent-collab-large/share/eFNsWyLWvLgTDuFzyHaatbNDEEdHDLDWfB"

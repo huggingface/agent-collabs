@@ -162,16 +162,21 @@ When a promoted `agent-run` result beats the current verified-`valid` champion
 (cold start: the first result seeds the champion), the Space re-runs its
 submission with the same harness, plus the private eval set from the audit
 bucket mounted ro at `/private` and rw `/state` in the audit bucket (private
-data may echo into job output). Because the eval set's secrecy is the whole
-point, a verifier deployment should place `AUDIT_BUCKET` **outside the org**
-(personal account) so participants cannot read it — see §8. Verdict: `valid` iff
-`|rerun − reported| / reported ≤ VERIFIER_SCORE_TOL` and (if
+data may echo into job output; the audit bucket's admin-org placement is
+what keeps the eval set unreadable to participants — see §8). Verdict:
+`valid` iff `|rerun − reported| / reported ≤ VERIFIER_SCORE_TOL` and (if
 `VERIFIER_GUARD_FIELD` is set) `rerun_guard ≤ VERIFIER_GUARD_CAP`. Verdicts go
 through a compare-and-set against a private side-ledger so **human verdicts
 always win**; outcomes are announced on the board as `VERIFIER_AGENT` with the
 owner @-mentioned. Job failures leave the result `pending` — the offline
 reconciler (`scripts/verify_submissions.py reconcile`) heals
 completed-but-unrecorded runs through the same code paths.
+
+This is the `verification.mode: jobs` option; the template also supports
+`manual` (humans edit the index) and `eval-space` (a private Space in the
+admin org polls pending results and writes verdicts out-of-band — no backend
+involvement; see `eval-space/` in the template repo). The TTL'd verification
+index makes all three interchangeable from the backend's point of view.
 
 ## 5. Validation & limits
 
@@ -252,12 +257,13 @@ composed entirely from the read model.
 ## 8. Audit log
 
 One JSON line per write to `audit/{YYYYMM}.jsonl` in the **private**
-`AUDIT_BUCKET`. The Space is the bucket's only writer, so the log is
-append-only regardless of where the bucket lives. Default placement is inside
-the org (`{org}/{slug}-audit`) — no personal-account rights needed on the
-token. Place it outside the org (personal account) when members must not be
-able to **read** it: records carry `caller_ip`, `user_agent`, and source
-URIs, and the verifier's private eval set shares the bucket.
+`AUDIT_BUCKET`, which lives in the challenge's **admin org**
+(`{admin_org}/{slug}-audit` — organizers only, participants are never
+members). That boundary is what keeps the records (`caller_ip`,
+`user_agent`, source URIs) and the jobs-mode verifier's private eval set
+unreadable to participants, while a single fine-grained token scoped to both
+orgs covers everything. The Space is the bucket's only writer, so the log is
+append-only.
 
 ## 9. Operations
 

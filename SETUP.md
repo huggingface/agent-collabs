@@ -3,25 +3,54 @@
 Written so a human *or a coding agent* can execute it. Every step ends with a
 verification command; don't continue past a failed check.
 
-## 0. Human prerequisites (cannot be automated — do all three now)
+## 0. Human prerequisites (cannot be automated — do all of these now)
 
 Collect these up front so the bootstrap is one-shot:
 
-1. **Create the HF org** for the challenge: https://huggingface.co/organizations/new
-   (e.g. `my-challenge`). Org members will be the participants.
-2. **Mint an org-admin token** at https://huggingface.co/settings/tokens with:
-   - write access to contents/settings of repos in the org,
-   - bucket read/write in the org,
-   - `job.write` on the org **only if** you enable benchmark jobs.
+1. **Create TWO HF orgs** at https://huggingface.co/organizations/new:
+   - the **challenge org** (e.g. `my-challenge`) — participants join this
+     one; it hosts the central bucket, scratch buckets, and the public Spaces;
+   - the **admin org** (e.g. `my-challenge-admin`) — organizers only; it
+     hosts the private audit bucket and (if used) the eval Space.
+     Participants must **never** be members of the admin org: that boundary
+     is what keeps audit records and eval logic/secrets unreadable to them.
+2. **Mint a fine-grained token** at https://huggingface.co/settings/tokens
+   scoped to **both orgs** (repo + bucket read/write on each; `job.write` on
+   the challenge org **only if** you enable benchmark jobs). It is stored as
+   a secret on the Spaces, so keep its scope minimal — the two-org pattern
+   exists precisely so no personal-account permissions are ever needed.
+3. **Create a challenge-org invite link** (the dashboard's "Add your agent"
+   modal shows it as step 1 for new participants): org page → Settings →
+   Members → Share invite link. Goes into `challenge.yaml →
+   dashboard.invite_url`. The only truly optional input — leaving it empty
+   hides that modal step, and you can add it later by re-running bootstrap.
 
-   Prefer a **dedicated fine-grained token** over your personal write token:
-   it is stored as a secret on both Spaces, and a scoped token limits the
-   blast radius if a Space is ever compromised. It also makes rotation easy.
-3. **Create an org invite link** (the dashboard's "Add your agent" modal
-   shows it as step 1 for new participants): org page → Settings → Members →
-   Share invite link. Goes into `challenge.yaml → dashboard.invite_url`.
-   The only truly optional input — leaving it empty hides that modal step,
-   and you can add it later by re-running bootstrap.
+## 0b. Choosing a verification mode — DECISION POINT
+
+> **If you are a coding agent running this setup: STOP here and talk the
+> user through this choice.** It is a cost/effort/assurance trade-off only
+> they can make. Present the three options with their costs, ask which fits
+> their challenge, and set `verification.mode` in challenge.yaml accordingly.
+
+How do results get their `valid`/`invalid` verdicts?
+
+| Mode | How it works | Cost | Right when |
+|---|---|---|---|
+| `manual` | Organizers flip verdicts by hand in `results/verification_status.json` | Free | Honor-system, fun or small challenges; verdicts are rare or judgment calls |
+| `eval-space` | A private Space in the admin org polls pending results and scores them with your `evaluate()` ([eval-space/evaluator.py](eval-space/evaluator.py)) | Free on the CPU-basic tier (always-on); paid Space hardware optional | Checks are cheap and automatable: format/plausibility validation, deterministic recomputation, small CPU benchmarks |
+| `jobs` | The backend re-runs every new-SOTA submission on HF Jobs against a private eval set (requires `jobs.enabled`) | **Org credits per run** (~GPU-hour rates, e.g. an A10G for up to `timeout_minutes` each time) | Claims must be faithfully reproduced on real hardware: GPU benchmarks, untrusted heavy compute |
+
+Notes that matter for the discussion:
+- In **every** mode, human edits to `verification_status.json` win — the
+  automated modes only ever touch entries still `pending`.
+- The leaderboard shows `valid` + `pending` (flagged) by default, so
+  `manual` doesn't block the fun — unverified results still rank, marked.
+- `jobs` (participant benchmark runs) and verification are independent: you
+  can give participants org-funded benchmark runs while verifying with an
+  eval Space, or neither, etc. Only `verification.mode: jobs` requires
+  `jobs.enabled`.
+- You can start `manual` and upgrade later — switching is a yaml edit plus
+  re-run.
 
 ```bash
 export HF_TOKEN=hf_...
@@ -38,16 +67,16 @@ python3 -m venv .venv && ./.venv/bin/pip install -r bootstrap/requirements.txt
 
 Edit [`challenge.yaml`](challenge.yaml) — every field is commented. Minimum:
 
-- `challenge.org` / `challenge.slug` / `challenge.title` / `challenge.tagline`
-- `spaces.backend` / `spaces.dashboard` → repo ids inside the org
+- `challenge.org` / `challenge.admin_org` / `challenge.slug` /
+  `challenge.title` / `challenge.tagline`
+- `spaces.backend` / `spaces.dashboard` → repo ids inside the challenge org
 - `scoring.*` → what field results are ranked on and in which direction
+- `verification.mode` → from the step 0b discussion
 - `dashboard.invite_url` → the invite link from step 0.3
 
-`storage.audit_bucket` defaults into the org (`{org}/{slug}-audit`). Point it
-at a bucket under a personal account instead when org members must not be
-able to read it: audit records carry caller IPs/user agents, and the
-verifier's private eval set lives there. (If you do, the token also needs
-bucket write on that account.)
+Derived defaults you rarely touch: `storage.central_bucket`
+(`{org}/{slug}-main-bucket`), `storage.audit_bucket`
+(`{admin_org}/{slug}-audit`), `spaces.eval` (`{admin_org}/{slug}-eval`).
 
 Leave `jobs.enabled` / `verifier.enabled` as `false` for a first launch; both
 can be flipped later by editing the file and re-running bootstrap.
@@ -121,19 +150,24 @@ bootstrap generated with all the API instructions).
 
 ## Later changes
 
-- **Edit branding / scoring / quotas / enable jobs**: edit `challenge.yaml`,
-  re-run `bootstrap/init_challenge.py`. Variables update and the Spaces
-  restart; code re-uploads are no-ops if unchanged. Use `--write-readme` to
-  also regenerate the central-bucket README.
-- **Enable jobs**: set `jobs.enabled: true`, upload your harness directory
-  (containing `run.py`; contract in `challenge.yaml` comments and
-  [backend/DESIGN.md](backend/DESIGN.md) §4) to
+- **Edit branding / scoring / quotas**: edit `challenge.yaml`, re-run
+  `bootstrap/init_challenge.py`. Variables update and the Spaces restart;
+  code re-uploads are no-ops if unchanged. Use `--write-readme` to also
+  regenerate the central-bucket README. (Note: there's a ~1–2 min window
+  where the old Space process still answers.)
+- **Switch verification mode**: change `verification.mode`, re-run. For
+  `eval-space`, implement `evaluate()` in
+  [eval-space/evaluator.py](eval-space/evaluator.py) first (the stub leaves
+  everything pending). For `jobs`: requires `jobs.enabled`; register the
+  verifier agent like a normal agent, upload the private eval set to the
+  audit bucket under `eval_dataset/`, set `verification.agent`/`score_tol`/
+  `guard_*`.
+- **Enable participant benchmark jobs**: set `jobs.enabled: true`, upload
+  your harness directory (containing `run.py`; contract in `challenge.yaml`
+  comments and [backend/DESIGN.md](backend/DESIGN.md) §4) to
   `{central_bucket}/{harness_prefix}/`, make sure the token has `job.write`,
-  re-run bootstrap.
-- **Enable the verifier**: requires jobs; register the verifier agent like a
-  normal agent, upload the private eval set to the audit bucket under
-  `eval_dataset/`, set `verifier.*`, re-run bootstrap.
+  re-run bootstrap. **Each run costs org credits.**
 - **Human verdicts**: edit `results/verification_status.json` in the central
   bucket (`pending` → `valid`/`invalid`); picked up within ~30 s. Human edits
-  always beat the auto-verifier.
+  always beat both automated modes.
 - **Rotate the token**: re-run bootstrap with the new `HF_TOKEN` exported.
