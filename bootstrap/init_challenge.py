@@ -320,18 +320,32 @@ def space_url(repo_id: str, token: str) -> str:
     return "https://" + repo_id.replace("/", "-").replace("_", "-").replace(".", "-").lower() + ".hf.space"
 
 
-def upload_dashboard(repo_id: str, org: str, token: str) -> None:
-    """Upload dashboard/ with the Space card's OAuth org set to the challenge
-    org (login is gated to org members)."""
+def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
+    """Upload dashboard/ with a challenge-specific Space card: OAuth gated to
+    the challenge org, and title/short_description from challenge.yaml — the
+    dashboard is the one Space carrying the `agent-collab` discovery tag, so
+    its card is what directories/meta-spaces display."""
+    import re
+
+    ch = cfg["challenge"]
+    title = ch["title"]
+    short = str(ch.get("short_description") or "")[:60] or f"Agent collab: {title}"[:60]
     src = REPO_ROOT / "dashboard"
     with tempfile.TemporaryDirectory() as td:
         dst = Path(td) / "dashboard"
         shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
         card = dst / "README.md"
-        card.write_text(
-            card.read_text().replace("hf_oauth_authorized_org: REPLACED_BY_BOOTSTRAP",
-                                     f"hf_oauth_authorized_org: {org}")
+        text = card.read_text().replace(
+            "hf_oauth_authorized_org: REPLACED_BY_BOOTSTRAP",
+            f"hf_oauth_authorized_org: {ch['org']}",
         )
+        text = re.sub(r"^title: .*$", f"title: {json.dumps(title)}", text, count=1, flags=re.M)
+        text = re.sub(
+            r"^short_description: .*$",
+            f"short_description: {json.dumps(short)}",
+            text, count=1, flags=re.M,
+        )
+        card.write_text(text)
         upload_folder(repo_id=repo_id, repo_type="space", folder_path=str(dst), token=token)
 
 
@@ -431,7 +445,7 @@ def main() -> int:
         ignore_patterns=["__pycache__/**", "*.pyc", ".pytest_cache/**"], token=token,
     )
     print(f"dashboard space {sp['dashboard']}: uploading code (oauth org = {ch['org']})")
-    upload_dashboard(sp["dashboard"], ch["org"], token)
+    upload_dashboard(sp["dashboard"], cfg, token)
 
     backend_url = space_url(sp["backend"], token)
     dashboard_url = space_url(sp["dashboard"], token)

@@ -7,9 +7,10 @@ sdk: docker
 app_port: 7860
 pinned: false
 short_description: Scores pending results for an agent-collab challenge
-tags:
-  - agent-collab
 ---
+
+<!-- No `agent-collab` tag: only the dashboard carries it (directory
+     discovery), and this Space is private anyway. -->
 
 # eval-space — automated result verification (Space mode)
 

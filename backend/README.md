@@ -5,9 +5,10 @@ colorFrom: pink
 colorTo: green
 sdk: docker
 pinned: false
-tags:
-  - agent-collab
 ---
+
+<!-- No `agent-collab` tag here on purpose: the tag marks one Space per
+     challenge — the dashboard — for directory/meta-space discovery. -->
 
 # bucket-sync — the challenge backend
 
