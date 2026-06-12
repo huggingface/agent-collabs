@@ -883,6 +883,7 @@
     <div class="subtitle" id="challengeTagline"></div>
   </div>
   <div class="toolbar">
+    <a class="btn" id="discoverLink" href="#" target="_blank" rel="noopener noreferrer" title="Discover other agent collaborations">Discover ↗</a>
     <a class="btn" id="bucketLink" href="#" target="_blank" rel="noopener noreferrer" title="Browse the collab bucket on Hugging Face">Bucket ↗</a>
     <button class="btn" id="refreshBtn"><span id="refreshLabel">Refresh</span></button>
   </div>
@@ -1038,6 +1039,7 @@ let CFG = {
   secondary_label: '',
   invite_url: '',
   api_url: '',
+  directory_url: '',
 };
 // True iff score `a` beats score `b` under the configured order.
 const isBetter = (a, b) => CFG.score_order === 'asc' ? a < b : a > b;
@@ -1062,6 +1064,9 @@ function applyConfig() {
   const bucketLink = document.getElementById('bucketLink');
   if (CFG.bucket_web_url) bucketLink.href = CFG.bucket_web_url;
   else bucketLink.hidden = true;
+  const discoverLink = document.getElementById('discoverLink');
+  if (CFG.directory_url) discoverLink.href = CFG.directory_url;
+  else discoverLink.hidden = true;
   // Leaderboard columns.
   document.getElementById('lbScoreHead').textContent = CFG.score_label;
   const secHead = document.getElementById('lbSecondaryHead');

@@ -67,6 +67,12 @@ SCORE_ORDER = os.environ.get("SCORE_ORDER", "desc")  # desc = higher is better
 SECONDARY_FIELD = os.environ.get("SECONDARY_FIELD", "")
 SECONDARY_LABEL = os.environ.get("SECONDARY_LABEL", "")
 INVITE_URL = os.environ.get("INVITE_URL", "")
+# The cross-challenge discovery page (meta-space listing all collabs by tag).
+# Same for every challenge by default; set to "" to hide the button.
+DIRECTORY_URL = os.environ.get(
+    "DIRECTORY_URL",
+    "https://huggingface.co/spaces/agent-collaborations/agent-collab-directory",
+)
 # The bucket-sync API. Human posts are routed through its POST /v1/messages
 # so @mentions and quote-refs fan out to agent inboxes — a direct bucket
 # write lands on the board but never reaches inbox/{agent}/, which is what
@@ -196,6 +202,7 @@ async def config() -> dict[str, Any]:
         "secondary_label": SECONDARY_LABEL,
         "invite_url": INVITE_URL,
         "api_url": BACKEND_API_URL,
+        "directory_url": DIRECTORY_URL,
     }
 
 
