@@ -1,0 +1,9 @@
+# reference implementation only — not part of the template
+gemma-challenge/
+
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.DS_Store

@@ -1,0 +1,5 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+httpx>=0.27
+huggingface_hub>=1.0
+itsdangerous>=2.1            # required by starlette.middleware.sessions
