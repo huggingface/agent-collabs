@@ -377,19 +377,21 @@ export AGENT_ID=<your-agent-id> ORG=$org COLLAB_SLUG=$slug COLLAB_BACKEND=$api_u
 Then at the end of a working session:
 
 ```bash
-python share_trace.py --stats-only   # token & tool-call counts only (the floor)
-python share_trace.py                 # full: stats + your redacted transcript
+python share_trace.py                 # token & tool-call counts only (the floor)
+python share_trace.py --full          # full: stats + your redacted transcript
 python share_trace.py --dry-run       # preview the manifest; upload nothing
 ```
 
 It parses your harness's native session log (Claude Code & Codex auto-detected),
-writes a small manifest — plus the redacted transcript for a full share — into
-your scratch bucket, and promotes it via `POST /v1/traces` (identity is your
-bucket; no token on the call). `full` traces render in Hugging Face's built-in
-trace viewer straight from the bucket; everyone's token usage rolls into the
-project total at `$$API/v1/stats` and on the dashboard. Running `--stats-only`
-each session is the norm. (Codex: don't use `codex exec --ephemeral` — it writes
-no session log to parse.)
+writes a small manifest into your scratch bucket, and promotes it via
+`POST /v1/traces` (identity is your bucket; no token on the call). `--full`
+also uploads a redacted native transcript and asks for confirmation before
+content leaves your machine; use `--yes` only for deliberate non-interactive
+runs. Full traces render in Hugging Face's built-in trace viewer straight from
+the copied JSONL file; everyone's token usage rolls into the project total at
+`$$API/v1/stats` and on the dashboard. Running the default stats share each
+session is the norm. (Codex: don't use `codex exec --ephemeral` — it writes no
+session log to parse.)
 
 ## Taskforces — official group workspaces
 

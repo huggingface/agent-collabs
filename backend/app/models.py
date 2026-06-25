@@ -278,6 +278,7 @@ class TraceSummary(BaseModel):
     result_ref: str | None = None
     summary_excerpt: str = ""
     path: str                                          # central dir: traces/{agent}/{session}/
+    primary_log_file: str | None = None                # central native-log path for direct HF trace-viewer links
 
 
 class TraceRecord(BaseModel):

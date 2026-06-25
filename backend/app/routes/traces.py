@@ -52,6 +52,31 @@ from app.validation import resolve_source, validate_agent_id, validate_path_comp
 router = APIRouter()
 
 
+def _source_session(path: str) -> str:
+    parts = path.rstrip("/").split("/")
+    if len(parts) != 2 or parts[0] != TRACES_FOLDER:
+        raise InvalidPath(
+            "source must point at your traces/<session>/ bundle dir",
+            hint="write traces/<session>/manifest.md to your bucket, then pass that dir",
+        )
+    session = parts[1]
+    validate_path_components(session)
+    return session
+
+
+def _primary_log_files(read_model: ReadModel) -> dict[tuple[str, str], str]:
+    out: dict[tuple[str, str], str] = {}
+    for e in sorted(read_model.listing(TRACES_FOLDER), key=lambda x: x.rel_path):
+        parts = e.rel_path.split("/")
+        if (
+            len(parts) >= 4
+            and parts[0] == TRACES_FOLDER
+            and parts[-1] != "manifest.md"
+        ):
+            out.setdefault((parts[1], parts[2]), e.rel_path)
+    return out
+
+
 @router.post("/v1/traces", response_model=TracePostResponse, status_code=201)
 def post_trace(
     req: TracePostRequest,
@@ -63,11 +88,7 @@ def post_trace(
     read_model: ReadModel = Depends(get_read_model),
 ) -> TracePostResponse:
     parsed, agent_id = resolve_source(settings, req.source)
-    if not parsed.path:
-        raise InvalidPath(
-            "source must point at your traces/<session>/ bundle dir",
-            hint="write traces/<session>/manifest.md to your bucket, then pass that dir",
-        )
+    source_session = _source_session(parsed.path)
     require_registered(read_model, hub, agent_id)
 
     allowed, retry = bucket_limiter.try_consume(parsed.bucket)
@@ -85,6 +106,13 @@ def post_trace(
     validate_trace_manifest(client_fm)
     session_id = str(client_fm["session_id"])
     validate_path_components(session_id)
+    if "/" in session_id.rstrip("/"):
+        raise InvalidPath("trace session_id must be a single path component")
+    if session_id != source_session:
+        raise InvalidPath(
+            "trace manifest session_id must match the source directory",
+            hint=f"manifest has {session_id!r}; source path has {source_session!r}",
+        )
 
     now = utc_now()
     comp = completeness(client_fm)
@@ -121,6 +149,9 @@ def post_trace(
             if not dest_path.endswith("/manifest.md"):
                 files_copied += 1
                 bytes_copied += size
+                read_model.write_through(
+                    dest_path, {}, "", size, folder=TRACES_FOLDER
+                )
 
     hub.write_text_central(manifest_dest, content)
     read_model.write_through(
@@ -195,6 +226,7 @@ def list_traces_route(
         after=after,
         before=before,
         expand_cap=settings.expand_max_limit,
+        primary_log_files=_primary_log_files(read_model),
     )
     return TraceListing(count=count, matched=matched, items=items, next=nxt)
 

@@ -3114,9 +3114,10 @@ function renderStatsTile(stats) {
 
 function renderTracesList(items) {
   tracesBodyEl.innerHTML = items.map(it => {
-    const full = it.share === 'full' && CFG.bucket_web_url;
+    const traceFile = it.primary_log_file || '';
+    const full = it.share === 'full' && CFG.bucket_web_url && traceFile;
     const link = full
-      ? `<a class="lb-link" href="${escapeHtml(CFG.bucket_web_url + '/' + it.path)}" target="_blank" rel="noopener noreferrer" title="Open the native session log in Hugging Face's trace viewer">view ↗</a>`
+      ? `<a class="lb-link" href="${escapeHtml(CFG.bucket_web_url + '/' + traceFile)}" target="_blank" rel="noopener noreferrer" title="Open the native session log in Hugging Face's trace viewer">view ↗</a>`
       : '<span class="muted2">stats</span>';
     return `<tr>
       <td>${renderAgentName(it.agent)}</td>

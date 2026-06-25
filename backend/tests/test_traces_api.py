@@ -117,6 +117,20 @@ def test_negative_token_rejected(env):
     assert r.status_code == 400
 
 
+def test_fractional_token_rejected(env):
+    bad = _manifest(usage={"total_tokens": 12.7})
+    src = _write_bundle(env, manifest=bad)
+    r = env.client.post("/v1/traces", json={"source": src})
+    assert r.status_code == 400
+
+
+def test_bad_timestamp_rejected(env):
+    bad = _manifest(started_at="not-a-date")
+    src = _write_bundle(env, manifest=bad)
+    r = env.client.post("/v1/traces", json={"source": src})
+    assert r.status_code == 400
+
+
 def test_missing_manifest_rejected(env):
     seed_agent(env.hub, "agent-1")
     bucket = env.settings.agent_bucket("agent-1")
@@ -163,6 +177,25 @@ def test_source_outside_own_bucket_rejected(env):
     assert r.json()["error"]["code"] == "INVALID_PATH"
 
 
+def test_source_must_be_traces_session_dir(env):
+    seed_agent(env.hub, "agent-1")
+    bucket = env.settings.agent_bucket("agent-1")
+    env.hub.write_text_to_bucket(bucket, "scratch/sess-1/manifest.md", _manifest())
+    r = env.client.post(
+        "/v1/traces", json={"source": f"hf://buckets/{bucket}/scratch/sess-1"}
+    )
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_PATH"
+
+
+def test_manifest_session_must_match_source_dir(env):
+    bad = _manifest(session_id="other-session")
+    src = _write_bundle(env, session="sess-1", manifest=bad)
+    r = env.client.post("/v1/traces", json={"source": src})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_PATH"
+
+
 def test_stats_then_full_upgrade(env):
     # stats first (no log), then full (with log) for the SAME session overwrites.
     src1 = _write_bundle(env, manifest=_manifest())
@@ -176,12 +209,20 @@ def test_stats_then_full_upgrade(env):
     assert r.status_code == 201
     assert r.json()["files_copied"] == 1
     assert "traces/agent-1/sess-1/session.jsonl" in _central(env)
+    detail = env.client.get("/v1/traces/agent-1/sess-1").json()
+    assert detail["log_files"] == ["traces/agent-1/sess-1/session.jsonl"]
 
 
 # ───────────────────────── listing & detail ─────────────────────────
 
 def test_list_and_detail(env):
-    env.client.post("/v1/traces", json={"source": _write_bundle(env, manifest=_manifest())})
+    env.client.post(
+        "/v1/traces",
+        json={
+            "source": _write_bundle(env, manifest=_manifest(), log=b"{}\n"),
+            "share": "full",
+        },
+    )
 
     lst = env.client.get("/v1/traces?expand=true").json()
     assert lst["count"] == 1 and lst["matched"] == 1
@@ -190,10 +231,12 @@ def test_list_and_detail(env):
     assert item["total_tokens"] == 6500 and item["tool_calls"] == 18
     assert item["harness"] == "claude-code"
     assert "Swept BPE" in item["summary_excerpt"]
+    assert item["primary_log_file"] == "traces/agent-1/sess-1/session.jsonl"
 
     detail = env.client.get("/v1/traces/agent-1/sess-1").json()
     assert detail["frontmatter"]["usage"]["total_tokens"] == 6500
     assert "Swept BPE" in detail["body"]
+    assert detail["log_files"] == ["traces/agent-1/sess-1/session.jsonl"]
 
 
 def test_list_filters_by_harness(env):

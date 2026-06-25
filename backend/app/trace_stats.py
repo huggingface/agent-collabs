@@ -11,6 +11,8 @@ is excluded; a ``0`` means genuinely zero. Never treat a missing number as 0.
 """
 from __future__ import annotations
 
+from datetime import date, datetime
+
 from app.errors import InvalidFrontmatter
 from app.models import (
     DigestStats,
@@ -56,6 +58,28 @@ def _mapping(v: object) -> dict:
     return v if isinstance(v, dict) else {}
 
 
+def _timestamp_ok(v: object) -> bool:
+    if isinstance(v, datetime):
+        return True
+    # PyYAML may parse date-like scalars into date objects. Accept them as
+    # parseable but prefer full timestamps from the client.
+    if isinstance(v, date):
+        return True
+    if not isinstance(v, str) or not v.strip():
+        return False
+    s = v.strip()
+    try:
+        datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return True
+    except ValueError:
+        pass
+    try:
+        datetime.strptime(s, "%Y-%m-%d %H:%M UTC")
+        return True
+    except ValueError:
+        return False
+
+
 # ───────────────────────── validation ─────────────────────────
 
 def validate_trace_manifest(fm: dict) -> None:
@@ -72,9 +96,9 @@ def validate_trace_manifest(fm: dict) -> None:
             raise InvalidFrontmatter("`usage` must be a mapping")
         for key, _attr in _USAGE_FIELDS:
             v = usage.get(key)
-            if v is not None and (_num(v) is None or v < 0):
+            if v is not None and (_int(v) is None or v < 0):
                 raise InvalidFrontmatter(
-                    f"`usage.{key}` must be a non-negative number or null"
+                    f"`usage.{key}` must be a non-negative integer or null"
                 )
 
     cost = fm.get("cost_usd")
@@ -91,6 +115,10 @@ def validate_trace_manifest(fm: dict) -> None:
                 "`activity.tool_calls` must be a non-negative integer or null"
             )
 
+    for key in ("started_at", "ended_at"):
+        if fm.get(key) is not None and not _timestamp_ok(fm[key]):
+            raise InvalidFrontmatter(f"`{key}` must be a parseable timestamp or null")
+
 
 def completeness(fm: dict) -> str:
     """`full` iff a known harness delivered the enforced set (a numeric
@@ -98,7 +126,7 @@ def completeness(fm: dict) -> str:
     manifest so the library/aggregate can surface adapter drift."""
     usage = _mapping(fm.get("usage"))
     activity = _mapping(fm.get("activity"))
-    has_tokens = _num(usage.get("total_tokens")) is not None
+    has_tokens = _int(usage.get("total_tokens")) is not None
     has_tools = _int(activity.get("tool_calls")) is not None
     if str(fm.get("harness", "")) in KNOWN_FULL_HARNESSES and has_tokens and has_tools:
         return "full"
@@ -112,11 +140,17 @@ def _excerpt(body: str, n: int = 280) -> str:
     return text if len(text) <= n else text[:n].rstrip() + "…"
 
 
-def trace_summary(rec: Record, agent: str, session: str) -> TraceSummary:
+def trace_summary(
+    rec: Record,
+    agent: str,
+    session: str,
+    *,
+    primary_log_file: str | None = None,
+) -> TraceSummary:
     fm = rec.frontmatter
     usage = _mapping(fm.get("usage"))
     activity = _mapping(fm.get("activity"))
-    total = _num(usage.get("total_tokens"))
+    total = _int(usage.get("total_tokens"))
     return TraceSummary(
         agent=agent,
         session_id=session,
@@ -131,6 +165,7 @@ def trace_summary(rec: Record, agent: str, session: str) -> TraceSummary:
         result_ref=_str_or_none(fm.get("result_ref")),
         summary_excerpt=_excerpt(rec.body),
         path=f"traces/{agent}/{session}/",
+        primary_log_file=primary_log_file,
     )
 
 
@@ -165,6 +200,7 @@ def list_traces(
     after: str | None,
     before: str | None,
     expand_cap: int,
+    primary_log_files: dict[tuple[str, str], str] | None = None,
 ) -> tuple[int, int, list[str] | list[TraceSummary], str | None]:
     """Returns (count, matched, items, next). `count` = total manifests; items
     are `<agent>/<session>` ids unless `expand`. `next` is the opaque cursor."""
@@ -187,7 +223,17 @@ def list_traces(
             continue
         if q is not None and not _q_match(rec, q):
             continue
-        rows.append((_cursor_key(fm, a, s), trace_summary(rec, a, s)))
+        rows.append(
+            (
+                _cursor_key(fm, a, s),
+                trace_summary(
+                    rec,
+                    a,
+                    s,
+                    primary_log_file=(primary_log_files or {}).get((a, s)),
+                ),
+            )
+        )
 
     rows.sort(key=lambda x: x[0])
     matched = len(rows)
@@ -215,9 +261,9 @@ def list_traces(
 
 def _accumulate(t: TokenTotals, usage: dict) -> None:
     for key, attr in _USAGE_FIELDS:
-        v = _num(usage.get(key))
+        v = _int(usage.get(key))
         if v is not None:
-            setattr(t, attr, getattr(t, attr) + int(v))
+            setattr(t, attr, getattr(t, attr) + v)
 
 
 def _day_of(*candidates: object) -> str:
@@ -251,7 +297,7 @@ def aggregate(records: list[Record], *, generated_at: str) -> StatsResponse:
         agents.add(agent)
         fm = rec.frontmatter
         usage = _mapping(fm.get("usage"))
-        if _num(usage.get("total_tokens")) is None:
+        if _int(usage.get("total_tokens")) is None:
             missing += 1
             continue
         counted += 1
