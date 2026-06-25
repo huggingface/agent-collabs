@@ -119,17 +119,6 @@ def audit_log_path(dt: datetime) -> str:
     return f"audit/{dt.strftime('%Y%m')}.jsonl"
 
 
-def telemetry_path(signal: str, dt: datetime, seq: int) -> str:
-    """One flushed OTLP batch: telemetry/<signal>/<YYYYMMDD>/<HHMMSS>-<ms>-<seq>.ndjson.
-
-    Dormant: the OTLP receiver is unwired (see DESIGN/TRACES_DESIGN). Kept for the
-    optional future real-time-metrics path."""
-    day = dt.strftime("%Y%m%d")
-    hms = dt.strftime("%H%M%S")
-    ms = f"{dt.microsecond // 1000:03d}"
-    return f"telemetry/{signal}/{day}/{hms}-{ms}-{seq:06d}.ndjson"
-
-
 # ── Trace & stats sharing (one record per session, see TRACES_DESIGN.md) ──
 TRACES_FOLDER = "traces"
 

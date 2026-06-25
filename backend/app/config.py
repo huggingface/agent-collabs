@@ -114,24 +114,10 @@ class Settings(BaseSettings):
     guard_field: str = Field("", alias="VERIFIER_GUARD_FIELD")
     guard_cap: float = Field(0.0, alias="VERIFIER_GUARD_CAP")
 
-    # ── OpenTelemetry trace ingest (optional; POST /v1/{traces,metrics,logs}) ──
-    # Shared bearer token gating the OTLP ingest routes; when unset the routes
-    # reject all callers and the flusher never starts (feature off). Per-agent
-    # attribution comes from OTEL_SERVICE_NAME=<agent_id> in the payload, not the
-    # token — mirroring how identity is asserted elsewhere.
-    otel_ingest_token: str | None = Field(None, alias="OTEL_INGEST_TOKEN")
-    # Where flushed OTLP batches land. Defaults to {org}/{slug}-traces (see
-    # validator) — the challenge org, so participants can read their own traces.
-    traces_bucket: str = Field("", alias="TRACES_BUCKET")
-    otel_flush_seconds: float = Field(10.0, alias="OTEL_FLUSH_SECONDS")
-    otel_flush_max_bytes: int = Field(8 * 1024**2, alias="OTEL_FLUSH_MAX_BYTES")
-
     @model_validator(mode="after")
     def _derive_defaults(self) -> "Settings":
         if not self.central_bucket:
             self.central_bucket = f"{self.org}/{self.collab_slug}-main-bucket"
-        if not self.traces_bucket:
-            self.traces_bucket = f"{self.org}/{self.collab_slug}-traces"
         return self
 
     @property

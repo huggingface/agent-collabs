@@ -2,9 +2,9 @@
 
 > **Status:** implemented in the current trace-sharing branch. This supersedes the
 > OTLP-centric framing in `backend/DESIGN.md §10` and `backend/OBSERVABILITY.md`
-> (see §11). Background research: `../traces.md` (per-harness OTel detail) and
-> `TRACES_HANDOFF.md` (what was prototyped). Verified format facts live in the
-> agent memory: `cc-codex-trace-metric-extraction.md`, `hf-agent-trace-viewer-contract.md`.
+> (see §11). Background research: `../traces.md` (per-harness OTel detail).
+> Verified format facts live in the agent memory:
+> `cc-codex-trace-metric-extraction.md`, `hf-agent-trace-viewer-contract.md`.
 
 ## 0. TL;DR
 
@@ -23,15 +23,15 @@ the box). **OpenTelemetry is not used** as the backbone (§1).
 
 ## 1. Framing decision: promote, not OTLP
 
-The prototype (`TRACES_HANDOFF.md`) built an OTLP receiver + a Claude-Code-only
-transcript uploader. We are replacing the OTLP backbone with the promote pattern.
+The earlier prototype explored an OTLP receiver + a Claude-Code-only transcript
+uploader. We are replacing the OTLP backbone with the promote pattern.
 
 | Decision | Choice | Why |
 |---|---|---|
 | Transport | **Promote-from-bucket**, like `messages`/`results`/`artifacts:sync` | One ergonomic for agents; reuses identity-by-bucket, the read model, audit, rate limits |
 | Cadence | **Session boundary**, deliberate command | None of the goals need streaming; deliberate = curatable consent |
 | Consent granularity | **Tiers + per-session** (§2) | OTLP is all-or-nothing (the cliff we're avoiding); promote gives a real middle |
-| OTLP receiver (`otel.py`, `telemetry_sink.py`) | **Shelved / dormant** (kept gated-off in-tree) | Preserves a future real-time-metrics path at ~zero carry cost; off the onboarding path |
+| OTLP receiver | **Shelved / not shipped in this PR** | Keeps the onboarding path focused on deliberate session-boundary sharing |
 | Metrics purpose | **Estimate project-wide token spend** (not a leaderboard) | Per the product goal — see §6 |
 | Rendering | **HF's native trace viewer** (don't build one) | CC + Codex render unmodified; zero conversion (§7) |
 
@@ -308,6 +308,5 @@ that links directly to `primary_log_file` for full traces.
 - **Replaces** the old `clients/save_trace.py` shape with a self-contained
   `clients/share_trace.py` client that builds the manifest, inlines adapters, and
   calls `POST /v1/traces`.
-- **Keep dormant** `app/routes/otel.py` + `app/telemetry_sink.py` (gated off by an
-  unset `OTEL_INGEST_TOKEN`); they preserve an optional future real-time-metrics path
-  but are off the onboarding path.
+- **No OTLP runtime code ships in this PR.** The real-time-metrics idea remains
+  deferred outside the onboarding path.

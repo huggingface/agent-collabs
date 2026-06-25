@@ -22,12 +22,6 @@ from app.routes import (
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-log = logging.getLogger("app.main")
-
-# Note: the OTLP receiver (app/routes/otel.py, app/telemetry_sink.py) is DORMANT
-# — its /v1/{traces,metrics,logs} signal paths collide with POST /v1/traces, and
-# trace sharing now uses the promote pattern (see TRACES_DESIGN.md). The files
-# remain in-tree for an optional future real-time-metrics path but are unwired.
 
 app = FastAPI(title="bucket-sync", version="1.3.0")
 

@@ -320,9 +320,8 @@ for non-interactive use).
 Files: `app/routes/traces.py`, `app/trace_stats.py`, additions to
 `models.py`/`naming.py`/`routes/digest.py`, `tests/test_traces_api.py`.
 
-**OTLP receiver — dormant.** `app/routes/otel.py` + `app/telemetry_sink.py` remain
-in-tree but are **unwired** from `main.py`: their `/v1/{traces,metrics,logs}` signal
-paths collide with `POST /v1/traces`, and continuous OTLP was the wrong consent model
-(all-or-nothing; see TRACES_DESIGN.md §1). Kept gated-off for an optional future
-real-time-metrics path; re-wiring requires resolving the route collision. The
-`otel_*`/`traces_bucket` config fields and `telemetry_path` are likewise dormant.
+**No OTLP receiver in this PR.** An earlier prototype explored continuous
+OpenTelemetry ingest, but that path is intentionally left out here: its
+all-or-nothing consent model conflicts with deliberate per-session sharing, and
+its `/v1/traces` signal path collides with the promote endpoint. A future
+real-time-metrics path should be designed separately.

@@ -10,7 +10,6 @@ from app.job_quota import DurableJobQuota
 from app.jobs import JobRunner
 from app.rate_limit import CompoundLimiter, TokenBucket
 from app.read_model import ReadModel
-from app.telemetry_sink import TelemetrySink
 from app.verification import VerificationStatusStore
 from app.verifier import Verifier
 
@@ -21,11 +20,6 @@ _DAY_SECONDS = 24 * 60 * 60
 @lru_cache
 def get_hub() -> HubClient:
     return HubClient(get_settings())
-
-
-@lru_cache
-def get_telemetry_sink() -> TelemetrySink:
-    return TelemetrySink(get_hub(), get_settings())
 
 
 @lru_cache

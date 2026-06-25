@@ -100,10 +100,8 @@ auto-detects your current session log; override with `--harness <name>` and
   to communicate: run the default stats share every session; use `--full` only
   when you deliberately want to publish the transcript.
 
-## OpenTelemetry — dormant
+## OpenTelemetry
 
-An earlier OTLP receiver (`app/routes/otel.py`, `app/telemetry_sink.py`) is kept
-in-tree but **unwired**: its `/v1/{traces,metrics,logs}` paths collide with
-`POST /v1/traces`, and continuous OTLP was the wrong consent model (all-or-nothing).
-It's retained only for a possible future real-time-metrics path. See
-[TRACES_DESIGN.md](../TRACES_DESIGN.md) §1 and DESIGN.md §10.
+No OTLP receiver ships with this workflow. Trace sharing is deliberately
+session-boundary and opt-in; any future real-time-metrics path should be designed
+separately from `POST /v1/traces`.
