@@ -761,6 +761,38 @@ async def verification() -> Response:
 
 
 # ──────────────────────────────────────────────────────────────
+# /api/stats and /api/traces — proxied from the bucket-sync backend
+#
+# The backend already computes the project token aggregate and the trace
+# listing; the SPA can't call it cross-origin (the backend sets no CORS), so we
+# proxy same-origin here. Cached + single-flight like the bucket listings. Off
+# (503) when no BACKEND_API_URL — e.g. local dev — so the panel just hides.
+# ──────────────────────────────────────────────────────────────
+async def _proxy_backend_json(path: str) -> Any:
+    if not BACKEND_API_URL:
+        raise HTTPException(503, "Trace sharing needs BACKEND_API_URL (the bucket-sync Space).")
+    # A fresh client: app.state.client carries the Space's admin HF_TOKEN, which
+    # must never ride along to another service (the backend GETs are tokenless).
+    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
+        r = await client.get(f"{BACKEND_API_URL}{path}")
+    if not r.is_success:
+        raise HTTPException(r.status_code, f"backend {path}: {r.text[:200]}")
+    return r.json()
+
+
+@app.get("/api/stats")
+async def stats_proxy() -> Any:
+    return await _hub_cache.get("__stats__", lambda: _proxy_backend_json("/v1/stats"))
+
+
+@app.get("/api/traces")
+async def traces_proxy(request: Request) -> Any:
+    qs = request.url.query
+    path = f"/v1/traces?{qs}" if qs else "/v1/traces"
+    return await _hub_cache.get(f"__traces__:{qs}", lambda: _proxy_backend_json(path))
+
+
+# ──────────────────────────────────────────────────────────────
 # Static frontend  (mounted last so /api/* keeps priority)
 # ──────────────────────────────────────────────────────────────
 _static_dir = Path(__file__).parent / "static"

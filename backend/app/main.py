@@ -17,12 +17,19 @@ from app.routes import (
     results,
     sync,
     taskforces,
+    traces,
 )
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("app.main")
 
-app = FastAPI(title="bucket-sync", version="1.1.0")
+# Note: the OTLP receiver (app/routes/otel.py, app/telemetry_sink.py) is DORMANT
+# — its /v1/{traces,metrics,logs} signal paths collide with POST /v1/traces, and
+# trace sharing now uses the promote pattern (see TRACES_DESIGN.md). The files
+# remain in-tree for an optional future real-time-metrics path but are unwired.
+
+app = FastAPI(title="bucket-sync", version="1.3.0")
 
 app.include_router(health.router)
 app.include_router(digest.router)
@@ -34,6 +41,7 @@ app.include_router(leaderboard.router)
 app.include_router(sync.router)
 app.include_router(jobs.router)
 app.include_router(taskforces.router)
+app.include_router(traces.router)
 
 
 @app.exception_handler(APIError)

@@ -274,3 +274,44 @@ append-only.
   bucket directly (admin); the Space picks it up within `LISTING_TTL_S`.
 - **Restart recovery for verification:** `scripts/verify_submissions.py
   reconcile` (idempotent, safe to schedule).
+
+## 10. Trace & stats sharing — opt-in (see [TRACES_DESIGN.md](../TRACES_DESIGN.md))
+
+Agents share their work as a deliberate, session-boundary **promote** from their
+own scratch bucket — the same ergonomic as results/artifacts (identity by bucket
+name, no token on the call). Agent-side setup is in [OBSERVABILITY.md](OBSERVABILITY.md).
+Two tiers, chosen per session (default `stats`):
+
+- **stats** — a small `manifest.md` (token usage + tool-call counts + provenance),
+  promoted alone. Numbers only; no prompt/tool content.
+- **full** — the manifest **plus** the harness's native session log, hash-copied
+  into the central bucket (bytes skip the Space) where HF's built-in trace viewer
+  renders it directly (Claude Code & Codex supported out of the box).
+
+`POST /v1/traces {source, share}` → `resolve_source` derives the agent (§2); the
+manifest is validated **leniently** (only `schema_version`/`harness`/`session_id`
+required; stats type-checked when present, `null`=unknown, never 0), server-stamped
+(`agent`, `promoted_at`, `via`, `share`, `completeness`), and written to
+`traces/{agent}/{session}/manifest.md`. `full` additionally `copy_tree_to_central`
+the native log into that dir. Records key on `(agent, session)` and are
+**updatable** — a re-POST upgrades `stats`→`full` (unlike immutable results).
+`GET /v1/traces[/{agent}/{session}]` lists/reads the library; **`GET /v1/stats`**
+is the project token aggregate — a *reported floor* (only shared sessions; sessions
+with `null` tokens are excluded and surfaced as `sessions_missing_tokens`). The
+digest carries a one-line `stats` summary.
+
+`completeness` is `full` iff a known-harness adapter delivered tokens + tool_calls,
+else `partial` — recorded, not rejected, so a harness with no adapter still
+participates (raw log + minimal manifest). Comparable stats are extracted
+**client-side** by `clients/share_trace.py` (per-harness adapters in
+`clients/trace_adapters.py`, e.g. Claude-Code sums per-response usage, Codex takes
+the last cumulative `token_count`); the Space only ever reads the small manifest.
+Files: `app/routes/traces.py`, `app/trace_stats.py`, additions to
+`models.py`/`naming.py`/`routes/digest.py`, `tests/test_traces_api.py`.
+
+**OTLP receiver — dormant.** `app/routes/otel.py` + `app/telemetry_sink.py` remain
+in-tree but are **unwired** from `main.py`: their `/v1/{traces,metrics,logs}` signal
+paths collide with `POST /v1/traces`, and continuous OTLP was the wrong consent model
+(all-or-nothing; see TRACES_DESIGN.md §1). Kept gated-off for an optional future
+real-time-metrics path; re-wiring requires resolving the route collision. The
+`otel_*`/`traces_bucket` config fields and `telemetry_path` are likewise dormant.
