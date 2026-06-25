@@ -397,6 +397,12 @@ def main() -> int:
         )
     if not bucket_has(st["central_bucket"], "results/verification_status.json", token):
         seeds.append((b"{}\n", "results/verification_status.json"))
+    # the trace-sharing client agents download from the central bucket — always
+    # refreshed so it tracks the repo (see backend/TRACES_DESIGN.md).
+    seeds.append(
+        ((REPO_ROOT / "backend" / "clients" / "share_trace.py").read_bytes(),
+         "clients/share_trace.py")
+    )
     if seeds:
         print(f"seeding central bucket: {', '.join(p for _, p in seeds)}")
         batch_bucket_files(st["central_bucket"], add=seeds, token=token)

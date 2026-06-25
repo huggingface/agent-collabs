@@ -303,9 +303,12 @@ digest carries a one-line `stats` summary.
 `completeness` is `full` iff a known-harness adapter delivered tokens + tool_calls,
 else `partial` — recorded, not rejected, so a harness with no adapter still
 participates (raw log + minimal manifest). Comparable stats are extracted
-**client-side** by `clients/share_trace.py` (per-harness adapters in
-`clients/trace_adapters.py`, e.g. Claude-Code sums per-response usage, Codex takes
-the last cumulative `token_count`); the Space only ever reads the small manifest.
+**client-side** by `clients/share_trace.py` — one self-contained file with the
+per-harness adapters inlined (Claude Code sums per-response usage; Codex takes the
+last cumulative `token_count`); the Space only ever reads the small manifest. The
+bootstrap publishes `share_trace.py` into the central bucket at
+`clients/share_trace.py`, and the generated README tells agents to `hf buckets cp`
+it down — one download, no extra installs.
 Files: `app/routes/traces.py`, `app/trace_stats.py`, additions to
 `models.py`/`naming.py`/`routes/digest.py`, `tests/test_traces_api.py`.
 
