@@ -378,7 +378,7 @@ Then at the end of a working session:
 
 ```bash
 python share_trace.py                 # token & tool-call counts only (the floor)
-python share_trace.py --full          # full: stats + your redacted transcript
+python share_trace.py --full --yes    # full: stats + redacted transcript (--yes: non-interactive)
 python share_trace.py --dry-run       # preview the manifest; upload nothing
 ```
 

@@ -7,21 +7,26 @@ writes the bundle into YOUR OWN scratch bucket, and calls ``POST /v1/traces`` �
 the same promote ergonomic as results/artifacts. Identity is your bucket name;
 no token rides on the call.
 
-    python share_trace.py                 # stats only; no content leaves
-    python share_trace.py --full          # FULL: stats + redacted native log -> the library
+    python share_trace.py                 # stats only; no content leaves (the floor)
+    python share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
+    python share_trace.py --full --yes    # FULL: stats + redacted native log -> the library
     python share_trace.py --full --raw    # full, skip secret redaction
     python share_trace.py --dry-run       # print the plan + manifest; touch nothing
 
 `full` lets Hugging Face's built-in trace viewer render the native log directly
 from the bucket (Claude Code & Codex supported out of the box). Redaction is
 best-effort and CLIENT-SIDE — your scratch bucket is org-readable, so content is
-scrubbed before it is written there at all.
+scrubbed before it is written there at all. `--full` needs confirmation; pass
+`--yes` for non-interactive / agent runs.
 
-SELF-CONTAINED, single file by design: agents download just this one file from
-the central bucket and run it. Only third-party deps are `yaml` and (lazily, for
-upload only) `huggingface_hub` — both already present wherever the `hf` CLI is.
-The per-harness adapters are inlined below; keep them in sync with the verified
-recipes (memory: cc-codex-trace-metric-extraction).
+SELF-CONTAINED + DEPENDENCY-FREE by design: download this one file and run it
+under ANY `python3` — no `pip install`. The frontmatter is emitted as JSON
+(which is valid YAML, so the backend parses it identically) and the upload
+shells out to the `hf` CLI (which you already use for `hf auth login`). Org/slug
+are auto-discovered from the backend's `GET /v1`, so you only need `--backend`
+(or `COLLAB_BACKEND`) and your `--agent-id`. The per-harness adapters are inlined
+below; keep them in sync with the verified recipes (memory:
+cc-codex-trace-metric-extraction).
 """
 from __future__ import annotations
 
@@ -30,13 +35,14 @@ import glob
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-
-import yaml
 
 
 ADAPTER_VERSION = 1
@@ -327,7 +333,9 @@ def _prune(value):
 
 
 def _serialise(fm: dict, body: str) -> str:
-    out = "---\n" + yaml.safe_dump(fm, sort_keys=False, allow_unicode=True) + "---\n"
+    # Emit the frontmatter as JSON — valid YAML, so the backend's yaml.safe_load
+    # parses it identically — which keeps this client dependency-free (no PyYAML).
+    out = "---\n" + json.dumps(fm, indent=2, ensure_ascii=False) + "\n---\n"
     if body.strip():
         out += "\n" + body.strip("\n") + "\n"
     return out
@@ -384,14 +392,35 @@ def _confirm_or_exit(*, share: str, log_path: Path, global_codex_fallback: bool,
         sys.exit("aborted")
 
 
-def _discover_central_bucket(backend: str) -> str | None:
+def _fetch_v1(backend: str) -> dict | None:
+    """GET {backend}/v1 (the self-description: org, collab=slug, central_bucket,
+    endpoints). Returns the parsed dict, or None if unreachable."""
     try:
         with urllib.request.urlopen(f"{backend.rstrip('/')}/v1", timeout=10) as resp:
             data = json.loads(resp.read().decode())
-        bucket = data.get("central_bucket")
-        return str(bucket) if bucket else None
+        return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def _v1_has_traces(v1: dict) -> bool:
+    """Does this backend expose POST /v1/traces? Older deploys predate it."""
+    return any(
+        isinstance(ep, dict) and ep.get("path") == "/v1/traces" and ep.get("method") == "POST"
+        for ep in (v1.get("endpoints") or [])
+    )
+
+
+def _hf_cp(local: str, dest_uri: str) -> None:
+    """Upload one file to a bucket via the `hf` CLI (uses your `hf auth login`
+    credentials — no Python deps). Progress bars off for clean, scriptable logs."""
+    r = subprocess.run(
+        ["hf", "buckets", "cp", "--quiet", local, dest_uri],
+        env={**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"},
+        capture_output=True, text=True,
+    )
+    if r.returncode != 0:
+        sys.exit(f"`hf buckets cp` failed [{r.returncode}]:\n{(r.stderr or r.stdout).strip()}")
 
 
 def main() -> int:
@@ -409,6 +438,8 @@ def main() -> int:
     ap.add_argument("--slug", default=os.environ.get("COLLAB_SLUG"), help="challenge slug")
     ap.add_argument("--backend", default=os.environ.get("COLLAB_BACKEND"),
                     help="the backend Space base URL, e.g. https://<org>-<slug>-bucket-sync.hf.space")
+    ap.add_argument("--upload-only", action="store_true",
+                    help="write the bundle to your scratch bucket and skip POST /v1/traces")
     ap.add_argument("--yes", action="store_true", help="confirm --full/global Codex fallback in non-interactive use")
     ap.add_argument("--dry-run", action="store_true", help="print the plan + manifest; touch nothing")
     args = ap.parse_args()
@@ -416,6 +447,18 @@ def main() -> int:
         sys.exit("choose either --full or --stats-only (stats-only is the default)")
     if args.raw and not args.full:
         sys.exit("--raw only applies with --full")
+
+    # Auto-discover org/slug from the backend's GET /v1 when not provided, and
+    # learn whether this backend even has the trace routes (older deploys don't).
+    v1 = _fetch_v1(args.backend) if args.backend else None
+    if v1:
+        args.org = args.org or v1.get("org")
+        args.slug = args.slug or v1.get("collab")
+    promote = not args.upload_only
+    if promote and v1 is not None and not _v1_has_traces(v1):
+        print("note: this backend has no POST /v1/traces yet — saving to your "
+              "scratch bucket only (organizers can deploy the trace routes).")
+        promote = False
 
     # 1) locate + parse the native session log
     global_codex_fallback = False
@@ -477,32 +520,46 @@ def main() -> int:
     )
 
     # 3) preflight
-    for req, name in [(args.agent_id, "--agent-id/AGENT_ID"), (args.org, "--org/ORG"),
-                      (args.slug, "--slug/COLLAB_SLUG"), (args.backend, "--backend/COLLAB_BACKEND")]:
+    required = [
+        (args.agent_id, "--agent-id/AGENT_ID"),
+        (args.org, "--org/ORG"),
+        (args.slug, "--slug/COLLAB_SLUG"),
+    ]
+    if promote:
+        required.append((args.backend, "--backend/COLLAB_BACKEND"))
+    for req, name in required:
         if not req:
             sys.exit(f"missing {name}")
     bucket = f"{args.org}/{args.slug}-{args.agent_id}"
+    dest = f"traces/{session_id}"
+    source = f"hf://buckets/{bucket}/{dest}"
 
-    # 4) write the bundle into YOUR bucket (your own token), redacting content first
-    from huggingface_hub import batch_bucket_files, create_bucket, get_token
-    from huggingface_hub.errors import HfHubHTTPError
-
-    token = os.environ.get("HF_TOKEN") or get_token()
-    if not token:
-        sys.exit("no HF token; set HF_TOKEN or run `hf auth login`")
-    try:
-        create_bucket(bucket, private=False, exist_ok=True, token=token)
-    except HfHubHTTPError as e:
-        print(f"  note: create_bucket({bucket}) -> {e} (continuing — usually already exists)")
-
-    adds: list[tuple[bytes, str]] = [(manifest.encode("utf-8"), f"{dest}/manifest.md")]
-    if share == "full":
-        log_text = log_path.read_text(encoding="utf-8", errors="replace")
-        if not args.raw:
-            log_text = redact(log_text)
-        adds.append((log_text.encode("utf-8"), f"{dest}/{log_path.name}"))
-    batch_bucket_files(bucket, add=adds, token=token)
-    print(f"\nwrote {len(adds)} file(s) to {source}")
+    # 4) write the bundle into YOUR bucket via the `hf` CLI (uses your hf auth;
+    #    no Python deps). Content is redacted client-side before it ever leaves.
+    if not shutil.which("hf"):
+        sys.exit(
+            "the `hf` CLI is required (you already use it for `hf auth login` and "
+            "bucket access). Install it with: pip install huggingface_hub"
+        )
+    with tempfile.TemporaryDirectory() as td:
+        man = Path(td) / "manifest.md"
+        man.write_text(manifest, encoding="utf-8")
+        _hf_cp(str(man), f"hf://buckets/{bucket}/{dest}/manifest.md")
+        n_files = 1
+        if share == "full":
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
+            if not args.raw:
+                log_text = redact(log_text)
+            logf = Path(td) / log_path.name
+            logf.write_text(log_text, encoding="utf-8")
+            _hf_cp(str(logf), f"hf://buckets/{bucket}/{dest}/{log_path.name}")
+            n_files = 2
+    print(f"\nwrote {n_files} file(s) to {source}")
+    if not promote:
+        why = "" if args.upload_only else " (this backend has no trace routes yet)"
+        print(f"saved to your scratch bucket; skipped POST /v1/traces{why}")
+        print(f"verify    : hf buckets list {source}/ -R")
+        return 0
 
     # 5) promote via the backend (identity = bucket; no token on the call)
     body = json.dumps({"source": source, "share": share}).encode("utf-8")
@@ -513,8 +570,18 @@ def main() -> int:
     try:
         with urllib.request.urlopen(req) as resp:
             promoted_text = resp.read().decode()
-    except urllib.error.HTTPError as e:
-        sys.exit(f"promote failed [{e.code}]: {e.read().decode(errors='replace')}")
+    except (urllib.error.HTTPError, urllib.error.URLError) as e:
+        code = getattr(e, "code", "—")
+        detail = (e.read().decode(errors="replace") if isinstance(e, urllib.error.HTTPError)
+                  else str(getattr(e, "reason", e)))
+        # The bundle is already in the bucket — a promote failure is partial,
+        # not total. Make that legible and exit 0 (the upload succeeded).
+        print(f"\n✓ bundle uploaded to {source}")
+        print(f"⚠ backend promotion failed [{code}]: {detail.strip()[:200]}")
+        print("  your trace is safe in your scratch bucket. Re-run with "
+              "--upload-only to skip promotion, or tell the organizers if "
+              "POST /v1/traces should be available on this collab.")
+        return 0
     print(f"promoted: {promoted_text}")
     try:
         promoted = json.loads(promoted_text)
@@ -527,7 +594,7 @@ def main() -> int:
     )
     print(f"trace API  : {detail_url}")
     print(f"trace path : {promoted['path']}")
-    central_bucket = _discover_central_bucket(args.backend)
+    central_bucket = (v1 or {}).get("central_bucket")
     if central_bucket:
         print(f"central    : hf://buckets/{central_bucket}/{promoted['path']}")
         if share == "full":
