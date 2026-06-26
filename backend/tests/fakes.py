@@ -115,6 +115,27 @@ class FakeHub:
     def write_bytes_audit(self, path: str, data: bytes) -> None:
         self.buckets[self._settings.audit_bucket][path] = data
 
+    def write_bytes_to_bucket(self, bucket: str, path: str, data: bytes) -> None:
+        self.buckets.setdefault(bucket, {})[path] = data
+
+    def write_text_to_bucket(self, bucket: str, path: str, text: str) -> None:
+        self.write_bytes_to_bucket(bucket, path, text.encode("utf-8"))
+
+    def copy_tree_to_central(self, src_bucket: str, src_prefix: str, dest_prefix: str):
+        """Mirror of HubClient.copy_tree_to_central: hash-copy a prefix into the
+        central bucket, yielding (src_rel_path, dest_path, size)."""
+        prefix = src_prefix.rstrip("/")
+        central = self._central()
+        out = []
+        for path, data in list(self.buckets.get(src_bucket, {}).items()):
+            if prefix and not (path == prefix or path.startswith(prefix + "/")):
+                continue
+            rel = path[len(prefix) + 1 :] if prefix and path.startswith(prefix + "/") else path
+            dest = f"{dest_prefix.rstrip('/')}/{rel}"
+            central[dest] = data
+            out.append((path, dest, len(data)))
+        return out
+
     def bucket_exists(self, bucket: str) -> bool:
         return bucket in self.buckets
 

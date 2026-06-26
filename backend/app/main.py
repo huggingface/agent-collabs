@@ -17,12 +17,13 @@ from app.routes import (
     results,
     sync,
     taskforces,
+    traces,
 )
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-app = FastAPI(title="bucket-sync", version="1.1.0")
+app = FastAPI(title="bucket-sync", version="1.3.0")
 
 app.include_router(health.router)
 app.include_router(digest.router)
@@ -34,6 +35,7 @@ app.include_router(leaderboard.router)
 app.include_router(sync.router)
 app.include_router(jobs.router)
 app.include_router(taskforces.router)
+app.include_router(traces.router)
 
 
 @app.exception_handler(APIError)

@@ -242,6 +242,91 @@ class BenchmarkJobResponse(BaseModel):
     message: str
 
 
+# ───────────────────────── Traces & stats ─────────────────────────
+# A trace is one session's record, promoted from the agent's bucket like a
+# result. `stats` shares only the manifest (token/tool counts); `full` also
+# hash-copies the native session log, which HF's trace viewer renders.
+# See TRACES_DESIGN.md.
+
+
+class TracePostRequest(BaseModel):
+    source: str                                       # hf://buckets/{org}/{slug}-{agent}/traces/<session>/
+    share: Literal["stats", "full"] = "stats"          # default = numbers only; content is an explicit opt-in
+
+
+class TracePostResponse(BaseModel):
+    session_id: str
+    agent: str
+    share: Literal["stats", "full"]
+    path: str                                          # central dir: traces/{agent}/{session}/
+    files_copied: int                                  # native-log files copied (0 for stats)
+    bytes_copied: int
+    completeness: Literal["full", "partial"]           # did a known harness deliver tokens + tool_calls
+
+
+class TraceSummary(BaseModel):
+    agent: str
+    session_id: str
+    harness: str | None = None
+    model: str | None = None
+    share: str | None = None
+    completeness: str | None = None
+    promoted_at: str | None = None
+    started_at: str | None = None
+    total_tokens: int | None = None                    # null = the harness didn't report it (never treat as 0)
+    tool_calls: int | None = None
+    result_ref: str | None = None
+    summary_excerpt: str = ""
+    path: str                                          # central dir: traces/{agent}/{session}/
+    primary_log_file: str | None = None                # central native-log path for direct HF trace-viewer links
+
+
+class TraceRecord(BaseModel):
+    agent: str
+    session_id: str
+    frontmatter: dict[str, Any]
+    body: str                                          # the agent-authored "what I did" summary
+    path: str                                          # central dir: traces/{agent}/{session}/
+    log_files: list[str] = Field(default_factory=list) # central paths of native logs (full traces) for the HF viewer
+
+
+class TraceListing(BaseModel):
+    count: int
+    matched: int
+    items: list[str] | list[TraceSummary]              # "<agent>/<session>" ids unless expand
+    next: str | None = None                            # opaque recency cursor
+
+
+class TokenTotals(BaseModel):
+    total: int = 0
+    input: int = 0
+    output: int = 0
+    cache_read: int = 0
+    cache_creation: int = 0
+    reasoning: int = 0
+
+
+class StatsResponse(BaseModel):
+    # The project-wide token estimate. A REPORTED FLOOR, not ground truth:
+    # only counts sessions agents chose to share; null-token sessions are
+    # excluded (see sessions_missing_tokens). See TRACES_DESIGN.md §6.
+    tokens: TokenTotals
+    cost_usd: float | None = None                      # summed where reported; null if nobody reported
+    sessions_counted: int                              # manifests with a usable total_tokens
+    sessions_missing_tokens: int                       # promoted but null tokens — the visible coverage gap
+    agents_reporting: int
+    by_model: dict[str, TokenTotals] = Field(default_factory=dict)
+    by_agent: dict[str, TokenTotals] = Field(default_factory=dict)
+    by_day: dict[str, TokenTotals] = Field(default_factory=dict)
+    generated_at: str
+
+
+class DigestStats(BaseModel):
+    total_tokens: int
+    sessions_counted: int
+    agents_reporting: int
+
+
 # ───────────────────────── Listings ─────────────────────────
 # `count` keeps its historical meaning (total files in the folder); `matched`
 # is the post-filter count; `items` holds filenames unless `expand=true`, in
@@ -328,4 +413,5 @@ class DigestResponse(BaseModel):
     recent_messages: list[MessageRecord]
     recent_results: list[ResultRecord]
     inbox: DigestInbox | None = None
+    stats: DigestStats | None = None
     generated_at: str

@@ -13,10 +13,11 @@ from app.models import (
     MessageRecord,
     ResultRecord,
 )
-from app.naming import stamp_iso, utc_now
+from app.naming import TRACES_FOLDER, stamp_iso, utc_now
 from app.read_model import ReadModel, Record
 from app.routes.leaderboard import compute_leaderboard
 from app.routes.taskforces import taskforce_digest
+from app.trace_stats import aggregate, digest_stats
 from app.validation import is_human_handle, validate_agent_id
 from app.verification import PENDING
 
@@ -80,6 +81,15 @@ def digest(
         inbox_page, _ = paginate(inbox_records, order="desc", limit=10, after=None, before=None)
         inbox = DigestInbox(count=len(inbox_records), items=_message_records(inbox_page))
 
+    # Project token estimate (reported floor); omitted entirely until at least
+    # one trace has been shared, so the digest shape is unchanged otherwise.
+    trace_records = read_model.records(TRACES_FOLDER)
+    stats = (
+        digest_stats(aggregate(trace_records, generated_at=stamp_iso(utc_now())))
+        if trace_records
+        else None
+    )
+
     return DigestResponse(
         agents=DigestAgents(count=len(agents), newest=newest),
         taskforces=taskforce_digest(read_model),
@@ -87,6 +97,7 @@ def digest(
         recent_messages=_message_records(message_page),
         recent_results=recent_results,
         inbox=inbox,
+        stats=stats,
         generated_at=stamp_iso(utc_now()),
     )
 
@@ -147,6 +158,17 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
          "params": "{source, dest_slug}", "purpose": "mirror an artifact dir"},
         {"method": "POST", "path": "/v1/shared-resources:sync",
          "params": "{source, dest_path}", "purpose": "mirror into shared_resources/"},
+        {"method": "POST", "path": "/v1/traces",
+         "params": "{source, share: stats|full (default stats)}",
+         "purpose": "share a session from your bucket: stats (token/tool counts) "
+                    "or full (+ native log, rendered by HF's trace viewer)"},
+        {"method": "GET", "path": "/v1/traces",
+         "params": "list grammar + harness, model, share",
+         "purpose": "browse shared session traces (summary + stats)"},
+        {"method": "GET", "path": "/v1/traces/{agent}/{session}", "params": "",
+         "purpose": "one trace: summary, stats, native-log pointers"},
+        {"method": "GET", "path": "/v1/stats", "params": "",
+         "purpose": "project-wide token estimate (reported floor) by model/agent/day"},
         {"method": "GET", "path": "/v1/healthz", "params": "", "purpose": "liveness"},
     ]
     if settings.jobs_enabled:

@@ -119,6 +119,29 @@ def audit_log_path(dt: datetime) -> str:
     return f"audit/{dt.strftime('%Y%m')}.jsonl"
 
 
+# ── Trace & stats sharing (one record per session, see TRACES_DESIGN.md) ──
+TRACES_FOLDER = "traces"
+
+
+def trace_dir(agent_id: str, session_id: str) -> str:
+    """A session's bundle dir in the central bucket: traces/<agent>/<session>/.
+    Holds manifest.md (always) + the native session log(s) (share=full)."""
+    return f"{TRACES_FOLDER}/{agent_id}/{session_id}"
+
+
+def trace_manifest_path(agent_id: str, session_id: str) -> str:
+    return f"{trace_dir(agent_id, session_id)}/manifest.md"
+
+
+def split_trace_manifest_path(path: str) -> tuple[str, str] | None:
+    """Inverse of ``trace_manifest_path``: traces/<agent>/<session>/manifest.md
+    → (agent, session). None for anything else under traces/ (e.g. log files)."""
+    parts = path.split("/")
+    if len(parts) == 4 and parts[0] == TRACES_FOLDER and parts[3] == "manifest.md":
+        return parts[1], parts[2]
+    return None
+
+
 def expected_agent_bucket(settings: Settings, agent_id: str) -> str:
     return settings.agent_bucket(agent_id)
 
