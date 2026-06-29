@@ -19,6 +19,11 @@ best-effort and CLIENT-SIDE — your scratch bucket is org-readable, so content 
 scrubbed before it is written there at all. `--full` needs confirmation; pass
 `--yes` for non-interactive / agent runs.
 
+Auto-detection follows the harness that INVOKES this script (from its env —
+Claude Code's CLAUDE_CODE_SESSION_ID pins the *exact* session), so multiple
+agents sharing one directory are never cross-attributed. Override with
+`--harness` / `--transcript`.
+
 SELF-CONTAINED + DEPENDENCY-FREE by design: download this one file and run it
 under ANY `python3` — no `pip install`. The frontmatter is emitted as JSON
 (which is valid YAML, so the backend parses it identically) and the upload
@@ -281,30 +286,89 @@ def _infer_harness(log_path: Path) -> str | None:
     return None
 
 
-def detect(cwd: str, harness: str) -> tuple[str, Path, bool]:
-    """Detect a native session log. Returns (harness, path, global_fallback).
+def _running_harness() -> tuple[str | None, str | None]:
+    """Identify the harness INVOKING this script from its injected env, plus the
+    exact session id when the harness exposes one. (None, None) if unknown.
 
-    Claude Code is project-scoped by directory. Codex logs are searched for a
-    current-working-directory match first; the global newest Codex fallback is
-    marked so uploads can require confirmation.
+    This is what keeps multiple agents in one directory from being cross-
+    attributed (e.g. a Codex agent uploading a co-located Claude Code log):
+    - Claude Code sets CLAUDE_CODE_SESSION_ID (the exact session) + CLAUDECODE=1.
+    - Codex sets CODEX_SANDBOX* in its (default) sandboxed exec but exposes NO
+      session id — so we know it's Codex, but still locate the rollout by cwd.
     """
-    if harness in ("auto", "claude-code"):
+    sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
+    if sid or os.environ.get("CLAUDECODE"):
+        return "claude-code", (sid or None)
+    if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED"):
+        return "codex", None
+    return None, None
+
+
+def _cc_session_log(cwd: str, session_id: str) -> Path | None:
+    """The exact Claude Code transcript for a session id, if it exists."""
+    p = _cc_project_dir(cwd) / f"{session_id}.jsonl"
+    return p if p.is_file() else None
+
+
+def _cc_session_count(cwd: str) -> int:
+    d = _cc_project_dir(cwd)
+    return len(list(d.glob("*.jsonl"))) if d.is_dir() else 0
+
+
+def detect(cwd: str, harness: str) -> tuple[str, Path, bool]:
+    """Detect the native session log of the agent INVOKING this script.
+
+    Anchored on the invoking harness's environment (see _running_harness) so
+    agents sharing a directory aren't cross-attributed. Returns
+    (harness, path, uncertain); `uncertain` asks main() to confirm when the
+    exact session could not be pinned.
+    """
+    env_harness, env_sid = _running_harness()
+
+    if harness == "auto":
+        if env_harness:
+            harness = env_harness
+        else:
+            # The env doesn't say who's running. Use the sole candidate; if both
+            # harnesses have one, refuse rather than guess (the cross-attrib bug).
+            cc = _detect_claude_code(cwd)
+            cx, cx_fallback = _detect_codex(cwd)
+            if cc and cx:
+                raise SystemExit(
+                    "multiple harnesses have a session for this directory and the "
+                    "environment doesn't identify the running agent — pass "
+                    "--harness claude-code|codex (or --transcript <path>)."
+                )
+            if cc:
+                return "claude-code", cc, _cc_session_count(cwd) > 1
+            if cx:
+                return "codex", cx, cx_fallback
+            raise SystemExit(
+                "could not auto-detect a session log; pass --harness and --transcript"
+            )
+    elif env_harness and env_harness != harness:
+        print(f"warning: --harness {harness}, but this looks like a {env_harness} "
+              "session from the environment; proceeding as requested.")
+
+    if harness == "claude-code":
+        if env_sid:
+            pinned = _cc_session_log(cwd, env_sid)
+            if pinned:
+                return "claude-code", pinned, False  # exact session — no ambiguity
+            print(f"warning: CLAUDE_CODE_SESSION_ID={env_sid} has no transcript under "
+                  f"{_cc_project_dir(cwd)}; falling back to the newest session.")
         cc = _detect_claude_code(cwd)
         if cc:
-            return "claude-code", cc, False
-        if harness == "claude-code":
-            raise SystemExit(
-                "could not find a Claude Code session for this cwd; pass --transcript"
-            )
-    if harness in ("auto", "codex"):
-        cx, global_fallback = _detect_codex(cwd)
+            return "claude-code", cc, (env_sid is None and _cc_session_count(cwd) > 1)
+        raise SystemExit("could not find a Claude Code session for this cwd; pass --transcript")
+
+    if harness == "codex":
+        cx, cx_fallback = _detect_codex(cwd)
         if cx:
-            return "codex", cx, global_fallback
-        if harness == "codex":
-            raise SystemExit("could not find a Codex rollout; pass --transcript")
-    raise SystemExit(
-        "could not auto-detect a session log; pass --harness <name> and --transcript <path>"
-    )
+            return "codex", cx, cx_fallback
+        raise SystemExit("could not find a Codex rollout; pass --transcript")
+
+    raise SystemExit(f"unknown harness: {harness!r}")
 
 
 # ════════════════════════ manifest + upload ════════════════════════
@@ -373,10 +437,11 @@ def _known_harness_complete(harness: str, fields: dict) -> bool:
     )
 
 
-def _confirm_or_exit(*, share: str, log_path: Path, global_codex_fallback: bool, yes: bool) -> None:
+def _confirm_or_exit(*, share: str, log_path: Path, uncertain: bool, yes: bool) -> None:
     reasons = []
-    if global_codex_fallback:
-        reasons.append("Codex detection fell back to the newest rollout globally, not a cwd-matched session.")
+    if uncertain:
+        reasons.append("Could not pin the exact invoking session — selection fell back to "
+                       "the newest log for this directory; confirm it is the right one.")
     if share == "full":
         reasons.append("Full sharing uploads the redacted native session log to your org-readable scratch bucket.")
     if not reasons or yes:
@@ -470,7 +535,7 @@ def main() -> int:
         if harness is None:
             sys.exit("could not infer harness from --transcript; pass --harness")
     else:
-        harness, log_path, global_codex_fallback = detect(os.getcwd(), args.harness)
+        harness, log_path, uncertain = detect(os.getcwd(), args.harness)
 
     fields = build_fields(harness, log_path)
     if harness in KNOWN_HARNESSES and not _known_harness_complete(harness, fields):
@@ -489,8 +554,8 @@ def main() -> int:
     print(f"log        : {log_path}")
     print(f"session    : {session_id}")
     print(f"share      : {share}" + ("  [redaction OFF]" if args.raw else ""))
-    if global_codex_fallback:
-        print("selection  : newest Codex rollout globally (not cwd-matched)")
+    if uncertain:
+        print("selection  : newest log for this cwd (exact session not pinned — verify it's yours)")
     print(f"tokens     : {usage.get('total_tokens', 'unknown')}")
     print(f"tool_calls : {activity.get('tool_calls', 'unknown')}")
     if harness not in KNOWN_HARNESSES:
@@ -515,7 +580,7 @@ def main() -> int:
     _confirm_or_exit(
         share=share,
         log_path=log_path,
-        global_codex_fallback=global_codex_fallback,
+        uncertain=uncertain,
         yes=args.yes,
     )
 
