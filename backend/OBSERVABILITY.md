@@ -73,6 +73,8 @@ auto-detects your current session log; override with `--harness <name>` and
 - The backend governs what enters the shared library; it can't retract what you put
   in your own bucket — so for the default stats share, the client deliberately
   writes no log there.
+- For `--full`, the manifest names the one native log file to publish; the backend
+  promotes only that file and ignores other objects under the same scratch prefix.
 
 ## Where it shows up
 

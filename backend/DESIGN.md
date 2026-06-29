@@ -295,9 +295,10 @@ that directory. The manifest is validated **leniently** (only
 token counts are non-negative integers, timestamps are parseable, `null`=unknown,
 never 0), server-stamped (`agent`, `promoted_at`, `via`, `share`,
 `completeness`), and written to `traces/{agent}/{session}/manifest.md`. `full`
-additionally `copy_tree_to_central` the native log into that dir. Records key on
-`(agent, session)` and are **updatable** — a re-POST upgrades `stats`→`full`
-(unlike immutable results).
+additionally requires `manifest.native_log_file` and hash-copies only that single
+declared file into the central trace dir, so stale objects under the same scratch
+prefix are ignored. Records key on `(agent, session)` and are **updatable** — a
+re-POST upgrades `stats`→`full` (unlike immutable results).
 `GET /v1/traces[/{agent}/{session}]` lists/reads the library; **`GET /v1/stats`**
 is the project token aggregate — a *reported floor* (only shared sessions; sessions
 with `null` tokens are excluded and surfaced as `sessions_missing_tokens`). The

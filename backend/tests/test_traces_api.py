@@ -42,7 +42,15 @@ def _manifest(
     return serialise(fm, body)
 
 
-def _write_bundle(env, *, agent="agent-1", session="sess-1", manifest=None, log=None):
+def _write_bundle(
+    env,
+    *,
+    agent="agent-1",
+    session="sess-1",
+    manifest=None,
+    log=None,
+    log_name="session.jsonl",
+):
     """Stage a bundle in the agent's own scratch bucket; return its source URI dir."""
     seed_agent(env.hub, agent)
     bucket = env.settings.agent_bucket(agent)  # test-org/test-<agent>
@@ -50,7 +58,7 @@ def _write_bundle(env, *, agent="agent-1", session="sess-1", manifest=None, log=
         bucket, f"traces/{session}/manifest.md", manifest if manifest is not None else _manifest(session_id=session)
     )
     if log is not None:
-        env.hub.write_bytes_to_bucket(bucket, f"traces/{session}/session.jsonl", log)
+        env.hub.write_bytes_to_bucket(bucket, f"traces/{session}/{log_name}", log)
     return f"hf://buckets/{bucket}/traces/{session}"
 
 
@@ -80,7 +88,11 @@ def test_stats_promote_writes_manifest_only(env):
 
 
 def test_full_promote_hash_copies_the_log(env):
-    src = _write_bundle(env, manifest=_manifest(), log=b'{"type":"user"}\n{"type":"assistant"}\n')
+    src = _write_bundle(
+        env,
+        manifest=_manifest(native_log_file="session.jsonl"),
+        log=b'{"type":"user"}\n{"type":"assistant"}\n',
+    )
     r = env.client.post("/v1/traces", json={"source": src, "share": "full"})
     assert r.status_code == 201
     body = r.json()
@@ -90,8 +102,33 @@ def test_full_promote_hash_copies_the_log(env):
 
     central = _central(env)
     assert "traces/agent-1/sess-1/session.jsonl" in central
-    # the copied manifest was overwritten by the stamped one
+    # the stamped manifest records the promotion metadata
     assert "promoted_at:" in central["traces/agent-1/sess-1/manifest.md"].decode()
+
+
+def test_full_promote_requires_declared_log_file(env):
+    src = _write_bundle(env, manifest=_manifest(), log=b"{}\n")
+    r = env.client.post("/v1/traces", json={"source": src, "share": "full"})
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_FRONTMATTER"
+
+
+def test_full_promote_copies_only_declared_log_file(env):
+    src = _write_bundle(
+        env,
+        manifest=_manifest(native_log_file="session.jsonl"),
+        log=b'{"current":true}\n',
+    )
+    bucket = env.settings.agent_bucket("agent-1")
+    env.hub.write_bytes_to_bucket(bucket, "traces/sess-1/stale.jsonl", b'{"stale":true}\n')
+
+    r = env.client.post("/v1/traces", json={"source": src, "share": "full"})
+    assert r.status_code == 201
+    assert r.json()["files_copied"] == 1
+
+    central = _central(env)
+    assert "traces/agent-1/sess-1/session.jsonl" in central
+    assert "traces/agent-1/sess-1/stale.jsonl" not in central
 
 
 def test_default_share_is_stats(env):
@@ -200,9 +237,15 @@ def test_stats_then_full_upgrade(env):
     # stats first (no log), then full (with log) for the SAME session overwrites.
     src1 = _write_bundle(env, manifest=_manifest())
     assert env.client.post("/v1/traces", json={"source": src1}).json()["files_copied"] == 0
-    # add a log to the bundle and re-promote as full
+    # add a log and a full manifest to the bundle, then re-promote as full
+    bucket = env.settings.agent_bucket("agent-1")
+    env.hub.write_text_to_bucket(
+        bucket,
+        "traces/sess-1/manifest.md",
+        _manifest(native_log_file="session.jsonl"),
+    )
     env.hub.write_bytes_to_bucket(
-        env.settings.agent_bucket("agent-1"), "traces/sess-1/session.jsonl", b"{}\n"
+        bucket, "traces/sess-1/session.jsonl", b"{}\n"
     )
     src2 = f"hf://buckets/{env.settings.agent_bucket('agent-1')}/traces/sess-1"
     r = env.client.post("/v1/traces", json={"source": src2, "share": "full"})
@@ -219,7 +262,11 @@ def test_list_and_detail(env):
     env.client.post(
         "/v1/traces",
         json={
-            "source": _write_bundle(env, manifest=_manifest(), log=b"{}\n"),
+            "source": _write_bundle(
+                env,
+                manifest=_manifest(native_log_file="session.jsonl"),
+                log=b"{}\n",
+            ),
             "share": "full",
         },
     )

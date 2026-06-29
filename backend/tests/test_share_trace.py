@@ -91,11 +91,73 @@ def test_no_marker_single_harness_is_used(home):
     assert harness == "codex" and path == rollout
 
 
-def test_missing_session_id_falls_back_with_warning(home, monkeypatch, capsys):
-    # CLAUDE_CODE_SESSION_ID set but no matching transcript → fall back to newest.
-    newest = _cc(home, "real-sid")
+def test_missing_session_id_refuses_to_guess(home, monkeypatch):
+    # If Claude exposes an exact session id, selecting any other log is unsafe.
+    _cc(home, "real-sid")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "ghost-sid")
     monkeypatch.setenv("CLAUDECODE", "1")
-    harness, path, _ = st.detect(CWD, "auto")
-    assert harness == "claude-code" and path == newest
-    assert "ghost-sid" in capsys.readouterr().out
+    with pytest.raises(SystemExit) as exc:
+        st.detect(CWD, "auto")
+    assert "ghost-sid" in str(exc.value)
+    assert "refusing to guess" in str(exc.value)
+
+
+def test_explicit_transcript_dry_run_works(home, monkeypatch, tmp_path, capsys):
+    # Explicit transcript mode is the strongest way to pin a session; it must not
+    # require auto-detection's `uncertain` return value.
+    transcript = tmp_path / "rollout-2026-06-29T00-00-00-explicit.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "timestamp": "2026-06-29T00:00:00Z",
+                        "payload": {"session_id": "explicit-sess", "model": "gpt-test"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T00:01:00Z",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1,
+                                    "output_tokens": 2,
+                                    "cached_input_tokens": 0,
+                                    "reasoning_output_tokens": 0,
+                                    "total_tokens": 3,
+                                }
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T00:02:00Z",
+                        "payload": {"type": "local_shell_call", "call_id": "c1"},
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "share_trace.py",
+            "--transcript",
+            str(transcript),
+            "--harness",
+            "codex",
+            "--dry-run",
+        ],
+    )
+    assert st.main() == 0
+    out = capsys.readouterr().out
+    assert "session    : explicit-sess" in out
+    assert "tokens     : 3" in out

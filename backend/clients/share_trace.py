@@ -355,8 +355,11 @@ def detect(cwd: str, harness: str) -> tuple[str, Path, bool]:
             pinned = _cc_session_log(cwd, env_sid)
             if pinned:
                 return "claude-code", pinned, False  # exact session — no ambiguity
-            print(f"warning: CLAUDE_CODE_SESSION_ID={env_sid} has no transcript under "
-                  f"{_cc_project_dir(cwd)}; falling back to the newest session.")
+            raise SystemExit(
+                f"CLAUDE_CODE_SESSION_ID={env_sid} has no transcript under "
+                f"{_cc_project_dir(cwd)}; refusing to guess another session. "
+                "Pass --transcript <path> if the transcript lives elsewhere."
+            )
         cc = _detect_claude_code(cwd)
         if cc:
             return "claude-code", cc, (env_sid is None and _cc_session_count(cwd) > 1)
@@ -405,7 +408,13 @@ def _serialise(fm: dict, body: str) -> str:
     return out
 
 
-def build_manifest(fields: dict, *, session_id: str, result_ref: str | None) -> str:
+def build_manifest(
+    fields: dict,
+    *,
+    session_id: str,
+    result_ref: str | None,
+    native_log_file: str | None = None,
+) -> str:
     fm: dict = {
         "schema_version": 1,
         "adapter_version": ADAPTER_VERSION,
@@ -417,6 +426,8 @@ def build_manifest(fields: dict, *, session_id: str, result_ref: str | None) -> 
             fm[k] = fields[k]
     if result_ref:
         fm["result_ref"] = result_ref
+    if native_log_file:
+        fm["native_log_file"] = native_log_file
     for k in ("usage", "activity", "extensions"):
         pruned = _prune(fields.get(k) or {})
         if pruned:
@@ -526,7 +537,7 @@ def main() -> int:
         promote = False
 
     # 1) locate + parse the native session log
-    global_codex_fallback = False
+    uncertain = False
     if args.transcript:
         log_path = Path(args.transcript).expanduser()
         if not log_path.is_file():
@@ -545,7 +556,12 @@ def main() -> int:
         )
     session_id = args.session_id or str(fields.get("session_id") or log_path.stem)
     share = "full" if args.full else "stats"
-    manifest = build_manifest(fields, session_id=session_id, result_ref=args.result_ref)
+    manifest = build_manifest(
+        fields,
+        session_id=session_id,
+        result_ref=args.result_ref,
+        native_log_file=log_path.name if share == "full" else None,
+    )
 
     # 2) the plan
     usage = fields.get("usage") or {}

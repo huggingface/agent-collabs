@@ -276,6 +276,18 @@ class HubClient:
 
     # ───────────────────────── Cross-bucket copy ─────────────────────────
 
+    def copy_file_to_central(self, src_bucket: str, src_xet_hash: str, dest_path: str) -> None:
+        """Hash-copy a single source file into the central bucket (bytes never
+        transit the Space). The caller passes the source's xet hash — taken from a
+        listing it already holds — so there is no extra lookup here."""
+        if not src_xet_hash:
+            raise RuntimeError(f"missing xet_hash for copy to {dest_path}")
+        batch_bucket_files(
+            bucket_id=self._settings.central_bucket,
+            copy=[("bucket", src_bucket, src_xet_hash, dest_path)],
+            token=self._token,
+        )
+
     def copy_tree_to_central(
         self, src_bucket: str, src_prefix: str, dest_prefix: str
     ) -> Iterable[tuple[str, str, int]]:

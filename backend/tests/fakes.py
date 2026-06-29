@@ -136,6 +136,15 @@ class FakeHub:
             out.append((path, dest, len(data)))
         return out
 
+    def copy_file_to_central(self, src_bucket: str, src_xet_hash: str, dest_path: str) -> None:
+        """Mirror of HubClient.copy_file_to_central: copy by xet hash (our fake
+        xet_hash is sha256), no listing."""
+        for data in self.buckets.get(src_bucket, {}).values():
+            if hashlib.sha256(data).hexdigest() == src_xet_hash:
+                self._central()[dest_path] = data
+                return
+        raise FileNotFoundError(f"{src_bucket}: no file with xet_hash {src_xet_hash}")
+
     def bucket_exists(self, bucket: str) -> bool:
         return bucket in self.buckets
 
