@@ -20,7 +20,7 @@ from app.deps import (
     get_read_model,
     get_settings_dep,
 )
-from app.errors import InvalidPath, NotFound, RateLimited, SyncTooLarge
+from app.errors import InvalidFrontmatter, InvalidPath, NotFound, RateLimited, SyncTooLarge
 from app.frontmatter import merge, parse, serialise
 from app.hub import HubClient
 from app.models import (
@@ -62,6 +62,19 @@ def _source_session(path: str) -> str:
     session = parts[1]
     validate_path_components(session)
     return session
+
+
+def _native_log_file(client_fm: dict) -> str:
+    value = client_fm.get("native_log_file")
+    if not isinstance(value, str) or not value.strip():
+        raise InvalidFrontmatter(
+            "full trace manifest missing required field: native_log_file"
+        )
+    log_file = value.strip()
+    validate_path_components(log_file)
+    if "/" in log_file or log_file == "manifest.md":
+        raise InvalidPath("native_log_file must be a single non-manifest filename")
+    return log_file
 
 
 def _primary_log_files(read_model: ReadModel) -> dict[tuple[str, str], str]:
@@ -133,25 +146,26 @@ def post_trace(
     files_copied = 0
     bytes_copied = 0
     if req.share == "full":
-        # Cap the bundle (same limits as artifacts:sync), then hash-copy the
-        # whole tree — the stamped manifest below overwrites the copied one.
+        # Copy only the native log selected by the client. The scratch prefix may
+        # contain stale files from earlier attempts; those must not be promoted.
+        native_log = _native_log_file(client_fm)
+        src_log_path = f"{parsed.path.rstrip('/')}/{native_log}"
         listed = hub.list_bucket_dir(src_bucket, parsed.path)
-        nbytes = sum(f.size for f in listed)
-        if len(listed) > settings.sync_max_files:
-            raise SyncTooLarge(
-                f"{len(listed)} files exceeds cap of {settings.sync_max_files}"
+        log_info = next((f for f in listed if f.rel_path == src_log_path), None)
+        if log_info is None:
+            raise InvalidPath(
+                "trace bundle is missing declared native_log_file",
+                hint=f"expected {src_log_path}",
             )
+        nbytes = len(manifest_text.encode("utf-8")) + log_info.size
         if nbytes > settings.sync_max_bytes:
             raise SyncTooLarge(f"{nbytes} bytes exceeds cap of {settings.sync_max_bytes}")
-        for _src, dest_path, size in hub.copy_tree_to_central(
-            src_bucket, parsed.path, dest_dir
-        ):
-            if not dest_path.endswith("/manifest.md"):
-                files_copied += 1
-                bytes_copied += size
-                read_model.write_through(
-                    dest_path, {}, "", size, folder=TRACES_FOLDER
-                )
+        # log_info is from the listing above — copy by its xet hash, no relisting.
+        dest_path = f"{dest_dir}/{native_log}"
+        hub.copy_file_to_central(src_bucket, log_info.xet_hash, dest_path)
+        files_copied = 1
+        bytes_copied = log_info.size
+        read_model.write_through(dest_path, {}, "", log_info.size, folder=TRACES_FOLDER)
 
     hub.write_text_central(manifest_dest, content)
     read_model.write_through(

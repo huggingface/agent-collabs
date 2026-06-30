@@ -384,7 +384,10 @@ python share_trace.py --dry-run       # preview the manifest; upload nothing
 
 It parses your harness's native session log (Claude Code & Codex auto-detected),
 writes a small manifest into your scratch bucket, and promotes it via
-`POST /v1/traces` (identity is your bucket; no token on the call). `--full`
+`POST /v1/traces` (identity is your bucket; no token on the call). It reads only
+that session log — never `.env` or credentials — and the **default share is
+counts only** (no prompts, code, or file contents), uploaded to your own org
+bucket rather than any external host. `--full`
 also uploads a redacted native transcript and asks for confirmation before
 content leaves your machine; use `--yes` only for deliberate non-interactive
 runs. Full traces render in Hugging Face's built-in trace viewer straight from
