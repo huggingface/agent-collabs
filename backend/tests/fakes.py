@@ -5,7 +5,7 @@ import hashlib
 
 from app.config import Settings
 from app.frontmatter import serialise
-from app.hub import ListedFile
+from app.hub import HubIdentity, ListedFile, OrgMemberRole
 from app.naming import SourceURI, parse_source_uri
 
 
@@ -26,8 +26,16 @@ class FakeHub:
         # Scripted whoami identity for token-authenticated paths
         # (registration handshake, human message posts).
         self.whoami_user = "test-user"
+        self.whoami_email: str | None = "test-user@example.com"
         self.whoami_orgs: set[str] = {settings.org}
         self.whoami_fails = False
+        # Scripted challenge-org member roles for the organizer-broadcast gate.
+        self.org_roles: dict[str, str] = {}
+        self.org_roles_by_email: dict[str, tuple[str, str]] = {}
+        self.org_member_roles_fails = False
+        self.org_member_role_by_email_fails = False
+        self.org_member_roles_calls = 0
+        self.org_member_role_by_email_calls = 0
 
     # ── helpers ──────────────────────────────────────────────────────
     def _central(self) -> dict[str, bytes]:
@@ -142,10 +150,34 @@ class FakeHub:
     def whoami_for_token(self, token: str) -> str:
         return self.whoami_user
 
-    def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
+    def whoami_identity(self, token: str) -> HubIdentity:
         if self.whoami_fails:
             raise ValueError("whoami did not return a `name` field")
-        return self.whoami_user, set(self.whoami_orgs)
+        return HubIdentity(
+            username=self.whoami_user,
+            orgs=set(self.whoami_orgs),
+            email=self.whoami_email,
+        )
+
+    def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
+        identity = self.whoami_identity(token)
+        return identity.username, identity.orgs
+
+    def org_member_role_by_email(self, org: str, email: str) -> OrgMemberRole | None:
+        self.org_member_role_by_email_calls += 1
+        if self.org_member_role_by_email_fails:
+            raise RuntimeError("member email lookup failed")
+        member = self.org_roles_by_email.get(email.lower())
+        if member is None:
+            return None
+        user, role = member
+        return OrgMemberRole(user=user, role=role)
+
+    def org_member_roles(self, org: str) -> dict[str, str]:
+        self.org_member_roles_calls += 1
+        if self.org_member_roles_fails:
+            raise RuntimeError("members lookup failed")
+        return {u.lower(): r for u, r in self.org_roles.items()}
 
 
 class FakeJobRunner:

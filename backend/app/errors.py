@@ -132,6 +132,27 @@ class Unauthorized(APIError):
         super().__init__(401, "UNAUTHORIZED", message, hint)
 
 
+class NotOrganizer(APIError):
+    def __init__(
+        self,
+        message: str = "broadcasting is restricted to challenge organizers",
+        hint: str | None = None,
+    ):
+        super().__init__(403, "NOT_ORGANIZER", message, hint)
+
+
+class OrganizerCheckUnavailable(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "ORGANIZER_CHECK_UNAVAILABLE",
+            "could not verify organizer status (org membership lookup failed); "
+            "no message was posted",
+            "retry shortly",
+        )
+        self.headers = {"Retry-After": "30"}
+
+
 class JobsDisabled(APIError):
     def __init__(self) -> None:
         super().__init__(

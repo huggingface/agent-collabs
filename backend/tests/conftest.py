@@ -13,6 +13,7 @@ from app.deps import (
     get_bucket_write_limiter,
     get_dedup,
     get_hub,
+    get_org_roles,
     get_raw_message_limiter,
     get_read_model,
     get_registration_limiter,
@@ -21,6 +22,7 @@ from app.deps import (
     get_verifier,
 )
 from app.main import app as fastapi_app
+from app.org_roles import OrgRoles
 from app.rate_limit import CompoundLimiter, TokenBucket
 from app.read_model import ReadModel
 from app.verification import VerificationStatusStore
@@ -66,6 +68,7 @@ def make_env():
                 get_settings_dep: lambda: settings,
                 get_hub: lambda: hub,
                 get_read_model: lambda: read_model,
+                get_org_roles: lambda: OrgRoles(hub, settings),
                 get_audit: lambda: AuditLogger(hub),
                 get_dedup: lambda: dedup,
                 get_verification_status: lambda: verification,

@@ -108,6 +108,7 @@ REF_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.md$")
 class MessagePost(BaseModel):
     body: str = ""
     refs: list[str] = Field(default_factory=list)
+    broadcast: bool = False
 
 
 @asynccontextmanager
@@ -320,6 +321,10 @@ async def oauth_callback(request: Request):
         # Persist the access token so the user posts to the bucket as
         # themselves (real HF commit attribution) rather than the Space.
         request.session["access_token"] = access_token
+        # Resolve organizer status once, here, so the composer can show the
+        # broadcast toggle. roleInOrg isn't on the OAuth token, so the backend
+        # looks it up with its admin token; a failure just hides the toggle.
+        request.session["is_organizer"] = await _fetch_is_organizer(access_token)
         request.session.pop("oauth_state", None)
         next_url = request.session.pop("oauth_next", "/")
         log.info("[oauth %s] success user=%s", rid, username)
@@ -335,6 +340,29 @@ async def logout(request: Request):
     return RedirectResponse("/")
 
 
+async def _fetch_is_organizer(access_token: str | None) -> bool:
+    """Ask the bucket-sync API whether the signed-in user may broadcast.
+
+    The dashboard can't read roleInOrg from the OAuth token, so it defers to
+    GET /v1/me (which resolves the role with the Space's admin token). Any
+    failure — no backend configured, network, non-200 — degrades to False, so
+    the toggle simply doesn't appear; the post path re-verifies regardless.
+    """
+    if not (BACKEND_API_URL and access_token):
+        return False
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
+            r = await client.get(
+                f"{BACKEND_API_URL}/v1/me",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+        if r.status_code == 200:
+            return bool(r.json().get("is_organizer"))
+    except Exception as e:
+        log.warning("could not resolve organizer status: %s", e)
+    return False
+
+
 @app.get("/api/me")
 async def api_me(request: Request) -> dict[str, Any]:
     user = request.session.get("user")
@@ -344,6 +372,7 @@ async def api_me(request: Request) -> dict[str, Any]:
         "logged_in": True,
         "user": user,
         "avatar": request.session.get("avatar") or "",
+        "is_organizer": bool(request.session.get("is_organizer")),
     }
 
 
@@ -577,7 +606,9 @@ def _format_user_message(username: str, body: str, refs: list[str]) -> tuple[str
     return filename, content
 
 
-def _echo_user_message(username: str, body: str, refs: list[str]) -> str:
+def _echo_user_message(
+    username: str, body: str, refs: list[str], broadcast: bool = False
+) -> str:
     """Reconstruct (approximately) the file the bucket-sync API just wrote,
     for the immediate UI echo — the next full reload serves the real bytes."""
     now = datetime.now(timezone.utc)
@@ -588,6 +619,8 @@ def _echo_user_message(username: str, body: str, refs: list[str]) -> str:
         f"timestamp: {now:%Y-%m-%d %H:%M UTC}",
         "via: dashboard",
     ]
+    if broadcast:
+        frontmatter.append("broadcast: true")
     if refs:
         frontmatter.append(f"refs: {refs[0]}")
     return "\n".join([*frontmatter, "---", "", body, ""])
@@ -604,7 +637,7 @@ class _ApiPostRejected(Exception):
 
 
 async def _post_message_via_api(
-    username: str, body: str, refs: list[str], user_token: str
+    username: str, body: str, refs: list[str], user_token: str, broadcast: bool = False
 ) -> dict[str, Any]:
     """POST through the bucket-sync API so @mentions and quote-refs land in
     agent inboxes (its human-post path). The user's OAuth token is the
@@ -619,6 +652,8 @@ async def _post_message_via_api(
     }
     if refs:
         payload["refs"] = refs[0]
+    if broadcast:
+        payload["broadcast"] = True
     # A fresh client: app.state.client carries the Space's admin HF_TOKEN in
     # its default headers, which must never ride along to another service.
     async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
@@ -635,6 +670,18 @@ async def _post_message_via_api(
             pass
         raise _ApiPostRejected(429, detail or "Rate limited — please slow down.")
     if r.status_code != 201:
+        if broadcast:
+            # A broadcast never falls back to a direct write, so surface the
+            # backend's verdict (403 not-organizer, 503 try-again, …) instead
+            # of a generic failure.
+            detail = ""
+            try:
+                detail = r.json()["detail"]["error"]["message"]
+            except Exception:
+                pass
+            raise _ApiPostRejected(
+                r.status_code, detail or f"Broadcast rejected ({r.status_code})."
+            )
         raise RuntimeError(f"bucket-sync API returned {r.status_code}: {r.text[:200]}")
     return r.json()
 
@@ -676,6 +723,37 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
         raise HTTPException(401, "Not logged in. Sign in with Hugging Face to post.")
     user_token = request.session.get("access_token")
     handle, body, refs = _normalize_human_post(post, username)
+
+    if post.broadcast:
+        # Organizer broadcast: only the bucket-sync API performs the gated
+        # broadcasts/ write, so this path never falls back to the local or
+        # direct write (which would post a plain message and silently drop the
+        # broadcast). The session flag is a UI gate; the API re-verifies.
+        if not request.session.get("is_organizer"):
+            raise HTTPException(403, "Only organizers can broadcast to everyone.")
+        if not (BACKEND_API_URL and user_token):
+            raise HTTPException(
+                503, "Broadcasting requires the bucket-sync API and a signed-in session."
+            )
+        try:
+            posted = await _post_message_via_api(
+                handle, body, refs, user_token, broadcast=True
+            )
+        except _ApiPostRejected as e:
+            raise HTTPException(e.status, e.detail)
+        except Exception as e:
+            log.warning("broadcast via bucket-sync API failed: %s", e)
+            raise HTTPException(502, "Broadcast failed; nothing was posted.") from e
+        _invalidate_list_cache(PREFIX)
+        return {
+            "item": {
+                "filename": posted["filename"],
+                "content": _echo_user_message(handle, body, refs, broadcast=True),
+            },
+            "mentions_delivered": posted.get("mentions_delivered") or [],
+            "broadcast": True,
+        }
+
     delivered: list[str] = []
     if LOCAL_BUCKET_DIR:
         filename, content = _format_user_message(handle, body, refs)

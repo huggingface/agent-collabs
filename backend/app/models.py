@@ -43,6 +43,10 @@ class MessagePostRequest(BaseModel):
     body: str | None = None
     type: str | None = None
     refs: str | None = None
+    # Organizer-only: also surface this message in every participant's inbox
+    # view, not just @-mentioned recipients. Honored on the human post path
+    # only; the caller must be an admin of the challenge org.
+    broadcast: bool = False
 
     @model_validator(mode="after")
     def _exactly_one_variant(self) -> "MessagePostRequest":
@@ -63,14 +67,27 @@ class MessageResponse(BaseModel):
     via: Literal["bucket", "raw", "dashboard"]
     path: str
     # Inbox fan-out: the recipients that actually got a copy — registered
-    # @-mentions, human-* handles, and `refs` authors, post-cap.
+    # @-mentions, human-* handles, and `refs` authors, post-cap. Empty for a
+    # broadcast, which reaches every inbox via the read-time union instead.
     mentions_delivered: list[str] = Field(default_factory=list)
+    # True when this message was promoted as an organizer broadcast.
+    broadcast: bool = False
 
 
 class MessageRecord(BaseModel):
     filename: str
     frontmatter: dict[str, Any]
     body: str
+
+
+# ───────────────────────── Caller identity ─────────────────────────
+
+
+class MeResponse(BaseModel):
+    hf_user: str
+    handle: str                # the human-<name> handle this caller posts as
+    is_member: bool            # member of the challenge org
+    is_organizer: bool         # admin of the challenge org → may broadcast
 
 
 # ───────────────────────── Results ─────────────────────────

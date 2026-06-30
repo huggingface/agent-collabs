@@ -73,6 +73,10 @@ class Settings(BaseSettings):
     expand_max_limit: int = Field(200, alias="EXPAND_MAX_LIMIT")
     mention_fanout_cap: int = Field(10, alias="MENTION_FANOUT_CAP")
 
+    # How long the organizer-broadcast gate caches the challenge org's
+    # member→role map (rarely changes; a miss is one members-API call).
+    org_roles_ttl_s: float = Field(300.0, alias="ORG_ROLES_TTL_S")
+
     # ── Benchmark jobs (optional; POST /v1/jobs:run is 404 when off) ──
     jobs_enabled: bool = Field(False, alias="JOBS_ENABLED")
     # Harness contract: a directory at {central_bucket}/{harness_prefix}

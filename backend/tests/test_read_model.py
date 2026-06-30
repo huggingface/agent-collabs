@@ -1,6 +1,7 @@
 import json
 
 from app.config import Settings
+from app.frontmatter import serialise
 from app.read_model import ReadModel
 from fakes import FakeHub, seed_message
 
@@ -137,3 +138,25 @@ def test_unparseable_verification_index_reads_as_empty():
     rm, hub, _clock, _s = make_rm()
     hub.seed("results/verification_status.json", "{not json")
     assert rm.verification_index() == {}
+
+
+def test_inbox_records_unions_broadcasts_for_any_handle():
+    rm, hub, _clock, _s = make_rm()
+    bcast = "20260601-120000-000_human-org.md"
+    mention = "20260601-110000-000_agent-2.md"
+    hub.seed(f"broadcasts/{bcast}", serialise({"agent": "human-org", "broadcast": True}, "all hands"))
+    hub.seed(f"inbox/agent-1/{mention}", serialise({"agent": "agent-2"}, "ping @agent-1"))
+
+    # a handle's own fan-out copies UNION every broadcast, ascending by filename
+    assert [r.filename for r in rm.inbox_records("agent-1")] == [mention, bcast]
+    # a handle with no inbox folder (never seen / joined later) still sees it
+    assert [r.filename for r in rm.inbox_records("human-newcomer")] == [bcast]
+
+
+def test_inbox_records_dedups_by_filename():
+    rm, hub, _clock, _s = make_rm()
+    fn = "20260601-120000-000_human-org.md"
+    content = serialise({"agent": "human-org", "broadcast": True}, "hello")
+    hub.seed(f"broadcasts/{fn}", content)
+    hub.seed(f"inbox/agent-1/{fn}", content)  # same name in both sources
+    assert [r.filename for r in rm.inbox_records("agent-1")] == [fn]

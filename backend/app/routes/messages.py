@@ -13,6 +13,7 @@ from app.deps import (
     get_bucket_write_limiter,
     get_dedup,
     get_hub,
+    get_org_roles,
     get_raw_message_limiter,
     get_read_model,
     get_settings_dep,
@@ -21,13 +22,16 @@ from app.errors import (
     AlreadyPromoted,
     IdentityMismatch,
     NotFound,
+    NotOrganizer,
     NotRegistered,
+    OrganizerCheckUnavailable,
     RateLimited,
     Unauthorized,
 )
 from app.announce import promote_message
 from app.frontmatter import merge, parse
-from app.hub import HubClient
+from app.hub import HubClient, HubIdentity
+from app.org_roles import OrgRoles
 from app.listing import list_message_like
 from app.models import (
     MessageListing,
@@ -62,8 +66,8 @@ def require_registered(read_model: ReadModel, hub: HubClient, agent_id: str) -> 
 
 def _verify_human_author(
     handle: str, authorization: str | None, settings: Settings, hub: HubClient
-) -> None:
-    """Identity check for human-<name> posts (§5.4a).
+) -> HubIdentity:
+    """Identity check for human-<name> posts (§5.4a); returns HF identity facts.
 
     Humans never register (the namespace is reserved at registration), so the
     proof is per call: the bearer token must resolve via whoami to an org
@@ -78,19 +82,39 @@ def _verify_human_author(
             hint="the dashboard forwards the signed-in user's OAuth token",
         )
     try:
-        hf_user, orgs = hub.whoami_user_and_orgs(token)
+        identity = hub.whoami_identity(token)
     except Exception:
         raise Unauthorized(
             "could not resolve caller identity via whoami; check your token"
         )
-    if settings.org not in orgs:
+    if settings.org not in identity.orgs:
         raise IdentityMismatch(
-            f"hf user '{hf_user}' is not a member of '{settings.org}'"
+            f"hf user '{identity.username}' is not a member of '{settings.org}'"
         )
-    expected = f"{HUMAN_HANDLE_PREFIX}{hf_user.lower()}"
+    expected = f"{HUMAN_HANDLE_PREFIX}{identity.username.lower()}"
     if handle != expected:
         raise IdentityMismatch(
             f"agent_id '{handle}' does not match caller identity '{expected}'"
+        )
+    return identity
+
+
+def _require_organizer(
+    identity: HubIdentity, org_roles: OrgRoles, settings: Settings
+) -> None:
+    """Gate a broadcast on the caller being an admin of the challenge org.
+
+    The role isn't on the caller's OAuth token, so it's resolved with the
+    Space's admin token. A lookup failure fails closed (503), never a silent
+    downgrade to a normal post.
+    """
+    try:
+        role = org_roles.role_of(identity.username, email=identity.email)
+    except Exception:
+        raise OrganizerCheckUnavailable()
+    if role != "admin":
+        raise NotOrganizer(
+            f"hf user '{identity.username}' is not an admin of '{settings.org}'"
         )
 
 
@@ -114,10 +138,18 @@ def post_message(
     bucket_limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
     read_model: ReadModel = Depends(get_read_model),
+    org_roles: OrgRoles = Depends(get_org_roles),
 ) -> MessageResponse:
     now = utc_now()
 
     if req.source is not None:
+        if req.broadcast:
+            # Agents post from their bucket; broadcasting is for organizers,
+            # who act as a signed-in human.
+            raise NotOrganizer(
+                "only organizers can broadcast",
+                hint="broadcast from a signed-in organizer account (human-<name>)",
+            )
         parsed, agent_id = resolve_source(settings, req.source)
         require_registered(read_model, hub, agent_id)
 
@@ -128,6 +160,11 @@ def post_message(
         body_bytes = hub.read_bytes(parsed)
         body_text = body_bytes.decode("utf-8")
         client_fm, source_body = parse(body_text)
+        if "broadcast" in client_fm:
+            raise NotOrganizer(
+                "broadcast frontmatter is server-owned and organizer-only",
+                hint="broadcast from a signed-in organizer account with broadcast: true",
+            )
 
         dest_folder = "message_board"
         existing = dedup.get(content_hash(body_bytes), dest_folder)
@@ -176,10 +213,17 @@ def post_message(
         # Human-authored post (§5.4a) — e.g. the dashboard composer. Humans
         # cannot register, so instead of the registration gate the caller
         # proves the identity per call with their own HF token.
-        _verify_human_author(req.agent_id, authorization, settings, hub)
+        identity = _verify_human_author(req.agent_id, authorization, settings, hub)
+        if req.broadcast:
+            _require_organizer(identity, org_roles, settings)
         via = "dashboard"
         default_type = "user"
     else:
+        if req.broadcast:
+            raise NotOrganizer(
+                "only organizers can broadcast",
+                hint="broadcast from a signed-in organizer account (human-<name>)",
+            )
         require_registered(read_model, hub, req.agent_id)
         via = "raw"
         default_type = "agent"
@@ -202,8 +246,14 @@ def post_message(
         fm=merged,
         body=req.body,
         now=now,
+        broadcast=req.broadcast,
     )
 
+    audit_extra: dict = {}
+    if recipients:
+        audit_extra["mentions_delivered"] = recipients
+    if req.broadcast:
+        audit_extra["broadcast"] = True
     audit.write(
         agent_id=req.agent_id,
         route="/v1/messages",
@@ -214,11 +264,15 @@ def post_message(
         status_code=201,
         caller_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
-        extra={"mentions_delivered": recipients} if recipients else None,
+        extra=audit_extra or None,
     )
 
     return MessageResponse(
-        filename=filename, via=via, path=target, mentions_delivered=recipients
+        filename=filename,
+        via=via,
+        path=target,
+        mentions_delivered=recipients,
+        broadcast=req.broadcast,
     )
 
 
