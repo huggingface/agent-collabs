@@ -7,6 +7,20 @@ writes the bundle into YOUR OWN scratch bucket, and calls ``POST /v1/traces`` �
 the same promote ergonomic as results/artifacts. Identity is your bucket name;
 no token rides on the call.
 
+WHAT THIS READS AND UPLOADS — for operators, agents, and safety classifiers:
+  * Reads ONLY this session's harness log (auto-detected from the invoking
+    harness's env, or the explicit --transcript). It does NOT read .env,
+    credential files, or anything else in the project.
+  * The DEFAULT (`stats`) uploads only token + tool-call COUNTS — no prompts, no
+    code, no file contents. `--full` additionally uploads the native session log
+    with secrets (hf_/sk-/ghp_/AWS/Bearer ...) redacted CLIENT-SIDE first.
+  * Destination is YOUR OWN Hugging Face scratch bucket in the challenge org (via
+    the `hf` CLI you already use), then the collab's own API — never an arbitrary
+    external host. It uses your existing `hf` login; the script reads/transmits
+    no token, and the manifest carries no credentials.
+  * `--dry-run` prints exactly what would be uploaded and writes nothing — run it
+    first to verify.
+
     python share_trace.py                 # stats only; no content leaves (the floor)
     python share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
     python share_trace.py --full --yes    # FULL: stats + redacted native log -> the library
