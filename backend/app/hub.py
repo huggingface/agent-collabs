@@ -14,11 +14,13 @@ from huggingface_hub import (
     list_bucket_tree,
     whoami,
 )
+from huggingface_hub.constants import ENDPOINT
 from huggingface_hub.errors import (
     EntryNotFoundError,
     HfHubHTTPError,
     RepositoryNotFoundError,
 )
+from huggingface_hub.utils import build_hf_headers, get_session
 
 from app.config import Settings
 from app.naming import SourceURI, parse_source_uri
@@ -32,6 +34,19 @@ class ListedFile:
     rel_path: str
     size: int
     xet_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class HubIdentity:
+    username: str
+    orgs: set[str]
+    email: str | None = None
+
+
+@dataclass(frozen=True)
+class OrgMemberRole:
+    user: str
+    role: str
 
 
 class HubClient:
@@ -71,9 +86,13 @@ class HubClient:
             return info["name"]
         raise ValueError("whoami did not return a `name` field")
 
-    def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
-        """Resolve a caller token to (hf_user, org names). Used by the human
-        message path (§5.4a), where org membership gates the write."""
+    def whoami_identity(self, token: str) -> HubIdentity:
+        """Resolve a caller token to HF identity facts used by human posts.
+
+        OAuth tokens expose org membership but not roleInOrg. When the Space's
+        OAuth app requests the email scope, the email lets the organizer gate
+        perform a targeted org-member lookup instead of scanning the full org.
+        """
         info = whoami(token=token)
         if not isinstance(info, dict) or not info.get("name"):
             raise ValueError("whoami did not return a `name` field")
@@ -82,7 +101,92 @@ class HubClient:
             for o in (info.get("orgs") or [])
             if isinstance(o, dict) and o.get("name")
         }
-        return info["name"], orgs
+        email = info.get("email")
+        if not isinstance(email, str) or not email.strip():
+            email = None
+        return HubIdentity(info["name"], orgs, email.strip() if email else None)
+
+    def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
+        """Resolve a caller token to (hf_user, org names). Used by existing
+        identity gates that do not need optional email."""
+        identity = self.whoami_identity(token)
+        return identity.username, identity.orgs
+
+    def org_member_role_by_email(self, org: str, email: str) -> OrgMemberRole | None:
+        """Resolve one org member by email and return its role, if available.
+
+        The members endpoint supports an email filter for orgs with a matching
+        Organization email domain or SSO allowed domain. This is the scalable
+        organizer check path: one request for the caller instead of listing
+        every org member. Transport errors propagate so callers can fall back
+        or fail closed.
+        """
+        session = get_session()
+        headers = build_hf_headers(token=self._token)
+        url = f"{ENDPOINT}/api/organizations/{org}/members"
+        resp = session.get(
+            url,
+            headers=headers,
+            params={"email": email, "limit": 1},
+            timeout=10,
+        )
+        resp.raise_for_status()
+        page = resp.json()
+        if not isinstance(page, list) or not page:
+            return None
+        member = page[0]
+        if not isinstance(member, dict):
+            return None
+        user, role = member.get("user"), member.get("role")
+        if not isinstance(user, str) or not isinstance(role, str):
+            return None
+        return OrgMemberRole(user=user, role=role)
+
+    def org_member_roles(self, org: str) -> dict[str, str]:
+        """Map {lowercased username: org role} for every member of ``org``.
+
+        whoami omits a caller's org role for OAuth tokens, so the organizer
+        gate can't read it from the caller's own token; instead the Space
+        looks the role up here with its admin token. Lists the members
+        endpoint, following Link pagination and falling back to offset-style
+        pagination if needed. Raises on transport error so the caller
+        can fail closed rather than treat an outage as "not an organizer".
+        """
+        session = get_session()
+        headers = build_hf_headers(token=self._token)
+        url = f"{ENDPOINT}/api/organizations/{org}/members"
+        page_size = 100
+        roles: dict[str, str] = {}
+        offset = 0
+        params: dict[str, int] | None = {"limit": page_size, "offset": offset}
+        while True:
+            resp = session.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=10,
+            )
+            resp.raise_for_status()
+            page = resp.json()
+            if not isinstance(page, list) or not page:
+                break
+            before = len(roles)
+            for m in page:
+                if not isinstance(m, dict):
+                    continue
+                user, role = m.get("user"), m.get("role")
+                if user and role:
+                    roles[user.lower()] = role
+            next_url = resp.links.get("next", {}).get("url")
+            if next_url:
+                url = next_url
+                params = None
+                continue
+            if len(page) < page_size or len(roles) == before:
+                break
+            offset += page_size
+            params = {"limit": page_size, "offset": offset}
+        return roles
 
     # ───────────────────────── Reads ─────────────────────────
 

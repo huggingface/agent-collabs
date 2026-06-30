@@ -36,7 +36,7 @@ from typing import Any, Callable
 from app.config import Settings
 from app.frontmatter import parse
 from app.hub import HubClient, ListedFile
-from app.naming import VERIFICATION_STATUS_PATH
+from app.naming import BROADCASTS_FOLDER, VERIFICATION_STATUS_PATH
 
 
 log = logging.getLogger(__name__)
@@ -260,6 +260,20 @@ class ReadModel:
             e.rel_path.rsplit("/", 1)[-1].removesuffix(".md")
             for e in self._md_entries("agents")
         }
+
+    def inbox_records(self, handle: str) -> list[Record]:
+        """The handle's inbox view: its mention/refs fan-out copies UNION every
+        organizer broadcast. Broadcasts are stored once under broadcasts/ and
+        merged here at read time, so a handle that never registered or joined
+        after the broadcast still sees it. Deduped by filename (the same
+        server-stamped name is unique), ascending by filename; callers apply
+        the list grammar (order, cursor, limit)."""
+        by_name: dict[str, Record] = {}
+        for r in self.records(f"inbox/{handle}"):
+            by_name[r.filename] = r
+        for r in self.records(BROADCASTS_FOLDER):
+            by_name.setdefault(r.filename, r)
+        return [by_name[f] for f in sorted(by_name)]
 
     def invalidate_verification_index(self) -> None:
         """Drop the cached verification index after the Space itself rewrites

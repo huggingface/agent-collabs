@@ -8,6 +8,7 @@ from app.dedup import PromotionLRU
 from app.hub import HubClient
 from app.job_quota import DurableJobQuota
 from app.jobs import JobRunner
+from app.org_roles import OrgRoles
 from app.rate_limit import CompoundLimiter, TokenBucket
 from app.read_model import ReadModel
 from app.verification import VerificationStatusStore
@@ -47,6 +48,11 @@ def get_read_model() -> ReadModel:
 @lru_cache
 def get_audit() -> AuditLogger:
     return AuditLogger(get_hub())
+
+
+@lru_cache
+def get_org_roles() -> OrgRoles:
+    return OrgRoles(get_hub(), get_settings())
 
 
 @lru_cache

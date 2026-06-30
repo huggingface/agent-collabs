@@ -77,6 +77,16 @@ def inbox_path(agent_id: str, filename: str) -> str:
     return f"inbox/{agent_id}/{filename}"
 
 
+BROADCASTS_FOLDER = "broadcasts"
+
+
+def broadcast_path(filename: str) -> str:
+    """One shared copy of an organizer broadcast, byte-identical to its board
+    file. Stored once here, not fanned out; the inbox read-time union surfaces
+    it to every handle, so lurkers and late-registered agents see it too."""
+    return f"{BROADCASTS_FOLDER}/{filename}"
+
+
 def taskforce_dir(name: str) -> str:
     return f"taskforces/{name}"
 

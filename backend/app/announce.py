@@ -12,7 +12,7 @@ from app.config import Settings
 from app.frontmatter import merge, serialise
 from app.hub import HubClient
 from app.mentions import extract_recipients
-from app.naming import inbox_path, message_path, stamp_yaml, utc_now
+from app.naming import broadcast_path, inbox_path, message_path, stamp_yaml, utc_now
 from app.read_model import ReadModel
 
 
@@ -25,22 +25,34 @@ def promote_message(
     fm: dict,
     body: str,
     now: datetime,
+    broadcast: bool = False,
 ) -> tuple[str, str, list[str], int]:
     """Land the board file and its inbox fan-out copies (§16.4) in one batch
     write, then write-through the cache. Returns (target, filename,
-    recipients, bytes)."""
+    recipients, bytes).
+
+    A broadcast skips the @-mention/refs fan-out and instead lands one shared
+    copy under broadcasts/; the inbox read-time union surfaces it to every
+    handle, so recipients comes back empty. Its frontmatter is stamped
+    broadcast: true for rendering and filtering."""
+    if broadcast:
+        fm = {**fm, "broadcast": True}
     content = serialise(fm, body)
     content_bytes = content.encode("utf-8")
     target = message_path(agent_id, now)
     filename = target.rsplit("/", 1)[-1]
-    recipients = extract_recipients(
-        body=body,
-        refs=fm.get("refs"),
-        author=agent_id,
-        registered=read_model.registered_agents(),
-        cap=settings.mention_fanout_cap,
-    )
-    targets = [target] + [inbox_path(r, filename) for r in recipients]
+    if broadcast:
+        recipients: list[str] = []
+        targets = [target, broadcast_path(filename)]
+    else:
+        recipients = extract_recipients(
+            body=body,
+            refs=fm.get("refs"),
+            author=agent_id,
+            registered=read_model.registered_agents(),
+            cap=settings.mention_fanout_cap,
+        )
+        targets = [target] + [inbox_path(r, filename) for r in recipients]
     hub.write_many_central([(content_bytes, t) for t in targets])
     for t in targets:
         read_model.write_through(t, fm, body, len(content_bytes))

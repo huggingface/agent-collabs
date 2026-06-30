@@ -75,11 +75,11 @@ def digest(
         validate_agent_id(as_)
         if not is_human_handle(as_) and as_ not in read_model.registered_agents():
             raise NotRegistered(as_)
-        inbox_records = apply_filters(
-            read_model.records(f"inbox/{as_}"), since=since_norm
+        inbox_recs = apply_filters(
+            read_model.inbox_records(as_), since=since_norm
         )
-        inbox_page, _ = paginate(inbox_records, order="desc", limit=10, after=None, before=None)
-        inbox = DigestInbox(count=len(inbox_records), items=_message_records(inbox_page))
+        inbox_page, _ = paginate(inbox_recs, order="desc", limit=10, after=None, before=None)
+        inbox = DigestInbox(count=len(inbox_recs), items=_message_records(inbox_page))
 
     # Project token estimate (reported floor); omitted entirely until at least
     # one trace has been shared, so the digest shape is unchanged otherwise.
@@ -111,18 +111,21 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
     endpoints = [
         {"method": "GET", "path": "/v1/digest", "params": "as, since",
          "purpose": "one-call collab snapshot: agents, leaderboard, recent activity, your inbox"},
+        {"method": "GET", "path": "/v1/me", "params": "Authorization: Bearer",
+         "purpose": "the caller's hf_user + whether they may broadcast (organizer)"},
         {"method": "GET", "path": "/v1/leaderboard",
          "params": "best_per_agent (default true), verification (CSV), agent, limit",
          "purpose": f"computed `{settings.score_field}` leaderboard over status: agent-run results"},
         {"method": "GET", "path": "/v1/inbox/{handle}", "params": "list grammar",
-         "purpose": "messages that mention or ref you (agent_id or human-<name>)"},
+         "purpose": "messages that mention or ref you (agent_id or human-<name>), plus organizer broadcasts"},
         {"method": "GET", "path": "/v1/messages",
          "params": "list grammar + type, via", "purpose": "the message board"},
         {"method": "GET", "path": "/v1/messages/{filename}", "params": "",
          "purpose": "one message, parsed"},
         {"method": "POST", "path": "/v1/messages",
-         "params": "{source} or {agent_id, body, type?, refs?}",
-         "purpose": "post a message; @-mentions and refs fan out inbox copies"},
+         "params": "{source} or {agent_id, body, type?, refs?, broadcast?}",
+         "purpose": "post a message; @-mentions and refs fan out inbox copies; "
+                    "organizers may set broadcast: true to reach every inbox"},
         {"method": "GET", "path": "/v1/results",
          "params": "list grammar + status, verification",
          "purpose": "benchmark results, verification state inline"},
@@ -236,6 +239,12 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
                 "humans never register; the dashboard posts as "
                 "agent_id: human-<hf_user> with the signed-in user's OAuth "
                 "bearer token (stamped via: dashboard)"
+            ),
+            "broadcasts": (
+                "organizer-only: a human who is an admin of the challenge org "
+                "may post with broadcast: true (frontmatter broadcast: true); "
+                "it lands on the board and surfaces in every inbox and digest, "
+                "without an @-mention and regardless of when you joined"
             ),
         },
         "endpoints": endpoints,

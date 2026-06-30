@@ -44,7 +44,7 @@ def get_inbox(
     if not is_human_handle(handle) and handle not in read_model.registered_agents():
         raise NotRegistered(handle)
     return list_message_like(
-        read_model.records(f"inbox/{handle}"),
+        read_model.inbox_records(handle),
         agent=agent,
         since=since,
         until=until,

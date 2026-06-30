@@ -13,6 +13,7 @@ from app.routes import (
     inbox,
     jobs,
     leaderboard,
+    me,
     messages,
     results,
     sync,
@@ -27,6 +28,7 @@ app = FastAPI(title="bucket-sync", version="1.3.0")
 
 app.include_router(health.router)
 app.include_router(digest.router)
+app.include_router(me.router)
 app.include_router(agents.router)
 app.include_router(messages.router)
 app.include_router(results.router)

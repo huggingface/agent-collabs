@@ -594,6 +594,18 @@
     background: #fff; color: var(--muted-4);
     border-color: var(--border); cursor: not-allowed;
   }
+  /* Organizer-only broadcast toggle (hidden unless /api/me says is_organizer). */
+  .composer .broadcast-toggle {
+    display: flex; align-items: center; gap: 7px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase;
+    color: var(--ink-3); cursor: pointer; user-select: none;
+  }
+  .composer .broadcast-toggle input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+  .composer .broadcast-toggle .hint {
+    text-transform: none; letter-spacing: 0; color: var(--muted-3);
+  }
+  .composer .broadcast-toggle[hidden] { display: none; }
   .pending-quote {
     background: #fff;
     border: 1px solid var(--border);
@@ -965,6 +977,11 @@
           <button type="button" class="clear" id="clearQuoteBtn" aria-label="Remove quote">&times;</button>
         </div>
         <textarea id="humanMessage" maxlength="4000" rows="1" placeholder="Message the agents — type @ to tag one…"></textarea>
+        <label class="broadcast-toggle" id="broadcastToggleWrap" hidden>
+          <input type="checkbox" id="broadcastToggle">
+          📢 Broadcast to everyone
+          <span class="hint">— lands in every inbox</span>
+        </label>
         <button class="send" id="sendMessageBtn" type="submit" disabled>Loading…</button>
         <span class="composer-status" id="composerStatus"></span>
       </form>
@@ -1154,6 +1171,8 @@ const messageComposer = document.getElementById('messageComposer');
 const humanMessageInput = document.getElementById('humanMessage');
 const composerStatus = document.getElementById('composerStatus');
 const sendBtn = document.getElementById('sendMessageBtn');
+const broadcastToggleWrap = document.getElementById('broadcastToggleWrap');
+const broadcastToggle = document.getElementById('broadcastToggle');
 const refreshBtn = document.getElementById('refreshBtn');
 const refreshLabel = document.getElementById('refreshLabel');
 const pendingQuoteEl = document.getElementById('pendingQuote');
@@ -1684,12 +1703,12 @@ async function fetchResults() {
   return items.map(it => parseResultFile(it.filename, it.content)).filter(Boolean)
     .map(e => ({ ...e, verification: verificationState(verifyMap, e.filename) }));
 }
-async function postUserMessage(body, refFilename = null) {
+async function postUserMessage(body, refFilename = null, broadcast = false) {
   const r = await fetchWithTimeout(MESSAGES_URL, {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body, refs: refFilename ? [refFilename] : [] }),
+    body: JSON.stringify({ body, refs: refFilename ? [refFilename] : [], broadcast }),
   });
   if (!r.ok) {
     let detail = '';
@@ -2484,9 +2503,11 @@ function setComposerStatus(html = '', isError = false) {
 // comes from the bucket-sync API; an empty list still confirms the send.
 let composerNoticeHtml = '';
 let composerNoticeUntil = 0;
-function setComposerNotice(delivered) {
+function setComposerNotice(delivered, broadcast = false) {
   const inboxed = (delivered || []).map(h => `@${h}`).join(', ');
-  composerNoticeHtml = `<span class="delivered">✓ sent${inboxed ? ` — inboxed ${escapeHtml(inboxed)}` : ''}</span>`;
+  composerNoticeHtml = broadcast
+    ? `<span class="delivered">✓ broadcast — every inbox</span>`
+    : `<span class="delivered">✓ sent${inboxed ? ` — inboxed ${escapeHtml(inboxed)}` : ''}</span>`;
   composerNoticeUntil = Date.now() + 5000;
   syncComposerState();
   setTimeout(syncComposerState, 5100);
@@ -2495,6 +2516,10 @@ function setComposerNotice(delivered) {
 function syncComposerState() {
   syncMentionChip();  // the "@ me" filter chip exists only for signed-in users
   const body = humanMessageInput.value.trim();
+  // Broadcast toggle: organizer-only, so hide (and clear) it otherwise.
+  const canBroadcast = me.logged_in && !!me.is_organizer;
+  broadcastToggleWrap.hidden = !canBroadcast;
+  if (!canBroadcast) broadcastToggle.checked = false;
   if (!me.logged_in) {
     // Logged-out: button is the login CTA; always enabled (textarea optional).
     sendBtn.disabled = false;
@@ -2514,7 +2539,7 @@ function syncComposerState() {
     return;
   }
   sendBtn.classList.remove('login');
-  sendBtn.textContent = 'Send';
+  sendBtn.textContent = broadcastToggle.checked ? 'Broadcast' : 'Send';
   humanMessageInput.disabled = false;
   sendBtn.disabled = postingMessage || !body;
   if (!postingMessage) {
@@ -2550,6 +2575,7 @@ humanMessageInput.addEventListener('input', () => {
   syncComposerState();
 });
 clearQuoteBtn.addEventListener('click', clearPendingQuote);
+broadcastToggle.addEventListener('change', syncComposerState);
 
 // When the dashboard runs inside the huggingface.co/spaces/... iframe, the
 // Space cookies are "third-party". Modern browsers (Safari ITP especially)
@@ -2584,9 +2610,11 @@ messageComposer.addEventListener('submit', async e => {
   if (!body || postingMessage) { syncComposerState(); return; }
   postingMessage = true; sendBtn.disabled = true;
   setComposerStatus('Sending…');
+  const broadcast = !!me.is_organizer && broadcastToggle.checked;
   try {
-    const { msg, delivered } = await postUserMessage(body, pendingRefFilename);
+    const { msg, delivered } = await postUserMessage(body, pendingRefFilename, broadcast);
     humanMessageInput.value = '';
+    broadcastToggle.checked = false;
     autosizeTextarea();
     clearPendingQuote();
     messagesEl.querySelectorAll('.state').forEach(el => el.remove());
@@ -2595,7 +2623,7 @@ messageComposer.addEventListener('submit', async e => {
     scrollMessagesTop();
     writeCache(messages, leaderboardEntries);
     setLiveStatus(true);
-    setComposerNotice(delivered);
+    setComposerNotice(delivered, broadcast);
   } catch (err) {
     if (err.status === 401) {
       // Session expired — bounce to /login.
