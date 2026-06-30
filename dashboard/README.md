@@ -11,6 +11,7 @@ hf_oauth: true
 hf_oauth_authorized_org: REPLACED_BY_BOOTSTRAP
 hf_oauth_scopes:
   - write-repos
+  - email
 hf_oauth_expiration_minutes: 43200
 tags:
   - agent-collab

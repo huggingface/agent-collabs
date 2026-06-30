@@ -93,7 +93,7 @@ HUB_FETCH_TIMEOUT = float(os.environ.get("HUB_FETCH_TIMEOUT", "30.0"))
 # friendly error and /api/me always reports logged-out.
 OAUTH_CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID")
 OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET")
-OAUTH_SCOPES = os.environ.get("OAUTH_SCOPES", "openid profile write-repos")
+OAUTH_SCOPES = os.environ.get("OAUTH_SCOPES", "openid profile email write-repos")
 OAUTH_REQUIRED_ORG = os.environ.get("OAUTH_REQUIRED_ORG", ORG)
 SESSION_SECRET = (
     os.environ.get("SESSION_SECRET")
@@ -321,10 +321,8 @@ async def oauth_callback(request: Request):
         # Persist the access token so the user posts to the bucket as
         # themselves (real HF commit attribution) rather than the Space.
         request.session["access_token"] = access_token
-        # Resolve organizer status once, here, so the composer can show the
-        # broadcast toggle. roleInOrg isn't on the OAuth token, so the backend
-        # looks it up with its admin token; a failure just hides the toggle.
-        request.session["is_organizer"] = await _fetch_is_organizer(access_token)
+        # /api/me refreshes the organizer display hint on the redirected page.
+        request.session.pop("is_organizer", None)
         request.session.pop("oauth_state", None)
         next_url = request.session.pop("oauth_next", "/")
         log.info("[oauth %s] success user=%s", rid, username)
@@ -340,16 +338,17 @@ async def logout(request: Request):
     return RedirectResponse("/")
 
 
-async def _fetch_is_organizer(access_token: str | None) -> bool:
+async def _fetch_is_organizer(access_token: str | None) -> bool | None:
     """Ask the bucket-sync API whether the signed-in user may broadcast.
 
     The dashboard can't read roleInOrg from the OAuth token, so it defers to
     GET /v1/me (which resolves the role with the Space's admin token). Any
-    failure — no backend configured, network, non-200 — degrades to False, so
-    the toggle simply doesn't appear; the post path re-verifies regardless.
+    failure — no backend configured, network, non-200 — returns None so a
+    transient outage does not permanently overwrite the display hint. The post
+    path re-verifies regardless.
     """
     if not (BACKEND_API_URL and access_token):
-        return False
+        return None
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
             r = await client.get(
@@ -360,7 +359,7 @@ async def _fetch_is_organizer(access_token: str | None) -> bool:
             return bool(r.json().get("is_organizer"))
     except Exception as e:
         log.warning("could not resolve organizer status: %s", e)
-    return False
+    return None
 
 
 @app.get("/api/me")
@@ -368,6 +367,9 @@ async def api_me(request: Request) -> dict[str, Any]:
     user = request.session.get("user")
     if not user:
         return {"logged_in": False, "oauth_configured": bool(OAUTH_CLIENT_ID)}
+    is_organizer = await _fetch_is_organizer(request.session.get("access_token"))
+    if is_organizer is not None:
+        request.session["is_organizer"] = is_organizer
     return {
         "logged_in": True,
         "user": user,
@@ -728,9 +730,8 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
         # Organizer broadcast: only the bucket-sync API performs the gated
         # broadcasts/ write, so this path never falls back to the local or
         # direct write (which would post a plain message and silently drop the
-        # broadcast). The session flag is a UI gate; the API re-verifies.
-        if not request.session.get("is_organizer"):
-            raise HTTPException(403, "Only organizers can broadcast to everyone.")
+        # broadcast). The session flag is only a display hint; the API
+        # re-verifies and returns the authoritative allow/deny verdict.
         if not (BACKEND_API_URL and user_token):
             raise HTTPException(
                 503, "Broadcasting requires the bucket-sync API and a signed-in session."
@@ -739,7 +740,10 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
             posted = await _post_message_via_api(
                 handle, body, refs, user_token, broadcast=True
             )
+            request.session["is_organizer"] = True
         except _ApiPostRejected as e:
+            if e.status == 403:
+                request.session["is_organizer"] = False
             raise HTTPException(e.status, e.detail)
         except Exception as e:
             log.warning("broadcast via bucket-sync API failed: %s", e)
