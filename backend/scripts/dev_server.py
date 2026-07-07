@@ -26,11 +26,10 @@ sys.path.insert(0, str(_BACKEND))          # app.*
 sys.path.insert(0, str(_BACKEND / "tests"))  # fakes (the canonical hub fake)
 
 # Dev-friendly limits unless the caller pins their own — the production
-# defaults (5 raw msgs/min, 2 channel creations/hour) get in the way of
-# hammering a test stack. Must be set before app.config reads the env.
+# default (5 raw msgs/min) gets in the way of hammering a test stack.
+# Must be set before app.config reads the env.
 os.environ.setdefault("RAW_MESSAGE_PER_MINUTE", "60")
 os.environ.setdefault("RAW_MESSAGE_PER_HOUR", "1000")
-os.environ.setdefault("CHANNEL_CREATE_PER_HOUR", "30")
 
 from app.audit import AuditLogger                      # noqa: E402
 from app.config import Settings                        # noqa: E402
@@ -38,7 +37,6 @@ from app.dedup import PromotionLRU                     # noqa: E402
 from app.deps import (                                 # noqa: E402
     get_audit,
     get_bucket_write_limiter,
-    get_channel_create_limiter,
     get_dedup,
     get_hub,
     get_org_roles,
@@ -263,9 +261,6 @@ def main() -> None:
         get_registration_limiter: lambda: TokenBucket(
             capacity=settings.registration_per_minute,
             refill_per_minute=settings.registration_per_minute),
-        get_channel_create_limiter: lambda: TokenBucket(
-            capacity=settings.channel_create_per_hour,
-            refill_per_minute=settings.channel_create_per_hour / 60.0),
     })
 
     log.info("central bucket on disk: %s", root / settings.central_bucket)

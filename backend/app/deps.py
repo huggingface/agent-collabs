@@ -100,16 +100,5 @@ def get_registration_limiter() -> TokenBucket:
     return TokenBucket(capacity=s.registration_per_minute, refill_per_minute=s.registration_per_minute)
 
 
-@lru_cache
-def get_channel_create_limiter() -> TokenBucket:
-    # N per hour with burst N, keyed by creator identity. refill_per_minute is
-    # fractional (N/60) — TokenBucket does float math internally.
-    s = get_settings()
-    return TokenBucket(
-        capacity=s.channel_create_per_hour,
-        refill_per_minute=s.channel_create_per_hour / 60.0,
-    )
-
-
 def get_settings_dep() -> Settings:
     return get_settings()

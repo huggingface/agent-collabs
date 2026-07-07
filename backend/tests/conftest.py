@@ -12,7 +12,6 @@ from app.dedup import PromotionLRU
 from app.deps import (
     get_audit,
     get_bucket_write_limiter,
-    get_channel_create_limiter,
     get_dedup,
     get_hub,
     get_org_roles,
@@ -82,9 +81,6 @@ def make_env():
                 get_bucket_write_limiter: generous,
                 get_raw_message_limiter: generous,
                 get_registration_limiter: lambda: TokenBucket(
-                    capacity=1000, refill_per_minute=1000
-                ),
-                get_channel_create_limiter: lambda: TokenBucket(
                     capacity=1000, refill_per_minute=1000
                 ),
             }

@@ -254,6 +254,10 @@ class TaskforceDetail(BaseModel):
 
 
 class ChannelCreateRequest(BaseModel):
+    # Creation is organizer-only (the broadcast gate): organizers act as
+    # human-<name> with a Bearer token, so the raw variant is the live path.
+    # `source` is still accepted by the model so agent attempts get a clear
+    # 403 NOT_ORGANIZER from the route instead of a shape error.
     name: str
     source: str | None = None
     agent_id: str | None = None

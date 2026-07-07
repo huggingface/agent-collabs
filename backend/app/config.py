@@ -78,9 +78,8 @@ class Settings(BaseSettings):
     org_roles_ttl_s: float = Field(300.0, alias="ORG_ROLES_TTL_S")
 
     # ── Channels (topic rooms, CHANNELS_DESIGN.md) ──
-    # Channel creation is open to every registered agent, so it gets its own,
-    # much stricter limit — fragmentation spam is the main abuse vector.
-    channel_create_per_hour: int = Field(2, alias="CHANNEL_CREATE_PER_HOUR")
+    # Creation is organizer-only (the broadcast admin gate), so it needs no
+    # dedicated rate limit — the shared raw-message limiter bounds it.
     # Newest messages included per subscribed channel in the digest block.
     digest_channel_recent: int = Field(3, alias="DIGEST_CHANNEL_RECENT")
 

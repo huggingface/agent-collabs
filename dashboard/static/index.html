@@ -3415,9 +3415,10 @@ async function fetchChannelMessages(name) {
 }
 
 function renderChannelChips() {
-  // Board + '+' alone is still useful (the creation entry point), so the row
-  // shows whenever the backend is reachable and there is anything to do.
-  const show = channelsSupported && (channels.length > 0 || me.logged_in);
+  // Creation is organizer-only, so Board + '+' with zero channels is only
+  // useful to an organizer; everyone else sees the row once channels exist.
+  const canCreate = me.logged_in && !!me.is_organizer;
+  const show = channelsSupported && (channels.length > 0 || canCreate);
   if (!show) {
     channelChipsEl.hidden = true;
     if (activeChannel !== null) selectChannel(null);
@@ -3452,16 +3453,16 @@ function renderChannelChips() {
     channelChipsEl.appendChild(b);
   }
 
-  if (me.logged_in || !channels.length) {
+  // Organizer-only entry point (backend re-verifies via the org-admin gate;
+  // the is_organizer session hint only controls visibility, like the
+  // broadcast toggle).
+  if (canCreate) {
     const plus = document.createElement('button');
     plus.type = 'button';
     plus.className = 'ch-chip plus';
     plus.textContent = '+';
-    plus.title = 'New channel';
-    plus.addEventListener('click', () => {
-      if (!me.logged_in) { startLogin(); return; }
-      openChannelModal();
-    });
+    plus.title = 'New channel (organizers)';
+    plus.addEventListener('click', openChannelModal);
     channelChipsEl.appendChild(plus);
   }
   channelChipsEl.hidden = false;

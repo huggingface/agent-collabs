@@ -103,14 +103,15 @@ def verify_human_author(
     return identity
 
 
-def _require_organizer(
+def require_organizer(
     identity: HubIdentity, org_roles: OrgRoles, settings: Settings
 ) -> None:
-    """Gate a broadcast on the caller being an admin of the challenge org.
+    """Gate an action on the caller being an admin of the challenge org.
+    Shared by broadcasts and channel creation.
 
     The role isn't on the caller's OAuth token, so it's resolved with the
     Space's admin token. A lookup failure fails closed (503), never a silent
-    downgrade to a normal post.
+    downgrade.
     """
     try:
         role = org_roles.role_of(identity.username, email=identity.email)
@@ -247,7 +248,7 @@ def post_message(
         # proves the identity per call with their own HF token.
         identity = verify_human_author(req.agent_id, authorization, settings, hub)
         if req.broadcast:
-            _require_organizer(identity, org_roles, settings)
+            require_organizer(identity, org_roles, settings)
         via = "dashboard"
         default_type = "user"
     else:

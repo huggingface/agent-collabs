@@ -70,12 +70,12 @@ def backend_agent_flows() -> None:
     check("discovery lists channel endpoints",
           {"/v1/channels", "/v1/channels/feed"} <= paths and "channels" in doc.get("conventions", {}))
 
-    # create (agent, raw) → auto-announce on the board
+    # create (organizer human + Bearer) → auto-announce on the board
     code, ch = req(f"{API}/v1/channels", {
-        "name": "eval-harness", "agent_id": "byte-bandit",
+        "name": "eval-harness", "agent_id": "human-tester",
         "body": "Scoring, verification, and how to not fool ourselves. Bring measurements.",
-    })
-    check("create channel as agent (201 + announcement)",
+    }, bearer="any-token")
+    check("organizer creates channel (201 + announcement)",
           code == 201 and ch.get("created") is True and ch.get("announcement"), str(ch))
     ann = ch.get("announcement")
 
@@ -83,12 +83,14 @@ def backend_agent_flows() -> None:
     files = {m["filename"] for m in board["items"]}
     check("announcement is a board message", ann in files)
 
-    code, dup = req(f"{API}/v1/channels", {"name": "eval-harness", "agent_id": "delta-coder", "body": "mine"})
-    check("duplicate create by another agent → 409 CHANNEL_EXISTS",
-          code == 409 and dup["error"]["code"] == "CHANNEL_EXISTS", str(dup))
-    code, _ = req(f"{API}/v1/channels", {"name": "feed", "agent_id": "byte-bandit", "body": "x"})
+    code, rej = req(f"{API}/v1/channels", {"name": "agent-room", "agent_id": "delta-coder", "body": "mine"})
+    check("agent create rejected (403 NOT_ORGANIZER)",
+          code == 403 and rej["error"]["code"] == "NOT_ORGANIZER", str(rej))
+    code, _ = req(f"{API}/v1/channels", {"name": "feed", "agent_id": "human-tester", "body": "x"},
+                  bearer="any-token")
     check("reserved name 'feed' → 400", code == 400)
-    code, _ = req(f"{API}/v1/channels", {"name": "empty", "agent_id": "byte-bandit", "body": "  "})
+    code, _ = req(f"{API}/v1/channels", {"name": "empty", "agent_id": "human-tester", "body": "  "},
+                  bearer="any-token")
     check("empty theme → 400", code == 400)
 
     board_count = board["count"]
@@ -164,19 +166,16 @@ def backend_agent_flows() -> None:
     code, human = req(f"{API}/v1/channels", {
         "name": "org-notes", "agent_id": "human-tester", "body": "Organizer planning notes.",
     }, bearer="any-token")
-    check("human creates channel with Bearer (via dashboard path)",
+    check("second channel created (via dashboard path)",
           code == 201 and human.get("via") == "dashboard", str(human))
 
-    # creator retry of a source-based create is idempotent (no 409)
-    theme = BUCKETS / ORG / f"{SLUG}-byte-bandit" / "channel-theme.md"
-    theme.write_text("Retry-safe theme.")
-    payload = {"name": "retry-check",
-               "source": f"hf://buckets/{ORG}/{SLUG}-byte-bandit/channel-theme.md"}
-    c1, _ = req(f"{API}/v1/channels", payload)
-    c2, r2 = req(f"{API}/v1/channels", payload)
-    check("source create retry is idempotent (201 then 200, no re-announce)",
-          c1 == 201 and c2 == 200 and r2.get("created") is False
-          and r2.get("announcement") is None, f"{c1}/{c2} {r2}")
+    # creator retry of the same create is idempotent (no error, no re-announce)
+    payload = {"name": "org-notes", "agent_id": "human-tester",
+               "body": "Organizer planning notes."}
+    c2, r2 = req(f"{API}/v1/channels", payload, bearer="any-token")
+    check("create retry is idempotent (200, no re-announce)",
+          c2 == 200 and r2.get("created") is False
+          and r2.get("announcement") is None, f"{c2} {r2}")
 
 
 def dashboard_flows() -> None:
@@ -225,10 +224,12 @@ def dashboard_flows() -> None:
                     opener=_dash_opener.open)
     check("dashboard re-POST by creator updates theme (no re-announce)",
           code == 200 and upd.get("created") is False and upd.get("announcement") is None, str(upd))
-    # …while claiming an agent-created channel surfaces the backend 409 verbatim.
-    code, dup = req(f"{DASH}/api/channels", {"name": "eval-harness", "body": "mine now"},
+    # …while a backend rejection surfaces verbatim (reserved name passes the
+    # dashboard's client-side slug check but the backend 400s it).
+    code, dup = req(f"{DASH}/api/channels", {"name": "feed", "body": "nope"},
                     opener=_dash_opener.open)
-    check("dashboard surfaces backend 409 verbatim", code == 409 and "already exists" in str(dup), str(dup))
+    check("dashboard surfaces backend rejection verbatim",
+          code == 400 and "reserved" in str(dup), str(dup))
 
     # organizer broadcast still works alongside channels
     code, bc = req(f"{DASH}/api/messages", {"body": "broadcast check", "refs": [], "broadcast": True},
