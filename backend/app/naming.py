@@ -87,6 +87,37 @@ def broadcast_path(filename: str) -> str:
     return f"{BROADCASTS_FOLDER}/{filename}"
 
 
+# ── Channels (topic rooms, CHANNELS_DESIGN.md) ──
+CHANNELS_FOLDER = "channels"
+
+# Static path segments under /v1/channels/ — a channel with one of these names
+# would shadow a fixed route (GET /v1/channels/feed), so they can never be
+# channel names.
+RESERVED_CHANNEL_NAMES = frozenset({"feed"})
+
+
+def channel_dir(name: str) -> str:
+    return f"{CHANNELS_FOLDER}/{name}"
+
+
+def channel_readme_path(name: str) -> str:
+    """The channel's theme. A channel exists iff this file does — same
+    structural invariant as taskforces."""
+    return f"{CHANNELS_FOLDER}/{name}/README.md"
+
+
+def channel_member_path(name: str, handle: str) -> str:
+    """One marker file per subscription: subscribe = write it, unsubscribe =
+    delete it. No shared roster file to read-modify-write, so concurrent
+    subscribes cannot lose each other; rosters and "what does X follow" are
+    derived by filtering the one cached channels/ listing."""
+    return f"{CHANNELS_FOLDER}/{name}/members/{handle}.md"
+
+
+def channel_message_path(name: str, agent_id: str, dt: datetime) -> str:
+    return f"{CHANNELS_FOLDER}/{name}/{stamp_filename(agent_id, dt)}"
+
+
 def taskforce_dir(name: str) -> str:
     return f"taskforces/{name}"
 

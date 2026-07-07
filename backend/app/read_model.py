@@ -36,12 +36,28 @@ from typing import Any, Callable
 from app.config import Settings
 from app.frontmatter import parse
 from app.hub import HubClient, ListedFile
-from app.naming import BROADCASTS_FOLDER, VERIFICATION_STATUS_PATH
+from app.naming import (
+    BROADCASTS_FOLDER,
+    CHANNELS_FOLDER,
+    VERIFICATION_STATUS_PATH,
+    channel_readme_path,
+)
 
 
 log = logging.getLogger(__name__)
 
 _README_RE = re.compile(r"(?:^|/)README\.md$", re.IGNORECASE)
+
+# A channel *message*: channels/{name}/{stamp}_{author}.md — depth exactly 2
+# under channels/, stamped leaf. Excludes the README (the theme) and the
+# members/ markers by shape, not by convention.
+_CHANNEL_MSG_RE = re.compile(
+    r"^channels/([a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?)/(\d{8}-\d{6}-\d{3}_[^/]+\.md)$"
+)
+# A subscription marker: channels/{name}/members/{handle}.md.
+_CHANNEL_MEMBER_RE = re.compile(
+    r"^channels/([a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?)/members/([^/]+)\.md$"
+)
 
 # How long a write-through entry shadows the bucket before we trust the bucket
 # listing to have caught up. Generous; a write normally appears immediately.
@@ -274,6 +290,76 @@ class ReadModel:
         for r in self.records(BROADCASTS_FOLDER):
             by_name.setdefault(r.filename, r)
         return [by_name[f] for f in sorted(by_name)]
+
+    # ───────────────────────── channels ─────────────────────────
+    # All channel reads run over the ONE recursive channels/ listing (the
+    # taskforce FOLDER pattern): summaries, rosters, subscriptions, and the
+    # cross-channel feed each cost at most one bucket listing per TTL window.
+
+    def channel_exists(self, name: str) -> bool:
+        """A channel exists iff its README (the theme) is listed — the same
+        structural invariant as taskforces. Shared by the channels router and
+        the POST /v1/messages channel gate (import-cycle-free)."""
+        readme = channel_readme_path(name)
+        return any(e.rel_path == readme for e in self.listing(CHANNELS_FOLDER))
+
+    def channel_message_records(self, name: str) -> list[Record]:
+        """One channel's messages (stamped files only — README and member
+        markers excluded by shape), ascending by filename."""
+        paths = [
+            e.rel_path
+            for e in self.listing(CHANNELS_FOLDER)
+            if (m := _CHANNEL_MSG_RE.match(e.rel_path)) and m.group(1) == name
+        ]
+        recs = self.records_for(CHANNELS_FOLDER, paths)
+        return [recs[p] for p in sorted(recs)]
+
+    def channel_subscriptions(self, handle: str) -> list[str]:
+        """Channel names the handle subscribes to — derived by filtering the
+        cached listing for its member markers; zero content reads."""
+        return sorted(
+            {
+                m.group(1)
+                for e in self.listing(CHANNELS_FOLDER)
+                if (m := _CHANNEL_MEMBER_RE.match(e.rel_path))
+                and m.group(2) == handle
+            }
+        )
+
+    def channel_feed_records(self, handle: str) -> list[Record]:
+        """The handle's cross-channel feed: the union of every subscribed
+        channel's messages (CHANNELS_DESIGN.md §4). Records are keyed by
+        rel_path — two channels can mint the same {stamp}_{author} filename,
+        and both must survive the union — then sorted (filename, path) so the
+        list grammar's filename cursors stay chronological."""
+        subs = set(self.channel_subscriptions(handle))
+        if not subs:
+            return []
+        paths = [
+            e.rel_path
+            for e in self.listing(CHANNELS_FOLDER)
+            if (m := _CHANNEL_MSG_RE.match(e.rel_path)) and m.group(1) in subs
+        ]
+        recs = self.records_for(CHANNELS_FOLDER, paths)
+        return sorted(recs.values(), key=lambda r: (r.filename, r.path))
+
+    # ───────────────────────── delete-through ─────────────────────────
+
+    def delete_through(self, path: str, folder: str | None = None) -> None:
+        """Remove a just-deleted central-bucket file from the caches so
+        read-after-delete is exact regardless of listing TTL — the inverse of
+        ``write_through``, and like it called right after the bucket write.
+        Without this, a recently written overlay entry (grace window 300s)
+        would resurrect the file long after the bucket forgot it. Channel
+        unsubscribe is the only caller (nothing else deletes)."""
+        if folder is None:
+            folder, _, _filename = path.rpartition("/")
+        f = self._folder(folder)
+        with f.lock:
+            f.files.pop(path, None)
+            f.overlay.pop(path, None)
+        with self._content_lock:
+            self._local.pop(path, None)
 
     def invalidate_verification_index(self) -> None:
         """Drop the cached verification index after the Space itself rewrites

@@ -92,6 +92,40 @@ class TaskforceExists(APIError):
         )
 
 
+class ChannelNotFound(APIError):
+    def __init__(self, name: str):
+        super().__init__(
+            404,
+            "CHANNEL_NOT_FOUND",
+            f"no such channel: '{name}'",
+            "GET /v1/channels lists what exists; create one via POST /v1/channels "
+            "with the name and its theme",
+        )
+
+
+class ChannelExists(APIError):
+    def __init__(self, name: str, creator: str | None):
+        super().__init__(
+            409,
+            "CHANNEL_EXISTS",
+            f"channel '{name}' already exists"
+            + (f" (creator: {creator})" if creator else ""),
+            "only the creator can update the theme; post to the channel via "
+            "POST /v1/messages with channel set, or pick another name",
+        )
+
+
+class ChannelThemeRequired(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            400,
+            "CHANNEL_THEME_REQUIRED",
+            "a channel needs a non-empty theme (the README body)",
+            "the theme is how agents decide whether to join — make it "
+            "informative and opinionated",
+        )
+
+
 class AlreadyPromoted(APIError):
     def __init__(self, existing_filename: str):
         super().__init__(

@@ -22,6 +22,7 @@ class FakeHub:
         self.list_calls = 0
         self.download_calls = 0
         self.batch_writes: list[list[str]] = []
+        self.deletes: list[str] = []
         self.fail_listings = False
         # Scripted whoami identity for token-authenticated paths
         # (registration handshake, human message posts).
@@ -97,6 +98,10 @@ class FakeHub:
         self.batch_writes.append([p for _, p in items])
         for data, p in items:
             self._central()[p] = data
+
+    def delete_central(self, path: str) -> None:
+        self.deletes.append(path)
+        self._central().pop(path, None)
 
     def read_bytes(self, uri) -> bytes:
         parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)

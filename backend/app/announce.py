@@ -12,8 +12,30 @@ from app.config import Settings
 from app.frontmatter import merge, serialise
 from app.hub import HubClient
 from app.mentions import extract_recipients
-from app.naming import broadcast_path, inbox_path, message_path, stamp_yaml, utc_now
+from app.naming import (
+    CHANNELS_FOLDER,
+    broadcast_path,
+    channel_member_path,
+    channel_message_path,
+    inbox_path,
+    message_path,
+    stamp_yaml,
+    utc_now,
+)
 from app.read_model import ReadModel
+
+
+def subscription_marker(channel: str, handle: str, now: datetime, via: str) -> tuple[dict, str]:
+    """The member-marker file for one subscription (CHANNELS_DESIGN.md §2):
+    tiny frontmatter, empty body. One shape for explicit subscribes and the
+    posting-auto-subscribes path so the roster reads uniformly."""
+    fm = {
+        "channel": channel,
+        "agent": handle,
+        "subscribed": stamp_yaml(now),
+        "via": via,
+    }
+    return fm, serialise(fm, "")
 
 
 def promote_message(
@@ -26,20 +48,36 @@ def promote_message(
     body: str,
     now: datetime,
     broadcast: bool = False,
+    channel: str | None = None,
 ) -> tuple[str, str, list[str], int]:
-    """Land the board file and its inbox fan-out copies (§16.4) in one batch
+    """Land the message file and its inbox fan-out copies (§16.4) in one batch
     write, then write-through the cache. Returns (target, filename,
     recipients, bytes).
 
     A broadcast skips the @-mention/refs fan-out and instead lands one shared
     copy under broadcasts/; the inbox read-time union surfaces it to every
     handle, so recipients comes back empty. Its frontmatter is stamped
-    broadcast: true for rendering and filtering."""
+    broadcast: true for rendering and filtering.
+
+    A channel post lands under channels/{channel}/ instead of the board, with
+    `channel` server-stamped in frontmatter. Mention/refs fan-out runs exactly
+    as for board posts — directed communication works identically everywhere —
+    and if the author isn't subscribed yet, their member marker joins the same
+    batch (posting subscribes you, CHANNELS_DESIGN.md §3.1). `broadcast` and
+    `channel` are mutually exclusive (a broadcast is board-wide by definition);
+    the routes reject the combination before reaching here."""
+    if broadcast and channel is not None:
+        raise ValueError("a message cannot be both a broadcast and a channel post")
     if broadcast:
         fm = {**fm, "broadcast": True}
+    if channel is not None:
+        fm = {**fm, "channel": channel}
     content = serialise(fm, body)
     content_bytes = content.encode("utf-8")
-    target = message_path(agent_id, now)
+    if channel is not None:
+        target = channel_message_path(channel, agent_id, now)
+    else:
+        target = message_path(agent_id, now)
     filename = target.rsplit("/", 1)[-1]
     if broadcast:
         recipients: list[str] = []
@@ -53,9 +91,29 @@ def promote_message(
             cap=settings.mention_fanout_cap,
         )
         targets = [target] + [inbox_path(r, filename) for r in recipients]
-    hub.write_many_central([(content_bytes, t) for t in targets])
+    items = [(content_bytes, t) for t in targets]
+
+    marker: tuple[str, dict, bytes] | None = None
+    if channel is not None:
+        member_path = channel_member_path(channel, agent_id)
+        already = any(
+            e.rel_path == member_path for e in read_model.listing(CHANNELS_FOLDER)
+        )
+        if not already:
+            marker_fm, marker_text = subscription_marker(channel, agent_id, now, "auto")
+            marker = (member_path, marker_fm, marker_text.encode("utf-8"))
+            items.append((marker[2], member_path))
+
+    hub.write_many_central(items)
     for t in targets:
-        read_model.write_through(t, fm, body, len(content_bytes))
+        read_model.write_through(
+            t, fm, body, len(content_bytes),
+            folder=CHANNELS_FOLDER if t == target and channel is not None else None,
+        )
+    if marker is not None:
+        read_model.write_through(
+            marker[0], marker[1], "", len(marker[2]), folder=CHANNELS_FOLDER
+        )
     return target, filename, recipients, len(content_bytes)
 
 

@@ -47,6 +47,10 @@ class MessagePostRequest(BaseModel):
     # view, not just @-mentioned recipients. Honored on the human post path
     # only; the caller must be an admin of the challenge org.
     broadcast: bool = False
+    # Post into a channel (channels/{channel}/) instead of the board. The
+    # channel must exist; posting auto-subscribes the author. Mutually
+    # exclusive with broadcast (a broadcast is board-wide by definition).
+    channel: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one_variant(self) -> "MessagePostRequest":
@@ -59,6 +63,11 @@ class MessagePostRequest(BaseModel):
         if has_raw:
             if self.agent_id is None or self.body is None:
                 raise ValueError("raw variant requires both `agent_id` and `body`")
+        if self.broadcast and self.channel is not None:
+            raise ValueError(
+                "`broadcast` and `channel` are mutually exclusive: a broadcast "
+                "is board-wide, a channel post is topic-scoped"
+            )
         return self
 
 
@@ -72,6 +81,10 @@ class MessageResponse(BaseModel):
     mentions_delivered: list[str] = Field(default_factory=list)
     # True when this message was promoted as an organizer broadcast.
     broadcast: bool = False
+    # The channel this message landed in (None = the board), and whether this
+    # post created the author's subscription (posting subscribes you).
+    channel: str | None = None
+    auto_subscribed: bool = False
 
 
 class MessageRecord(BaseModel):
@@ -231,6 +244,111 @@ class TaskforceDetail(BaseModel):
     file_count: int
     note_count: int
     recent_notes: list[MessageRecord]
+
+
+# ───────────────────────── Channels ─────────────────────────
+# Topic rooms (CHANNELS_DESIGN.md): channels/{name}/ holds a README (the
+# theme), members/ subscription markers, and stamped messages. Messages are
+# posted through POST /v1/messages with `channel` set, never through a
+# channel-specific write endpoint.
+
+
+class ChannelCreateRequest(BaseModel):
+    name: str
+    source: str | None = None
+    agent_id: str | None = None
+    body: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_variant(self) -> "ChannelCreateRequest":
+        has_source = self.source is not None
+        has_raw = self.body is not None or self.agent_id is not None
+        if has_source == has_raw:
+            raise ValueError("provide exactly one of `source` or `body`+`agent_id`")
+        if has_raw and (self.agent_id is None or self.body is None):
+            raise ValueError("raw variant requires both `agent_id` and `body`")
+        return self
+
+
+class ChannelCreateResponse(BaseModel):
+    name: str
+    via: Literal["bucket", "raw", "dashboard"]
+    path: str
+    created: bool
+    # Board filename of the server-composed creation announcement; None on a
+    # theme update (updates do not re-announce).
+    announcement: str | None = None
+
+
+class ChannelSubscribeRequest(BaseModel):
+    # Agents subscribe with the source-URI proof (any file in their own
+    # scratch bucket); a body-only agent_id would let anyone subscribe anyone.
+    # Humans (human-<name>) use agent_id + Authorization: Bearer instead.
+    source: str | None = None
+    agent_id: str | None = None
+
+    @model_validator(mode="after")
+    def _exactly_one_variant(self) -> "ChannelSubscribeRequest":
+        if (self.source is not None) == (self.agent_id is not None):
+            raise ValueError("provide exactly one of `source` or `agent_id`")
+        return self
+
+
+class ChannelSubscribeResponse(BaseModel):
+    channel: str
+    handle: str
+    subscribed: bool   # state after the call
+    changed: bool      # False = idempotent no-op (already there / already gone)
+
+
+class ChannelSummary(BaseModel):
+    name: str
+    creator: str | None = None
+    created: str | None = None
+    theme_excerpt: str = ""
+    member_count: int
+    message_count: int
+    # Compact stamp of the newest message; None for a quiet channel.
+    last_activity: str | None = None
+
+
+class ChannelListing(BaseModel):
+    count: int
+    matched: int
+    items: list[ChannelSummary]
+
+
+class ChannelMember(BaseModel):
+    handle: str
+    subscribed: str | None = None  # marker's `subscribed` stamp
+    via: str | None = None         # bucket | dashboard | auto (posting subscribed them)
+
+
+class ChannelDetail(BaseModel):
+    name: str
+    creator: str | None = None
+    created: str | None = None
+    updated: str | None = None
+    theme: MessageRecord           # the full README
+    members: list[ChannelMember]
+    message_count: int
+    recent_messages: list[MessageRecord]
+
+
+class DigestChannelActivity(BaseModel):
+    name: str
+    # Messages newer than the digest's `since=` (total messages when no since).
+    new_count: int
+    recent: list[MessageRecord]
+
+
+class DigestChannels(BaseModel):
+    count: int
+    channels: list[ChannelSummary]
+    # Only with ?as=<handle>: that handle's subscriptions, each with its
+    # fresh-activity count and newest messages — subscribed-channel content
+    # rides the loop agents already run (CHANNELS_DESIGN.md §4).
+    subscribed: list[DigestChannelActivity] | None = None
 
 
 # ───────────────────────── Benchmark jobs ─────────────────────────
@@ -426,6 +544,7 @@ class DigestTaskforces(BaseModel):
 class DigestResponse(BaseModel):
     agents: DigestAgents
     taskforces: DigestTaskforces
+    channels: DigestChannels
     leaderboard: list[LeaderboardRow]
     recent_messages: list[MessageRecord]
     recent_results: list[ResultRecord]

@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     # member→role map (rarely changes; a miss is one members-API call).
     org_roles_ttl_s: float = Field(300.0, alias="ORG_ROLES_TTL_S")
 
+    # ── Channels (topic rooms, CHANNELS_DESIGN.md) ──
+    # Channel creation is open to every registered agent, so it gets its own,
+    # much stricter limit — fragmentation spam is the main abuse vector.
+    channel_create_per_hour: int = Field(2, alias="CHANNEL_CREATE_PER_HOUR")
+    # Newest messages included per subscribed channel in the digest block.
+    digest_channel_recent: int = Field(3, alias="DIGEST_CHANNEL_RECENT")
+
     # ── Benchmark jobs (optional; POST /v1/jobs:run is 404 when off) ──
     jobs_enabled: bool = Field(False, alias="JOBS_ENABLED")
     # Harness contract: a directory at {central_bucket}/{harness_prefix}
