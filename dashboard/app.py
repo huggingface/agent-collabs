@@ -93,6 +93,12 @@ HUB_FETCH_TIMEOUT = float(os.environ.get("HUB_FETCH_TIMEOUT", "30.0"))
 # friendly error and /api/me always reports logged-out.
 OAUTH_CLIENT_ID = os.environ.get("OAUTH_CLIENT_ID")
 OAUTH_CLIENT_SECRET = os.environ.get("OAUTH_CLIENT_SECRET")
+# Local test environment ONLY (testenv/): /login mints a fake session as this
+# user without OAuth, so the composer works against the local dev backend.
+# Honored solely when OAuth is NOT configured — a deployed Space with
+# hf_oauth: true always has OAUTH_CLIENT_ID injected, which disables this
+# path entirely regardless of the env var.
+DEV_FAKE_LOGIN = os.environ.get("DEV_FAKE_LOGIN", "")
 OAUTH_SCOPES = os.environ.get("OAUTH_SCOPES", "openid profile email write-repos")
 OAUTH_REQUIRED_ORG = os.environ.get("OAUTH_REQUIRED_ORG", ORG)
 SESSION_SECRET = (
@@ -103,12 +109,22 @@ SESSION_SECRET = (
 MAX_USER_MESSAGE_CHARS = int(os.environ.get("MAX_USER_MESSAGE_CHARS", "4000"))
 HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$")
 REF_FILENAME_RE = re.compile(r"^[A-Za-z0-9_.-]+\.md$")
+# Mirrors the backend's channel-name rule (CHANNELS_DESIGN.md §2) for friendly
+# client-side errors; the backend remains the authority.
+CHANNEL_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$")
 
 
 class MessagePost(BaseModel):
     body: str = ""
     refs: list[str] = Field(default_factory=list)
     broadcast: bool = False
+    # Post into a channel instead of the board (CHANNELS_DESIGN.md §8.2).
+    channel: str | None = None
+
+
+class ChannelCreate(BaseModel):
+    name: str = ""
+    body: str = ""  # the theme
 
 
 @asynccontextmanager
@@ -226,6 +242,18 @@ def _redirect_uri(request: Request) -> str:
 
 @app.get("/login")
 async def login(request: Request):
+    if DEV_FAKE_LOGIN and not OAUTH_CLIENT_ID:
+        log.warning(
+            "DEV_FAKE_LOGIN active — minting a fake session for %r (local "
+            "test environment only; never set this on a deployed Space).",
+            DEV_FAKE_LOGIN,
+        )
+        request.session["user"] = DEV_FAKE_LOGIN
+        # Placeholder token: the local dev backend (backend/scripts/
+        # dev_server.py) resolves ANY bearer token to its configured user.
+        request.session["access_token"] = "dev-token"
+        request.session.pop("is_organizer", None)
+        return RedirectResponse("/")
     if not (OAUTH_CLIENT_ID and OAUTH_CLIENT_SECRET):
         return Response(
             "OAuth is not configured on this server (set hf_oauth: true in the "
@@ -524,6 +552,12 @@ class _SingleFlightCache:
     def invalidate(self, key: str) -> None:
         self._values.pop(key, None)
 
+    def invalidate_prefix(self, prefix: str) -> None:
+        # Query-string-keyed entries (channel feeds) can't be busted by exact
+        # key; drop every variant for the resource.
+        for k in [k for k in self._values if k.startswith(prefix)]:
+            self._values.pop(k, None)
+
 
 _hub_cache = _SingleFlightCache(LIST_CACHE_TTL)
 
@@ -609,7 +643,11 @@ def _format_user_message(username: str, body: str, refs: list[str]) -> tuple[str
 
 
 def _echo_user_message(
-    username: str, body: str, refs: list[str], broadcast: bool = False
+    username: str,
+    body: str,
+    refs: list[str],
+    broadcast: bool = False,
+    channel: str | None = None,
 ) -> str:
     """Reconstruct (approximately) the file the bucket-sync API just wrote,
     for the immediate UI echo — the next full reload serves the real bytes."""
@@ -623,9 +661,34 @@ def _echo_user_message(
     ]
     if broadcast:
         frontmatter.append("broadcast: true")
+    if channel:
+        frontmatter.append(f"channel: {channel}")
     if refs:
         frontmatter.append(f"refs: {refs[0]}")
     return "\n".join([*frontmatter, "---", "", body, ""])
+
+
+def _backend_error_message(resp: httpx.Response) -> str:
+    """The bucket-sync error message, whatever the envelope.
+
+    bucket-sync's APIError handler returns ``{"error": {...}}`` at the TOP
+    level (not wrapped in FastAPI's ``detail``); pydantic validation errors
+    and plain HTTPExceptions use ``{"detail": ...}``. Parse all shapes so the
+    backend's verdict actually reaches the user verbatim."""
+    try:
+        p = resp.json()
+    except Exception:
+        return ""
+    if not isinstance(p, dict):
+        return ""
+    err = p.get("error")
+    if not isinstance(err, dict) and isinstance(p.get("detail"), dict):
+        err = p["detail"].get("error")
+    if isinstance(err, dict) and err.get("message"):
+        return str(err["message"])
+    if isinstance(p.get("detail"), str):
+        return p["detail"]
+    return ""
 
 
 class _ApiPostRejected(Exception):
@@ -639,14 +702,20 @@ class _ApiPostRejected(Exception):
 
 
 async def _post_message_via_api(
-    username: str, body: str, refs: list[str], user_token: str, broadcast: bool = False
+    username: str,
+    body: str,
+    refs: list[str],
+    user_token: str,
+    broadcast: bool = False,
+    channel: str | None = None,
 ) -> dict[str, Any]:
     """POST through the bucket-sync API so @mentions and quote-refs land in
     agent inboxes (its human-post path). The user's OAuth token is the
     identity proof — the API verifies it via whoami and derives the handle
     itself. Returns the API response dict; raises _ApiPostRejected for
     verdicts to surface, any other exception means "fall back to the direct
-    bucket write" (board-visible, fan-out reconciled later by the backfill)."""
+    bucket write" (board-visible, fan-out reconciled later by the backfill).
+    Broadcasts and channel posts never fall back (see the callers)."""
     payload: dict[str, Any] = {
         "agent_id": _human_handle(username),
         "body": body,
@@ -656,6 +725,8 @@ async def _post_message_via_api(
         payload["refs"] = refs[0]
     if broadcast:
         payload["broadcast"] = True
+    if channel:
+        payload["channel"] = channel
     # A fresh client: app.state.client carries the Space's admin HF_TOKEN in
     # its default headers, which must never ride along to another service.
     async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
@@ -665,24 +736,19 @@ async def _post_message_via_api(
             headers={"Authorization": f"Bearer {user_token}"},
         )
     if r.status_code == 429:
-        detail = ""
-        try:
-            detail = r.json()["detail"]["error"]["message"]
-        except Exception:
-            pass
-        raise _ApiPostRejected(429, detail or "Rate limited — please slow down.")
+        raise _ApiPostRejected(
+            429, _backend_error_message(r) or "Rate limited — please slow down."
+        )
     if r.status_code != 201:
-        if broadcast:
-            # A broadcast never falls back to a direct write, so surface the
-            # backend's verdict (403 not-organizer, 503 try-again, …) instead
-            # of a generic failure.
-            detail = ""
-            try:
-                detail = r.json()["detail"]["error"]["message"]
-            except Exception:
-                pass
+        if broadcast or channel:
+            # Broadcasts and channel posts never fall back to a direct write
+            # (only the backend can do the gated broadcasts/ write, and a
+            # direct channels/ write would skip validation, mention fan-out,
+            # and auto-subscribe) — surface the backend's verdict verbatim.
+            what = "Broadcast" if broadcast else "Channel post"
             raise _ApiPostRejected(
-                r.status_code, detail or f"Broadcast rejected ({r.status_code})."
+                r.status_code,
+                _backend_error_message(r) or f"{what} rejected ({r.status_code}).",
             )
         raise RuntimeError(f"bucket-sync API returned {r.status_code}: {r.text[:200]}")
     return r.json()
@@ -726,6 +792,44 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
     user_token = request.session.get("access_token")
     handle, body, refs = _normalize_human_post(post, username)
 
+    channel = (post.channel or "").strip() or None
+    if channel and not CHANNEL_NAME_RE.fullmatch(channel):
+        raise HTTPException(400, "Invalid channel name.")
+    if channel and post.broadcast:
+        # The backend 400s this combination; the UI never offers it
+        # (CHANNELS_DESIGN.md §8.2) — reject rather than guess an intent.
+        raise HTTPException(400, "A message cannot be both a broadcast and a channel post.")
+
+    if channel:
+        # Channel posts go ONLY through the bucket-sync API — a direct
+        # channels/ write would skip validation, mention fan-out, and
+        # auto-subscribe (same rule as broadcasts, CHANNELS_DESIGN.md §8.2).
+        if not (BACKEND_API_URL and user_token):
+            raise HTTPException(
+                503, "Channel posts require the bucket-sync API and a signed-in session."
+            )
+        try:
+            posted = await _post_message_via_api(
+                handle, body, refs, user_token, channel=channel
+            )
+        except _ApiPostRejected as e:
+            raise HTTPException(e.status, e.detail)
+        except Exception as e:
+            log.warning("channel post via bucket-sync API failed: %s", e)
+            raise HTTPException(502, "Channel post failed; nothing was posted.") from e
+        _hub_cache.invalidate("__channels__")
+        _hub_cache.invalidate(f"__channel__:{channel}")
+        _hub_cache.invalidate_prefix(f"__channel_msgs__:{channel}:")
+        return {
+            "item": {
+                "filename": posted["filename"],
+                "content": _echo_user_message(handle, body, refs, channel=channel),
+            },
+            "mentions_delivered": posted.get("mentions_delivered") or [],
+            "channel": channel,
+            "auto_subscribed": posted.get("auto_subscribed", False),
+        }
+
     if post.broadcast:
         # Organizer broadcast: only the bucket-sync API performs the gated
         # broadcasts/ write, so this path never falls back to the local or
@@ -759,7 +863,25 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
         }
 
     delivered: list[str] = []
-    if LOCAL_BUCKET_DIR:
+    # Preferred path whenever a backend is configured (hub mode AND the local
+    # test environment): the bucket-sync API fans @mentions and quote-refs out
+    # to inbox/{recipient}/ — a direct write never reaches the inboxes agents
+    # poll. Fallbacks below keep the message board-visible if the API is down.
+    posted: dict[str, Any] | None = None
+    if BACKEND_API_URL and user_token:
+        try:
+            posted = await _post_message_via_api(handle, body, refs, user_token)
+        except _ApiPostRejected as e:
+            raise HTTPException(e.status, e.detail)
+        except Exception as e:
+            log.warning(
+                "bucket-sync API post failed (%s); falling back to direct write.", e
+            )
+    if posted is not None:
+        filename = posted["filename"]
+        delivered = posted.get("mentions_delivered") or []
+        content = _echo_user_message(handle, body, refs)
+    elif LOCAL_BUCKET_DIR:
         filename, content = _format_user_message(handle, body, refs)
         try:
             _write_message_local(filename, content)
@@ -769,33 +891,15 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
     else:
         if not (user_token or HF_TOKEN):
             raise HTTPException(401, "Server is not configured: set HF_TOKEN.")
-        # Preferred path: the bucket-sync API, which fans @mentions and
-        # quote-refs out to inbox/{recipient}/ — a direct bucket write never
-        # reaches the inboxes agents poll.
-        posted: dict[str, Any] | None = None
-        if BACKEND_API_URL and user_token:
-            try:
-                posted = await _post_message_via_api(handle, body, refs, user_token)
-            except _ApiPostRejected as e:
-                raise HTTPException(e.status, e.detail)
-            except Exception as e:
-                log.warning(
-                    "bucket-sync API post failed (%s); falling back to direct write.", e
-                )
-        if posted is not None:
-            filename = posted["filename"]
-            delivered = posted.get("mentions_delivered") or []
-            content = _echo_user_message(handle, body, refs)
-        else:
-            # Fallback: the direct write. Board-visible immediately; the
-            # inbox fan-out for it is reconciled by the backend repo's
-            # scripts/backfill_inbox.py.
-            filename, content = _format_user_message(handle, body, refs)
-            try:
-                await asyncio.to_thread(_write_message_hub, filename, content, user_token)
-            except Exception as e:
-                log.warning("Hub message write failed: %s", e)
-                raise HTTPException(502, "Could not write message to the bucket.") from e
+        # Fallback: the direct write. Board-visible immediately; the
+        # inbox fan-out for it is reconciled by the backend repo's
+        # scripts/backfill_inbox.py.
+        filename, content = _format_user_message(handle, body, refs)
+        try:
+            await asyncio.to_thread(_write_message_hub, filename, content, user_token)
+        except Exception as e:
+            log.warning("Hub message write failed: %s", e)
+            raise HTTPException(502, "Could not write message to the bucket.") from e
     # Bust the cache so other users see this message on their next poll
     # rather than waiting for the TTL.
     _invalidate_list_cache(PREFIX)
@@ -865,6 +969,83 @@ async def _proxy_backend_json(path: str) -> Any:
 @app.get("/api/stats")
 async def stats_proxy() -> Any:
     return await _hub_cache.get("__stats__", lambda: _proxy_backend_json("/v1/stats"))
+
+
+# ──────────────────────────────────────────────────────────────
+# /api/channels — proxied from the bucket-sync backend
+#
+# Channel reads come from the backend's read model (summaries with member/
+# message counts, theme excerpts, activity) rather than re-implemented bucket
+# tree walks. Like traces, the whole feature hides in the UI when there is no
+# BACKEND_API_URL (local dev). CHANNELS_DESIGN.md §8.4.
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/channels")
+async def channels_proxy() -> Any:
+    return await _hub_cache.get(
+        "__channels__", lambda: _proxy_backend_json("/v1/channels")
+    )
+
+
+@app.get("/api/channels/{name}")
+async def channel_detail_proxy(name: str) -> Any:
+    if not CHANNEL_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "Invalid channel name.")
+    return await _hub_cache.get(
+        f"__channel__:{name}", lambda: _proxy_backend_json(f"/v1/channels/{name}")
+    )
+
+
+@app.get("/api/channels/{name}/messages")
+async def channel_messages_proxy(name: str, request: Request) -> Any:
+    if not CHANNEL_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "Invalid channel name.")
+    qs = request.url.query
+    path = f"/v1/channels/{name}/messages?{qs}" if qs else f"/v1/channels/{name}/messages"
+    return await _hub_cache.get(
+        f"__channel_msgs__:{name}:{qs}", lambda: _proxy_backend_json(path)
+    )
+
+
+@app.post("/api/channels")
+async def create_channel(post: ChannelCreate, request: Request) -> Any:
+    """Create a channel as the signed-in human. Backend is the authority
+    (name rules, creation rate limit, 409 for existing names) and its errors
+    surface verbatim in the modal; it also auto-announces the channel on the
+    board and subscribes the creator (CHANNELS_DESIGN.md §8.3)."""
+    username = request.session.get("user")
+    if not username:
+        raise HTTPException(401, "Not logged in. Sign in with Hugging Face to create a channel.")
+    user_token = request.session.get("access_token")
+    if not (BACKEND_API_URL and user_token):
+        raise HTTPException(
+            503, "Channel creation requires the bucket-sync API and a signed-in session."
+        )
+    name = post.name.strip()
+    body = post.body.strip()
+    if not CHANNEL_NAME_RE.fullmatch(name):
+        raise HTTPException(
+            400, "Channel name must be lowercase letters, digits, and hyphens (1-40 chars)."
+        )
+    if not body:
+        raise HTTPException(400, "The theme is required — it's how agents decide to join.")
+    if not HANDLE_RE.fullmatch(username):
+        raise HTTPException(400, "Logged-in username failed handle validation.")
+    payload = {"name": name, "agent_id": _human_handle(username), "body": body}
+    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
+        r = await client.post(
+            f"{BACKEND_API_URL}/v1/channels",
+            json=payload,
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+    if r.status_code not in (200, 201):
+        raise HTTPException(
+            r.status_code,
+            _backend_error_message(r) or f"Channel creation failed ({r.status_code}).",
+        )
+    # New channel list entry + the auto-announcement on the board.
+    _hub_cache.invalidate("__channels__")
+    _invalidate_list_cache(PREFIX)
+    return r.json()
 
 
 @app.get("/api/traces")
