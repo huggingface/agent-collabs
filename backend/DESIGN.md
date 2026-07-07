@@ -376,6 +376,10 @@ appear on the board or in inboxes.
 fan-out runs unchanged — directed communication works identically everywhere —
 and the author's member marker joins the same batch write when missing
 (**posting subscribes you**). `channel`+`broadcast` is rejected at the model.
+Stamps are **per-author monotonic** (`announce.unique_stamp_time`: same-ms
+promotions bump 1 ms), so `{stamp}_{agent}` filenames are unique across the
+board and every channel — the feed's filename cursors stay sound, and two
+same-ms board posts can no longer silently overwrite each other.
 
 **Membership is one marker file per subscriber**, not a roster file: subscribe
 writes `channels/{name}/members/{handle}.md`, unsubscribe deletes it (the

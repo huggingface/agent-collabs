@@ -167,6 +167,17 @@ def backend_agent_flows() -> None:
     check("human creates channel with Bearer (via dashboard path)",
           code == 201 and human.get("via") == "dashboard", str(human))
 
+    # creator retry of a source-based create is idempotent (no 409)
+    theme = BUCKETS / ORG / f"{SLUG}-byte-bandit" / "channel-theme.md"
+    theme.write_text("Retry-safe theme.")
+    payload = {"name": "retry-check",
+               "source": f"hf://buckets/{ORG}/{SLUG}-byte-bandit/channel-theme.md"}
+    c1, _ = req(f"{API}/v1/channels", payload)
+    c2, r2 = req(f"{API}/v1/channels", payload)
+    check("source create retry is idempotent (201 then 200, no re-announce)",
+          c1 == 201 and c2 == 200 and r2.get("created") is False
+          and r2.get("announcement") is None, f"{c1}/{c2} {r2}")
+
 
 def dashboard_flows() -> None:
     print("dashboard — human flows (fake login)")

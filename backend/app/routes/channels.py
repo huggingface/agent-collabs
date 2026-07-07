@@ -21,22 +21,19 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
-from app.announce import subscription_marker
+from app.announce import subscription_marker, unique_stamp_time
 from app.audit import AuditLogger
 from app.config import Settings
-from app.dedup import PromotionLRU, content_hash
 from app.deps import (
     get_audit,
     get_bucket_write_limiter,
     get_channel_create_limiter,
-    get_dedup,
     get_hub,
     get_raw_message_limiter,
     get_read_model,
     get_settings_dep,
 )
 from app.errors import (
-    AlreadyPromoted,
     ChannelExists,
     ChannelNotFound,
     ChannelThemeRequired,
@@ -290,7 +287,6 @@ def create_channel(
     settings: Settings = Depends(get_settings_dep),
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
-    dedup: PromotionLRU = Depends(get_dedup),
     bucket_limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
     create_limiter: TokenBucket = Depends(get_channel_create_limiter),
@@ -299,7 +295,13 @@ def create_channel(
     """Create a channel (the payload is its theme) or, as the creator, update
     the theme. Creation lands three files in ONE batch: the README, the
     creator's subscription marker, and a server-composed board announcement.
-    Updates re-write the README only — no re-announce, no marker churn."""
+    Updates re-write the README only — no re-announce, no marker churn.
+
+    Deliberately NO promotion dedup here: the README path is fixed, so a
+    creator's retry of the same bytes (timeout replays) is harmless — it
+    falls into the update path and returns 200/created:false, keeping
+    creation idempotent for the creator as designed. Dedup exists to stop
+    duplicate STAMPED files; there is nothing stamped to duplicate."""
     now = utc_now()
     validate_channel_name(req.name)
     target = channel_readme_path(req.name)
@@ -365,11 +367,6 @@ def create_channel(
             "via": via,
         }
 
-    if raw_bytes is not None:
-        dup = dedup.get(content_hash(raw_bytes), f"{FOLDER}/{req.name}")
-        if dup:
-            raise AlreadyPromoted(dup)
-
     merged = merge(client_fm, server_fm)
     content = serialise(merged, body)
     content_bytes = content.encode("utf-8")
@@ -382,16 +379,20 @@ def create_channel(
         marker_bytes = marker_text.encode("utf-8")
         items.append((marker_bytes, member_path))
 
+        # The announcement is a stamped board message authored as the
+        # creator, so it goes through the same per-author monotonic stamp
+        # guard as promote_message (no same-ms filename collisions).
+        ann_now = unique_stamp_time(creator, now)
         ann_fm = {
             "type": "note",
             "agent": creator,
-            "timestamp": stamp_yaml(now),
+            "timestamp": stamp_yaml(ann_now),
             "via": "server",
         }
         ann_body = _announcement_body(req.name, body)
         ann_content = serialise(ann_fm, ann_body)
         ann_bytes = ann_content.encode("utf-8")
-        ann_target = message_path(creator, now)
+        ann_target = message_path(creator, ann_now)
         announcement = ann_target.rsplit("/", 1)[-1]
         items.append((ann_bytes, ann_target))
 
@@ -400,8 +401,6 @@ def create_channel(
     if created:
         read_model.write_through(member_path, marker_fm, "", len(marker_bytes), folder=FOLDER)
         read_model.write_through(ann_target, ann_fm, ann_body, len(ann_bytes))
-    if raw_bytes is not None:
-        dedup.record(content_hash(raw_bytes), f"{FOLDER}/{req.name}", "README.md")
 
     audit.write(
         agent_id=creator,

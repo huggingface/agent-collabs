@@ -118,6 +118,60 @@ def test_create_duplicate_and_theme_update(env):
     assert env.client.get("/v1/messages").json()["count"] == board_before
 
 
+def test_create_channel_source_retry_idempotent(env):
+    """Creator retries of the same source create (timeout replays) are
+    idempotent: 201 then 200/created:false — never 409 ALREADY_PROMOTED.
+    The README path is fixed, so there is no duplicate-file risk to dedup."""
+    seed_agent(env.hub, "bb")
+    uri = seed_source(env, "bb", "drafts/channel.md", "Retry-safe theme.")
+    r1 = env.client.post("/v1/channels", json={"name": "retry", "source": uri})
+    assert r1.status_code == 201
+    r2 = env.client.post("/v1/channels", json={"name": "retry", "source": uri})
+    assert r2.status_code == 200
+    data = r2.json()
+    assert data["created"] is False
+    assert data["announcement"] is None
+    # exactly one announcement made it to the board
+    board = env.client.get("/v1/messages?q=%23retry").json()
+    assert board["matched"] == 1
+
+
+def test_same_millisecond_posts_mint_unique_filenames(env, monkeypatch):
+    """Two same-ms promotions by one author must not share a filename: on the
+    board that silently overwrites, and in the feed a duplicated basename
+    could slip past the exclusive filename cursor at a page boundary. The
+    per-author monotonic stamp guard bumps the second into the next ms."""
+    from datetime import datetime, timezone
+
+    import app.routes.messages as messages_mod
+
+    seed_agent(env.hub, "bb")
+    create_channel(env, "alpha", "bb")
+    create_channel(env, "beta", "bb")
+    frozen = datetime(2026, 7, 7, 12, 0, 0, 123000, tzinfo=timezone.utc)
+    monkeypatch.setattr(messages_mod, "utc_now", lambda: frozen)
+
+    r1 = post_to_channel(env, "bb", "alpha", "same-ms one")
+    r2 = post_to_channel(env, "bb", "beta", "same-ms two")
+    f1, f2 = r1.json()["filename"], r2.json()["filename"]
+    assert f1 != f2
+
+    # cursor paging over the feed delivers both (the reported loss scenario)
+    page1 = env.client.get("/v1/channels/feed?as=bb&order=asc&limit=1&expand=true").json()
+    page2 = env.client.get(
+        f"/v1/channels/feed?as=bb&order=asc&after={page1['next']}&expand=true"
+    ).json()
+    bodies = [m["body"].strip() for m in page1["items"]] + [
+        m["body"].strip() for m in page2["items"]
+    ]
+    assert bodies == ["same-ms one", "same-ms two"]
+
+    # the board case: two same-ms board posts land as two files, not one
+    b1 = env.client.post("/v1/messages", json={"agent_id": "bb", "body": "board one"})
+    b2 = env.client.post("/v1/messages", json={"agent_id": "bb", "body": "board two"})
+    assert b1.json()["filename"] != b2.json()["filename"]
+
+
 def test_create_channel_validation(env):
     seed_agent(env.hub, "bb")
     assert create_channel(env, "Bad_Name", "bb").status_code == 400

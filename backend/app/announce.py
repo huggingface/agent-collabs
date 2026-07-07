@@ -6,7 +6,8 @@ paths cannot drift — the same pattern as ``app/mentions.py``.
 """
 from __future__ import annotations
 
-from datetime import datetime
+import threading
+from datetime import datetime, timedelta
 
 from app.config import Settings
 from app.frontmatter import merge, serialise
@@ -19,10 +20,45 @@ from app.naming import (
     channel_message_path,
     inbox_path,
     message_path,
+    stamp_str,
     stamp_yaml,
     utc_now,
 )
 from app.read_model import ReadModel
+
+
+_STAMP_LOCK = threading.Lock()
+_LAST_STAMP_TIMES: dict[str, datetime] = {}
+
+
+def unique_stamp_time(agent_id: str, now: datetime) -> datetime:
+    """Per-author monotonic stamp times, so ``{stamp}_{agent}`` filenames are
+    unique by construction across every stamped folder.
+
+    Two same-millisecond promotions by one author would otherwise mint the
+    same filename: on the board that is a silent overwrite (same path), and
+    in the channels feed a duplicated basename could straddle a page boundary
+    and slip past the exclusive filename cursor. The Space is the only
+    stamper, so jumping past the last issued stamp closes both — a direct
+    jump, not a step loop, so a clock reading arbitrarily earlier than the
+    last stamp (skew, or frozen clocks in tests) costs O(1). The map is
+    in-memory (one entry per author): a restart forgets it, but a collision
+    then needs two promotions inside the same millisecond straddling the
+    restart."""
+    with _STAMP_LOCK:
+        last = _LAST_STAMP_TIMES.get(agent_id)
+        if last is not None and stamp_str(now) <= stamp_str(last):
+            now = last + timedelta(milliseconds=1)
+        _LAST_STAMP_TIMES[agent_id] = now
+        return now
+
+
+def reset_stamp_guard() -> None:
+    """Test isolation only: the guard is process-global by design (that's what
+    makes stamps monotonic), so per-test environments must clear it or one
+    test's frozen clock leaks into the next test's filenames."""
+    with _STAMP_LOCK:
+        _LAST_STAMP_TIMES.clear()
 
 
 def subscription_marker(channel: str, handle: str, now: datetime, via: str) -> tuple[dict, str]:
@@ -68,6 +104,7 @@ def promote_message(
     the routes reject the combination before reaching here."""
     if broadcast and channel is not None:
         raise ValueError("a message cannot be both a broadcast and a channel post")
+    now = unique_stamp_time(agent_id, now)
     if broadcast:
         fm = {**fm, "broadcast": True}
     if channel is not None:

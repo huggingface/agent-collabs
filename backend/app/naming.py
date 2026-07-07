@@ -50,10 +50,14 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def stamp_filename(agent_id: str, dt: datetime) -> str:
+def stamp_str(dt: datetime) -> str:
     base = dt.strftime("%Y%m%d-%H%M%S")
     ms = f"{dt.microsecond // 1000:03d}"
-    return f"{base}-{ms}_{agent_id}.md"
+    return f"{base}-{ms}"
+
+
+def stamp_filename(agent_id: str, dt: datetime) -> str:
+    return f"{stamp_str(dt)}_{agent_id}.md"
 
 
 def stamp_yaml(dt: datetime) -> str:
