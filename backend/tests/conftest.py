@@ -5,6 +5,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
+from app.announce import reset_stamp_guard
 from app.audit import AuditLogger
 from app.config import Settings
 from app.dedup import PromotionLRU
@@ -36,6 +37,10 @@ def make_env():
     overrides (passed by env-var alias, e.g. MENTION_FANOUT_CAP=2)."""
 
     def _make(**settings_overrides):
+        # The per-author monotonic stamp guard is process-global by design;
+        # without a reset, one test's frozen clock would leak into the next
+        # test's filenames.
+        reset_stamp_guard()
         settings = Settings(
             HF_TOKEN="test-token",
             ORG="test-org",

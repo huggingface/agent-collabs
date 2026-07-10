@@ -4,6 +4,7 @@ from app.config import Settings
 from app.errors import InvalidPath
 from app.naming import (
     AGENT_ID_RE,
+    RESERVED_CHANNEL_NAMES,
     SLUG_RE,
     SourceURI,
     agent_id_from_bucket,
@@ -16,7 +17,7 @@ BLOCKED_TARGETS = {
     "LEADERBOARD.md",
     "shared_resources/README.md",
 }
-BLOCKED_PREFIXES = ("audit/", "inbox/", "taskforces/")
+BLOCKED_PREFIXES = ("audit/", "inbox/", "taskforces/", "channels/")
 
 # The human-* namespace identifies human participants in inbox routing
 # (§16.4): @human-<name> delivers without a registration check, so no agent
@@ -125,6 +126,24 @@ def validate_shared_dest_path(dest_path: str, agent_id: str) -> None:
     _validate_agent_marker(dest_path, agent_id, "shared_resources")
     full_target = f"shared_resources/{dest_path}"
     check_dest_not_blocked(full_target)
+
+
+def validate_channel_name(name: str) -> None:
+    if name != name.lower():
+        raise InvalidPath(
+            f"channel name must be lowercase: {name!r}",
+            hint=f"use '{name.lower()}' instead",
+        )
+    if not SLUG_RE.match(name):
+        raise InvalidPath(
+            f"invalid channel name: {name!r}",
+            hint="kebab-case, 1-40 chars: [a-z0-9] with internal hyphens",
+        )
+    if name in RESERVED_CHANNEL_NAMES:
+        raise InvalidPath(
+            f"channel name '{name}' is reserved (it is an API path segment)",
+            hint="pick a different name",
+        )
 
 
 def validate_taskforce_name(name: str) -> None:

@@ -327,6 +327,16 @@ class HubClient:
             token=self._token,
         )
 
+    def delete_central(self, target_path: str) -> None:
+        """Delete one central-bucket file. The only deleting write in the
+        system: channel unsubscribe removes the member marker
+        (CHANNELS_DESIGN.md §3.3). Everything else stays append-only."""
+        batch_bucket_files(
+            bucket_id=self._settings.central_bucket,
+            delete=[target_path],
+            token=self._token,
+        )
+
     def write_bytes_to_bucket(self, bucket: str, target_path: str, data: bytes) -> None:
         batch_bucket_files(bucket_id=bucket, add=[(data, target_path)], token=self._token)
 

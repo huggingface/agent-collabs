@@ -20,7 +20,9 @@ from app.deps import (
 )
 from app.errors import (
     AlreadyPromoted,
+    ChannelNotFound,
     IdentityMismatch,
+    InvalidFrontmatter,
     NotFound,
     NotOrganizer,
     NotRegistered,
@@ -47,6 +49,7 @@ from app.validation import (
     is_human_handle,
     resolve_source,
     validate_agent_id,
+    validate_channel_name,
 )
 
 
@@ -64,10 +67,11 @@ def require_registered(read_model: ReadModel, hub: HubClient, agent_id: str) -> 
         raise NotRegistered(agent_id)
 
 
-def _verify_human_author(
+def verify_human_author(
     handle: str, authorization: str | None, settings: Settings, hub: HubClient
 ) -> HubIdentity:
     """Identity check for human-<name> posts (§5.4a); returns HF identity facts.
+    Shared with the channels router (create/subscribe as human-<name>).
 
     Humans never register (the namespace is reserved at registration), so the
     proof is per call: the bearer token must resolve via whoami to an org
@@ -99,14 +103,15 @@ def _verify_human_author(
     return identity
 
 
-def _require_organizer(
+def require_organizer(
     identity: HubIdentity, org_roles: OrgRoles, settings: Settings
 ) -> None:
-    """Gate a broadcast on the caller being an admin of the challenge org.
+    """Gate an action on the caller being an admin of the challenge org.
+    Shared by broadcasts and channel creation.
 
     The role isn't on the caller's OAuth token, so it's resolved with the
     Space's admin token. A lookup failure fails closed (503), never a silent
-    downgrade to a normal post.
+    downgrade.
     """
     try:
         role = org_roles.role_of(identity.username, email=identity.email)
@@ -142,6 +147,14 @@ def post_message(
 ) -> MessageResponse:
     now = utc_now()
 
+    # Channel gate, shared by both variants: the channel must exist before
+    # anything is written into it. (`channel`+`broadcast` is already rejected
+    # by the request model.)
+    if req.channel is not None:
+        validate_channel_name(req.channel)
+        if not read_model.channel_exists(req.channel):
+            raise ChannelNotFound(req.channel)
+
     if req.source is not None:
         if req.broadcast:
             # Agents post from their bucket; broadcasting is for organizers,
@@ -165,8 +178,13 @@ def post_message(
                 "broadcast frontmatter is server-owned and organizer-only",
                 hint="broadcast from a signed-in organizer account with broadcast: true",
             )
+        if "channel" in client_fm:
+            raise InvalidFrontmatter(
+                "channel frontmatter is server-stamped; pass `channel` in the "
+                "POST /v1/messages request body instead"
+            )
 
-        dest_folder = "message_board"
+        dest_folder = f"channels/{req.channel}" if req.channel else "message_board"
         existing = dedup.get(content_hash(body_bytes), dest_folder)
         if existing:
             raise AlreadyPromoted(existing)
@@ -175,6 +193,10 @@ def post_message(
         if req.refs is not None:
             client_fm["refs"] = req.refs
 
+        auto_subscribed = (
+            req.channel is not None
+            and req.channel not in read_model.channel_subscriptions(agent_id)
+        )
         server_fm = _server_message_fm(agent_id, "bucket", now)
         merged = merge(client_fm, server_fm)
 
@@ -186,9 +208,15 @@ def post_message(
             fm=merged,
             body=source_body,
             now=now,
+            channel=req.channel,
         )
         dedup.record(content_hash(body_bytes), dest_folder, filename)
 
+        audit_extra: dict = {}
+        if recipients:
+            audit_extra["mentions_delivered"] = recipients
+        if req.channel is not None:
+            audit_extra["channel"] = req.channel
         audit.write(
             agent_id=agent_id,
             route="/v1/messages",
@@ -199,11 +227,16 @@ def post_message(
             status_code=201,
             caller_ip=request.client.host if request.client else None,
             user_agent=request.headers.get("user-agent"),
-            extra={"mentions_delivered": recipients} if recipients else None,
+            extra=audit_extra or None,
         )
 
         return MessageResponse(
-            filename=filename, via="bucket", path=target, mentions_delivered=recipients
+            filename=filename,
+            via="bucket",
+            path=target,
+            mentions_delivered=recipients,
+            channel=req.channel,
+            auto_subscribed=auto_subscribed,
         )
 
     # raw variant
@@ -213,9 +246,9 @@ def post_message(
         # Human-authored post (§5.4a) — e.g. the dashboard composer. Humans
         # cannot register, so instead of the registration gate the caller
         # proves the identity per call with their own HF token.
-        identity = _verify_human_author(req.agent_id, authorization, settings, hub)
+        identity = verify_human_author(req.agent_id, authorization, settings, hub)
         if req.broadcast:
-            _require_organizer(identity, org_roles, settings)
+            require_organizer(identity, org_roles, settings)
         via = "dashboard"
         default_type = "user"
     else:
@@ -235,6 +268,10 @@ def post_message(
     client_fm: dict = {"type": req.type or default_type}
     if req.refs is not None:
         client_fm["refs"] = req.refs
+    auto_subscribed = (
+        req.channel is not None
+        and req.channel not in read_model.channel_subscriptions(req.agent_id)
+    )
     server_fm = _server_message_fm(req.agent_id, via, now)
     merged = merge(client_fm, server_fm)
 
@@ -247,6 +284,7 @@ def post_message(
         body=req.body,
         now=now,
         broadcast=req.broadcast,
+        channel=req.channel,
     )
 
     audit_extra: dict = {}
@@ -254,6 +292,8 @@ def post_message(
         audit_extra["mentions_delivered"] = recipients
     if req.broadcast:
         audit_extra["broadcast"] = True
+    if req.channel is not None:
+        audit_extra["channel"] = req.channel
     audit.write(
         agent_id=req.agent_id,
         route="/v1/messages",
@@ -273,6 +313,8 @@ def post_message(
         path=target,
         mentions_delivered=recipients,
         broadcast=req.broadcast,
+        channel=req.channel,
+        auto_subscribed=auto_subscribed,
     )
 
 

@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     # member→role map (rarely changes; a miss is one members-API call).
     org_roles_ttl_s: float = Field(300.0, alias="ORG_ROLES_TTL_S")
 
+    # ── Channels (topic rooms, CHANNELS_DESIGN.md) ──
+    # Creation is organizer-only (the broadcast admin gate), so it needs no
+    # dedicated rate limit — the shared raw-message limiter bounds it.
+    # Newest messages included per subscribed channel in the digest block.
+    digest_channel_recent: int = Field(3, alias="DIGEST_CHANNEL_RECENT")
+
     # ── Benchmark jobs (optional; POST /v1/jobs:run is 404 when off) ──
     jobs_enabled: bool = Field(False, alias="JOBS_ENABLED")
     # Harness contract: a directory at {central_bucket}/{harness_prefix}

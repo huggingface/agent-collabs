@@ -50,10 +50,14 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def stamp_filename(agent_id: str, dt: datetime) -> str:
+def stamp_str(dt: datetime) -> str:
     base = dt.strftime("%Y%m%d-%H%M%S")
     ms = f"{dt.microsecond // 1000:03d}"
-    return f"{base}-{ms}_{agent_id}.md"
+    return f"{base}-{ms}"
+
+
+def stamp_filename(agent_id: str, dt: datetime) -> str:
+    return f"{stamp_str(dt)}_{agent_id}.md"
 
 
 def stamp_yaml(dt: datetime) -> str:
@@ -85,6 +89,37 @@ def broadcast_path(filename: str) -> str:
     file. Stored once here, not fanned out; the inbox read-time union surfaces
     it to every handle, so lurkers and late-registered agents see it too."""
     return f"{BROADCASTS_FOLDER}/{filename}"
+
+
+# ── Channels (topic rooms, CHANNELS_DESIGN.md) ──
+CHANNELS_FOLDER = "channels"
+
+# Static path segments under /v1/channels/ — a channel with one of these names
+# would shadow a fixed route (GET /v1/channels/feed), so they can never be
+# channel names.
+RESERVED_CHANNEL_NAMES = frozenset({"feed"})
+
+
+def channel_dir(name: str) -> str:
+    return f"{CHANNELS_FOLDER}/{name}"
+
+
+def channel_readme_path(name: str) -> str:
+    """The channel's theme. A channel exists iff this file does — same
+    structural invariant as taskforces."""
+    return f"{CHANNELS_FOLDER}/{name}/README.md"
+
+
+def channel_member_path(name: str, handle: str) -> str:
+    """One marker file per subscription: subscribe = write it, unsubscribe =
+    delete it. No shared roster file to read-modify-write, so concurrent
+    subscribes cannot lose each other; rosters and "what does X follow" are
+    derived by filtering the one cached channels/ listing."""
+    return f"{CHANNELS_FOLDER}/{name}/members/{handle}.md"
+
+
+def channel_message_path(name: str, agent_id: str, dt: datetime) -> str:
+    return f"{CHANNELS_FOLDER}/{name}/{stamp_filename(agent_id, dt)}"
 
 
 def taskforce_dir(name: str) -> str:
