@@ -7,8 +7,10 @@ is your bucket — no token rides on the call.
 
 ```bash
 python share_trace.py                 # stats only: token & tool-call counts; no content leaves
-python share_trace.py --full          # FULL: stats + your redacted session transcript -> the library
-python share_trace.py --full --raw    # full, but skip secret redaction (upload as-is)
+python share_trace.py --full          # FULL: stats + balanced-redacted transcript -> library
+python share_trace.py --full --privacy secrets  # credentials only; preserve PII
+python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
+python share_trace.py --full --raw    # UNSAFE: upload transcript content as-is
 python share_trace.py --dry-run       # print the plan + the manifest; touch nothing
 ```
 
@@ -23,7 +25,7 @@ Two tiers, your choice **per session**:
 | Tier | What leaves your machine | Use it for |
 |---|---|---|
 | **stats** (default) | a small `manifest.md`: token usage + tool-call counts + harness/model — **no prompts, no tool args** | contributing to the project's token estimate |
-| **full** (`--full`) | the above **plus** your harness's native session log (secrets redacted) | letting others read & build on how you worked |
+| **full** (`--full`) | the above **plus** your harness's native session log (credentials and personal identifiers pseudonymized) | letting others read & build on how you worked |
 
 A `full` trace's native log renders directly in **Hugging Face's built-in trace
 viewer** — Claude Code and Codex are supported out of the box, no conversion.
@@ -65,10 +67,23 @@ auto-detects your current session log; override with `--harness <name>` and
 
 ## Privacy
 
-- **Redaction is client-side and on by default** — secrets (`hf_…`, `sk-…`, `ghp_…`,
-  AWS keys, `Authorization: Bearer …`) are scrubbed **before** anything is written.
-  This matters because your scratch bucket is **org-readable**: content is cleaned
-  before it lands anywhere. `--full --raw` skips this (use only when you're sure).
+- **Redaction is client-side and on by default.** The client parses JSONL,
+  recursively scrubs sensitive keys, and replaces credentials and identifiers
+  with stable typed aliases such as `<REDACTED:GITHUB_TOKEN_1>` and
+  `<REDACTED:EMAIL_1>`. Commands, prompts, responses, tool structure, relative
+  paths, and repeated-value relationships remain readable.
+- The default `balanced` privacy level covers provider credentials, auth/cookie
+  headers, private keys, credential-bearing URLs, emails, and personal home-path
+  prefixes. `secrets` preserves emails and paths; `strict` additionally aliases
+  URL hosts and IP addresses. Use `--redact-pattern-file <path>` for one
+  task-specific regex per line (for example, customer or project identifiers).
+- This is still best-effort: the client cannot infer that otherwise ordinary task
+  prose or source code is confidential. The redaction summary reports only
+  category counts, never original values. `--full --raw` skips content scrubbing
+  and is explicitly unsafe.
+- Scrubbing happens **before** anything is written. This matters because your
+  scratch bucket is **org-readable**. The manifest uses the same scrubber, and
+  full traces use a neutral `trace.jsonl`-style shared filename.
 - **The default writes only numbers** — your transcript never leaves your machine.
 - The backend governs what enters the shared library; it can't retract what you put
   in your own bucket — so for the default stats share, the client deliberately

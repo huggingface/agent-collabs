@@ -161,3 +161,262 @@ def test_explicit_transcript_dry_run_works(home, monkeypatch, tmp_path, capsys):
     out = capsys.readouterr().out
     assert "session    : explicit-sess" in out
     assert "tokens     : 3" in out
+
+
+def test_redactor_preserves_trace_structure_and_task_context():
+    secrets = {
+        "hf": "hf_" + "A" * 24,
+        "github_classic": "ghp_" + "B" * 24,
+        "github_fine": "github_pat_" + "C" * 30,
+        "sk": "sk-" + "D" * 24,
+        "aws_long_lived": "AKIA" + "E" * 16,
+        "aws_temporary": "ASIA" + "F" * 16,
+        "slack": "xoxb-" + "1" * 12 + "-" + "G" * 24,
+        "gitlab": "glpat-" + "H" * 24,
+        "google": "AIza" + "I" * 35,
+        "npm": "npm_" + "J" * 36,
+        "pypi": "pypi-" + "K" * 24,
+        "jwt": "eyJ" + "L" * 12 + "." + "M" * 12 + "." + "N" * 12,
+    }
+    record = {
+        "type": "response_item",
+        "payload": {
+            "task": "Fix the payment retry while preserving the commit history.",
+            "commit": "7f4d3b2a" * 5,
+            "headers": {
+                "Authorization": "Bearer " + secrets["hf"],
+                "Cookie": "session=top-secret-cookie",
+            },
+            "password": "correct horse battery staple",
+            "aws_secret_access_key": "O" * 40,
+            "command": (
+                "curl -H 'Authorization: Basic dXNlcjpwYXNz' "
+                "'https://alice:db-pass@db.internal/app"
+                "?access_token=query-secret'"
+            ),
+            "private_key": (
+                "-----BEGIN PRIVATE KEY-----\nsecret-material\n"
+                "-----END PRIVATE KEY-----"
+            ),
+            "provider_values": list(secrets.values()),
+        },
+    }
+
+    redactor = st.TraceRedactor("secrets")
+    result = redactor.redact_jsonl(json.dumps(record) + "\n")
+    parsed = json.loads(result)
+
+    assert parsed["type"] == "response_item"
+    assert parsed["payload"]["task"] == record["payload"]["task"]
+    assert parsed["payload"]["commit"] == record["payload"]["commit"]
+    assert "curl -H" in parsed["payload"]["command"]
+    assert "db.internal/app" in parsed["payload"]["command"]
+    assert all(secret not in result for secret in secrets.values())
+    for sensitive in (
+        "top-secret-cookie",
+        "correct horse battery staple",
+        "O" * 40,
+        "dXNlcjpwYXNz",
+        "alice",
+        "db-pass",
+        "query-secret",
+        "secret-material",
+    ):
+        assert sensitive not in result
+    assert "<REDACTED:BEARER_TOKEN_1>" in result
+    assert "<REDACTED:PRIVATE_KEY_" in result
+    assert redactor.summary()
+
+
+def test_balanced_redaction_uses_stable_aliases_and_preserves_relative_paths():
+    text = json.dumps(
+        {
+            "message": (
+                "Ask alice@example.com to inspect /Users/alice/work/app.py; "
+                "alice@example.com owns src/app.py"
+            )
+        }
+    ) + "\n"
+    redactor = st.TraceRedactor("balanced")
+    result = redactor.redact_jsonl(text)
+
+    assert result.count("<REDACTED:EMAIL_1>") == 2
+    assert "$HOME/work/app.py" in result
+    assert "src/app.py" in result
+    assert redactor.summary()["EMAIL"] == 2
+    assert redactor.summary()["HOME_PATH"] == 1
+
+
+def test_privacy_levels_are_progressively_stricter():
+    text = (
+        "Contact alice@example.com under /home/alice/work, then call "
+        "https://api.internal.example/v1 from 10.20.30.40"
+    )
+
+    secrets = st.redact(text, privacy="secrets")
+    balanced = st.redact(text, privacy="balanced")
+    strict = st.redact(text, privacy="strict")
+
+    assert "alice@example.com" in secrets
+    assert "/home/alice/work" in secrets
+    assert "api.internal.example" in secrets
+    assert "10.20.30.40" in secrets
+    assert "alice@example.com" not in balanced
+    assert "$HOME/work" in balanced
+    assert "api.internal.example" in balanced
+    assert "10.20.30.40" in balanced
+    assert "api.internal.example" not in strict
+    assert "10.20.30.40" not in strict
+    assert "https://<REDACTED:HOST_1>/v1" in strict
+
+
+def test_escaped_authorization_header_is_redacted_without_losing_command():
+    line = json.dumps(
+        {
+            "command": (
+                'curl -H \\"Authorization: Bearer escaped.token-value\\" '
+                "https://example.com/v1"
+            )
+        }
+    ) + "\n"
+    result = st.redact(line, privacy="secrets")
+
+    assert "escaped.token-value" not in result
+    assert "Authorization: Bearer <REDACTED:BEARER_TOKEN_1>" in result
+    assert "curl -H" in result
+    assert "https://example.com/v1" in result
+
+
+def test_redaction_is_idempotent_for_quoted_and_unquoted_assignments():
+    text = json.dumps(
+        {
+            "command": "run --password='two words' api_key=opaque-value",
+            "password": "structured value",
+        }
+    ) + "\n"
+    first = st.redact(text, privacy="balanced")
+    second = st.redact(first, privacy="balanced")
+
+    assert second == first
+    assert "two words" not in first
+    assert "opaque-value" not in first
+    assert "structured value" not in first
+
+
+def test_custom_patterns_are_stable_and_pattern_file_is_validated(tmp_path):
+    patterns = tmp_path / "redact-patterns.txt"
+    patterns.write_text("# customer identifiers\nAcme-(?:North|South)\n")
+    compiled = st._custom_patterns(str(patterns))
+    redactor = st.TraceRedactor("secrets", compiled)
+
+    result = redactor.redact_jsonl(
+        json.dumps({"task": "Compare Acme-North with Acme-North and Acme-South"}) + "\n"
+    )
+    assert result.count("<REDACTED:CUSTOM_1>") == 2
+    assert result.count("<REDACTED:CUSTOM_2>") == 1
+    assert "Compare " in result
+
+    patterns.write_text("(\n")
+    with pytest.raises(SystemExit, match="invalid regex"):
+        st._custom_patterns(str(patterns))
+
+
+def test_full_upload_only_sends_scrubbed_content_and_neutral_filename(
+    home, monkeypatch, tmp_path
+):
+    secret = "github_pat_" + "Z" * 30
+    transcript = tmp_path / "alice@example.com.jsonl"
+    transcript.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "timestamp": "2026-06-29T00:00:00Z",
+                        "payload": {
+                            "session_id": "scrubbed-session",
+                            "model": "gpt-test",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "event_msg",
+                        "timestamp": "2026-06-29T00:01:00Z",
+                        "payload": {
+                            "type": "token_count",
+                            "info": {
+                                "total_token_usage": {
+                                    "input_tokens": 1,
+                                    "output_tokens": 2,
+                                    "cached_input_tokens": 0,
+                                    "reasoning_output_tokens": 0,
+                                    "total_tokens": 3,
+                                }
+                            },
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "timestamp": "2026-06-29T00:02:00Z",
+                        "payload": {
+                            "type": "local_shell_call",
+                            "call_id": "c1",
+                            "command": (
+                                f"deploy with {secret} for alice@example.com "
+                                "from /Users/alice/work/app.py"
+                            ),
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n"
+    )
+    uploads = {}
+
+    def capture_upload(local, destination):
+        uploads[destination] = Path(local).read_text()
+
+    monkeypatch.setattr(st, "_hf_cp", capture_upload)
+    monkeypatch.setattr(st.shutil, "which", lambda _: "/usr/bin/hf")
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "share_trace.py",
+            "--transcript",
+            str(transcript),
+            "--harness",
+            "codex",
+            "--full",
+            "--yes",
+            "--upload-only",
+            "--agent-id",
+            "agent-1",
+            "--org",
+            "test-org",
+            "--slug",
+            "test-collab",
+        ],
+    )
+
+    assert st.main() == 0
+    manifest_uri = next(uri for uri in uploads if uri.endswith("/manifest.md"))
+    trace_uri = next(uri for uri in uploads if uri.endswith("/trace.jsonl"))
+    assert "alice@example.com" not in uploads[manifest_uri]
+    assert '"privacy": "balanced"' in uploads[manifest_uri]
+    assert '"GITHUB_TOKEN": 1' in uploads[manifest_uri]
+    assert secret not in uploads[trace_uri]
+    assert "alice@example.com" not in uploads[trace_uri]
+    assert "/Users/alice" not in uploads[trace_uri]
+    assert "$HOME/work/app.py" in uploads[trace_uri]
+    assert all("alice@example.com.jsonl" not in uri for uri in uploads)
+
+
+def test_session_id_must_be_a_safe_bucket_component():
+    assert st._safe_session_id("rollout-2026.06_29") == "rollout-2026.06_29"
+    with pytest.raises(SystemExit, match="safe --session-id"):
+        st._safe_session_id("../another-session")

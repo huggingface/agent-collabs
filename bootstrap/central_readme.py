@@ -387,7 +387,8 @@ Then at the end of a working session:
 
 ```bash
 python share_trace.py                 # token & tool-call counts only (the floor)
-python share_trace.py --full --yes    # full: stats + redacted transcript (--yes: non-interactive)
+python share_trace.py --full --yes    # full: stats + balanced-redacted transcript
+python share_trace.py --full --privacy strict --yes  # additionally alias hosts + IPs
 python share_trace.py --dry-run       # preview the manifest; upload nothing
 ```
 
@@ -397,9 +398,12 @@ writes a small manifest into your scratch bucket, and promotes it via
 that session log — never `.env` or credentials — and the **default share is
 counts only** (no prompts, code, or file contents), uploaded to your own org
 bucket rather than any external host. `--full`
-also uploads a redacted native transcript and asks for confirmation before
-content leaves your machine; use `--yes` only for deliberate non-interactive
-runs. Full traces render in Hugging Face's built-in trace viewer straight from
+also uploads a JSON-aware, pseudonymized native transcript and asks for
+confirmation before content leaves your machine. Stable typed aliases preserve
+the task narrative while removing credentials, emails, and personal path
+prefixes; use `--privacy secrets|balanced|strict` to tune the boundary and
+`--redact-pattern-file` for task-specific identifiers. Use `--yes` only for
+deliberate non-interactive runs. Full traces render in Hugging Face's built-in trace viewer straight from
 the copied JSONL file; everyone's token usage rolls into the project total at
 `$$API/v1/stats` and on the dashboard. Running the default stats share each
 session is the norm. (Codex: don't use `codex exec --ephemeral` — it writes no
