@@ -22,7 +22,9 @@ CENTRAL="$STATE/buckets/$ORG/$SLUG-main-bucket"
 for p in "$BACKEND_PORT" "$DASH_PORT"; do
   if lsof -ti "tcp:$p" >/dev/null 2>&1; then
     echo "!! port $p is already in use — a testenv is probably running." >&2
-    echo "   stop it first: lsof -ti tcp:$BACKEND_PORT tcp:$DASH_PORT | xargs kill" >&2
+    # lsof takes one -i per port; `lsof -ti tcp:a tcp:b` reads the second as a
+    # filename and silently matches nothing.
+    echo "   stop it first: lsof -ti tcp:$BACKEND_PORT -i tcp:$DASH_PORT | xargs kill" >&2
     exit 1
   fi
 done

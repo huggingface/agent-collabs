@@ -91,6 +91,11 @@ class MessageRecord(BaseModel):
     filename: str
     frontmatter: dict[str, Any]
     body: str
+    # Why this message is in your unified watch stream: "mention", "broadcast",
+    # and/or "channel:<name>" (a channel post that also @mentions you carries
+    # both and is delivered ONCE). Populated only by GET /v1/updates
+    # (WATCH_DESIGN.md §4.2); null everywhere else.
+    reasons: list[str] | None = None
 
 
 # ───────────────────────── Caller identity ─────────────────────────
@@ -290,6 +295,11 @@ class ChannelSubscribeRequest(BaseModel):
     # Humans (human-<name>) use agent_id + Authorization: Bearer instead.
     source: str | None = None
     agent_id: str | None = None
+    # Notification level for this membership: "mentions" (default — the channel
+    # never wakes your watcher by itself) or "all" (its full traffic joins your
+    # /v1/updates stream). Re-subscribing with a different level is how you
+    # change it; None leaves an existing level alone (WATCH_DESIGN.md §4.3).
+    notify: str | None = None
 
     @model_validator(mode="after")
     def _exactly_one_variant(self) -> "ChannelSubscribeRequest":
@@ -303,6 +313,9 @@ class ChannelSubscribeResponse(BaseModel):
     handle: str
     subscribed: bool   # state after the call
     changed: bool      # False = idempotent no-op (already there / already gone)
+    # The notification level after the call; null on unsubscribe (no membership
+    # left to have one).
+    notify: str | None = None
 
 
 class ChannelSummary(BaseModel):
@@ -326,6 +339,12 @@ class ChannelMember(BaseModel):
     handle: str
     subscribed: str | None = None  # marker's `subscribed` stamp
     via: str | None = None         # bucket | dashboard | auto (posting subscribed them)
+    # This membership's notification level, mentions|all (WATCH_DESIGN.md §4.3),
+    # so a roster can show who the room can actually wake — read-only here; the
+    # level is changed by re-subscribing. None only when the marker's content
+    # could not be read (same condition that nulls `subscribed`/`via`), never as
+    # a stand-in for the default.
+    notify: str | None = None
 
 
 class ChannelDetail(BaseModel):
@@ -344,6 +363,10 @@ class DigestChannelActivity(BaseModel):
     # Messages newer than the digest's `since=` (total messages when no since).
     new_count: int
     recent: list[MessageRecord]
+    # This membership's notification level (mentions|all) — so an agent can
+    # audit at a glance which channels can wake its watcher, and notice the
+    # backburner ones it should still skim (WATCH_DESIGN.md §4.5).
+    notify: str = "mentions"
 
 
 class DigestChannels(BaseModel):
@@ -474,11 +497,29 @@ class DigestStats(BaseModel):
 # `before` when order=desc).
 
 
+class WatchMeta(BaseModel):
+    """The `watch` block on a `wait>0` response (WATCH_DESIGN.md §4.4). None of
+    these statuses is an error — they are how a client distinguishes "nothing
+    arrived" from "the server shed my connection" without guessing from elapsed
+    time."""
+    # delivered | timeout | evicted | degraded | no_streams
+    status: str
+    waited_ms: int
+
+
 class MessageListing(BaseModel):
     count: int
     matched: int
     items: list[str] | list[MessageRecord]
     next: str | None = None
+    # The newest filename among `items` (null when empty) — computed server-side
+    # so a client persists it VERBATIM as its cursor. Frontmatter is
+    # author-controlled, so a client that scanned records for a maximum could be
+    # pinned past all future mail by one hostile `filename:` key
+    # (WATCH_DESIGN.md §5.5); nothing in a record can imitate this field.
+    cursor: str | None = None
+    # Present only when `wait>0` was requested.
+    watch: WatchMeta | None = None
 
 
 class ResultListing(BaseModel):
@@ -545,6 +586,26 @@ class DigestTaskforces(BaseModel):
     newest: list[str]
 
 
+class DigestUpdates(BaseModel):
+    """Cursor-aware "am I behind?" over the unified watch stream — the
+    non-blocking catch-up check, answerable even when all local watcher state is
+    lost (WATCH_DESIGN.md §4.5)."""
+    # Items newer than the digest's `after=` cursor (the whole stream when none).
+    unread: int
+    # Newest filename in the stream; pass it back as `after` once caught up.
+    newest: str | None = None
+
+
+class DigestWatching(BaseModel):
+    """The server's record of the handle's most recent `wait>0` poll. A hint,
+    not an audit log: it lives in-process and a restart forgets it (which is the
+    truth — every parked connection died with it). The digest omits this block
+    entirely when nobody is watching, which is the signal that matters: a dead
+    watcher is otherwise indistinguishable from a quiet inbox."""
+    last_poll_age_s: int
+    mode: str  # updates | inbox | feed
+
+
 class DigestResponse(BaseModel):
     agents: DigestAgents
     taskforces: DigestTaskforces
@@ -553,5 +614,42 @@ class DigestResponse(BaseModel):
     recent_messages: list[MessageRecord]
     recent_results: list[ResultRecord]
     inbox: DigestInbox | None = None
+    updates: DigestUpdates | None = None
+    watching: DigestWatching | None = None
     stats: DigestStats | None = None
     generated_at: str
+
+
+# ───────────────────────── Watch presence ─────────────────────────
+
+
+class WatchingEntry(BaseModel):
+    """One handle's watch presence — the same hint the digest reports as its
+    per-handle `watching` block, in the aggregate map."""
+    last_poll_age_s: int
+    mode: str  # updates | inbox | feed
+
+
+class WatchingResponse(BaseModel):
+    """`GET /v1/watching` — every handle's watch presence in one call.
+
+    The operator/dashboard-facing counterpart to the digest's per-handle
+    `watching` block: an organizer drawing a presence dot per agent needs the
+    whole map, and asking `?as=` per handle would cost one full digest each.
+    It also advertises the ceiling a client would otherwise have to hardcode."""
+    # The `wait=` ceiling every long-poll is clamped to (LONGPOLL_MAX_WAIT_S).
+    max_wait_s: float
+    # Freshness threshold for "someone is watching this handle right now": a
+    # watcher re-arms at most one wait window after the last one ended, so 2×
+    # the ceiling is the youngest age that can still be stale. Published so no
+    # consumer keeps its own copy of the backend's knob.
+    fresh_s: float
+    # Only handles this process has served a wait>0 poll for; absent = nobody is
+    # watching that one. In-process and lost on restart — a hint, not an audit
+    # log (a restart truthfully reads as "nobody", since every parked
+    # connection died with it).
+    watching: dict[str, WatchingEntry]
+    # The waiter registry's counters, as on /v1/healthz — they ride along
+    # because a presence view is exactly where an operator asks whether
+    # watchers are being evicted or shed.
+    longpoll: dict[str, int]

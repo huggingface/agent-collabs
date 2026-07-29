@@ -14,6 +14,7 @@ from app.deps import (
     get_bucket_write_limiter,
     get_dedup,
     get_hub,
+    get_notifier,
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
@@ -23,6 +24,7 @@ from app.deps import (
     get_verifier,
 )
 from app.main import app as fastapi_app
+from app.notify import Notifier
 from app.org_roles import OrgRoles
 from app.rate_limit import CompoundLimiter, TokenBucket
 from app.read_model import ReadModel
@@ -57,12 +59,21 @@ def make_env():
         verification = VerificationStatusStore(
             hub, runs_prefix=settings.verification_runs_prefix
         )
+        # Fresh registry per env so parked waiters can't leak across tests, and
+        # so the caps are whatever this test's Settings say.
+        notifier = Notifier(
+            max_waiters_per_owner=settings.longpoll_max_waiters_per_owner,
+            max_waiters_total=settings.longpoll_max_waiters_total,
+            wake_spread_s=settings.longpoll_wake_spread_s,
+            wake_spread_threshold=settings.longpoll_wake_spread_threshold,
+        )
         runner = FakeJobRunner()
         # Inline spawn: the verdict watcher runs synchronously inside the POST,
         # so tests assert final state without thread coordination.
         verifier = Verifier(
             settings, hub, read_model, verification, runner,
             spawn=lambda _name, fn: fn(),
+            notifier=notifier,
         )
         generous = lambda: CompoundLimiter(  # noqa: E731 — tests never rate limit
             TokenBucket(capacity=1000, refill_per_minute=1000),
@@ -73,6 +84,7 @@ def make_env():
                 get_settings_dep: lambda: settings,
                 get_hub: lambda: hub,
                 get_read_model: lambda: read_model,
+                get_notifier: lambda: notifier,
                 get_org_roles: lambda: OrgRoles(hub, settings),
                 get_audit: lambda: AuditLogger(hub),
                 get_dedup: lambda: dedup,
@@ -92,6 +104,7 @@ def make_env():
             verification=verification,
             runner=runner,
             verifier=verifier,
+            notifier=notifier,
             client=TestClient(fastapi_app),
         )
 

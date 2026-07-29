@@ -13,6 +13,7 @@ from app.deps import (
     get_bucket_write_limiter,
     get_dedup,
     get_hub,
+    get_notifier,
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
@@ -31,7 +32,7 @@ from app.errors import (
     Unauthorized,
 )
 from app.announce import promote_message
-from app.frontmatter import merge, parse
+from app.frontmatter import merge, parse, validate_message_frontmatter
 from app.hub import HubClient, HubIdentity
 from app.org_roles import OrgRoles
 from app.listing import list_message_like
@@ -42,6 +43,7 @@ from app.models import (
     MessageResponse,
 )
 from app.naming import registration_path, stamp_yaml, utc_now
+from app.notify import Notifier
 from app.rate_limit import CompoundLimiter
 from app.read_model import ReadModel
 from app.validation import (
@@ -144,6 +146,7 @@ def post_message(
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
     read_model: ReadModel = Depends(get_read_model),
     org_roles: OrgRoles = Depends(get_org_roles),
+    notifier: Notifier = Depends(get_notifier),
 ) -> MessageResponse:
     now = utc_now()
 
@@ -183,6 +186,10 @@ def post_message(
                 "channel frontmatter is server-stamped; pass `channel` in the "
                 "POST /v1/messages request body instead"
             )
+        # §5.5: everything else must be a key the system itself writes. This is
+        # the only path where a client supplies frontmatter at all, so it is the
+        # only place the allowlist has to hold.
+        validate_message_frontmatter(client_fm)
 
         dest_folder = f"channels/{req.channel}" if req.channel else "message_board"
         existing = dedup.get(content_hash(body_bytes), dest_folder)
@@ -209,6 +216,7 @@ def post_message(
             body=source_body,
             now=now,
             channel=req.channel,
+            notifier=notifier,
         )
         dedup.record(content_hash(body_bytes), dest_folder, filename)
 
@@ -285,6 +293,7 @@ def post_message(
         now=now,
         broadcast=req.broadcast,
         channel=req.channel,
+        notifier=notifier,
     )
 
     audit_extra: dict = {}

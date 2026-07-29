@@ -307,8 +307,11 @@ def test_subscribe_unsubscribe_idempotent(env):
 
     r = subscribe(env, "evals", "lurker")
     assert r.status_code == 200
+    # A plain subscribe lands at the quiet notify level: joining a channel is
+    # never a notification commitment (WATCH_DESIGN.md §4.3).
     assert r.json() == {
-        "channel": "evals", "handle": "lurker", "subscribed": True, "changed": True
+        "channel": "evals", "handle": "lurker", "subscribed": True,
+        "changed": True, "notify": "mentions",
     }
     assert subscribe(env, "evals", "lurker").json()["changed"] is False
 
@@ -317,8 +320,10 @@ def test_subscribe_unsubscribe_idempotent(env):
     assert feed["items"][0]["frontmatter"]["channel"] == "evals"
 
     r = subscribe(env, "evals", "lurker", verb="unsubscribe")
+    # Unsubscribe reports no level — there is no membership left to have one.
     assert r.json() == {
-        "channel": "evals", "handle": "lurker", "subscribed": False, "changed": True
+        "channel": "evals", "handle": "lurker", "subscribed": False,
+        "changed": True, "notify": None,
     }
     assert "channels/evals/members/lurker.md" in env.hub.deletes
     assert env.client.get("/v1/channels/feed?as=lurker").json()["matched"] == 0

@@ -24,6 +24,7 @@ from app.naming import (
     stamp_yaml,
     utc_now,
 )
+from app.notify import Notifier
 from app.read_model import ReadModel
 
 
@@ -61,16 +62,25 @@ def reset_stamp_guard() -> None:
         _LAST_STAMP_TIMES.clear()
 
 
-def subscription_marker(channel: str, handle: str, now: datetime, via: str) -> tuple[dict, str]:
+def subscription_marker(
+    channel: str, handle: str, now: datetime, via: str, notify: str | None = None
+) -> tuple[dict, str]:
     """The member-marker file for one subscription (CHANNELS_DESIGN.md §2):
     tiny frontmatter, empty body. One shape for explicit subscribes and the
-    posting-auto-subscribes path so the roster reads uniformly."""
+    posting-auto-subscribes path so the roster reads uniformly.
+
+    ``notify`` is the per-channel notification level (WATCH_DESIGN.md §4.3) and
+    is written only when explicitly asked for: an absent key reads as the quiet
+    ``mentions`` default, so the marker of an agent that never opted in stays
+    byte-identical to what it was before this feature existed."""
     fm = {
         "channel": channel,
         "agent": handle,
         "subscribed": stamp_yaml(now),
         "via": via,
     }
+    if notify is not None:
+        fm["notify"] = notify
     return fm, serialise(fm, "")
 
 
@@ -85,6 +95,7 @@ def promote_message(
     now: datetime,
     broadcast: bool = False,
     channel: str | None = None,
+    notifier: Notifier | None = None,
 ) -> tuple[str, str, list[str], int]:
     """Land the message file and its inbox fan-out copies (§16.4) in one batch
     write, then write-through the cache. Returns (target, filename,
@@ -151,6 +162,22 @@ def promote_message(
         read_model.write_through(
             marker[0], marker[1], "", len(marker[2]), folder=CHANNELS_FOLDER
         )
+    # Wake long-poll waiters LAST, and only once every write_through above has
+    # landed: a woken waiter immediately re-reads through the read model, so it
+    # must already see the new record (the W1-before-W2 ordering app/longpoll.py
+    # depends on). `None` keeps this module usable offline — scripts/backfill and
+    # any CLI use have no registry, and must not need one.
+    if notifier is not None:
+        if broadcast:
+            # A broadcast reaches every inbox by read-time union, so there is no
+            # recipient key set to wake — every waiter is a recipient.
+            notifier.wake_all()
+        elif channel is not None:
+            notifier.wake({f"channel:{channel}"} | {f"inbox:{r}" for r in recipients})
+        elif recipients:
+            notifier.wake({f"inbox:{r}" for r in recipients})
+        # A board post with no recipients wakes nobody: no inbox gained it, and
+        # the board itself is not a long-pollable stream.
     return target, filename, recipients, len(content_bytes)
 
 
@@ -163,6 +190,7 @@ def post_server_message(
     body: str,
     type_: str = "verification",
     refs: list[str] | None = None,
+    notifier: Notifier | None = None,
 ) -> tuple[str, list[str]]:
     """Compose and land a server-authored board message (no HTTP round trip).
 
@@ -184,5 +212,6 @@ def post_server_message(
         fm=merge(client_fm, server_fm),
         body=body,
         now=now,
+        notifier=notifier,
     )
     return filename, recipients

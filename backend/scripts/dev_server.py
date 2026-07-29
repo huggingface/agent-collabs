@@ -39,6 +39,7 @@ from app.deps import (                                 # noqa: E402
     get_bucket_write_limiter,
     get_dedup,
     get_hub,
+    get_notifier,
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
@@ -48,6 +49,7 @@ from app.deps import (                                 # noqa: E402
     get_verifier,
 )
 from app.main import app as fastapi_app                # noqa: E402
+from app.notify import Notifier                        # noqa: E402
 from app.org_roles import OrgRoles                     # noqa: E402
 from app.rate_limit import CompoundLimiter, TokenBucket  # noqa: E402
 from app.read_model import ReadModel                   # noqa: E402
@@ -234,8 +236,19 @@ def main() -> None:
     read_model = ReadModel(hub, settings)
     dedup = PromotionLRU(settings.dedup_lru_size)
     verification = VerificationStatusStore(hub, runs_prefix=settings.verification_runs_prefix)
+    # Every singleton in app/deps.py reads the env-backed settings, so each one
+    # this Settings() must reach needs an override below — the notifier included,
+    # or /v1/healthz and every wait= route 500s on a Settings ValidationError.
+    notifier = Notifier(
+        max_waiters_per_owner=settings.longpoll_max_waiters_per_owner,
+        max_waiters_total=settings.longpoll_max_waiters_total,
+        wake_spread_s=settings.longpoll_wake_spread_s,
+        wake_spread_threshold=settings.longpoll_wake_spread_threshold,
+    )
+    # The verifier posts verdict messages, so it holds the notifier too — without
+    # it a verdict would land silently and never wake a parked watcher.
     verifier = Verifier(settings, hub, read_model, verification, FakeJobRunner(),
-                        spawn=lambda _name, fn: fn())
+                        spawn=lambda _name, fn: fn(), notifier=notifier)
 
     def compound(burst: int, sustained: int) -> CompoundLimiter:
         return CompoundLimiter(
@@ -247,6 +260,7 @@ def main() -> None:
         get_settings_dep: lambda: settings,
         get_hub: lambda: hub,
         get_read_model: lambda: read_model,
+        get_notifier: lambda: notifier,
         get_org_roles: lambda: OrgRoles(hub, settings),
         get_audit: lambda: AuditLogger(hub),
         get_dedup: lambda: dedup,

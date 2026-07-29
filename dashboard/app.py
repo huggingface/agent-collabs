@@ -79,6 +79,10 @@ DIRECTORY_URL = os.environ.get(
 # agents actually poll. Empty → direct writes only.
 BACKEND_API_URL = os.environ.get("BACKEND_API_URL", "").rstrip("/")
 
+# Per-channel notification levels (WATCH_DESIGN.md §4.3); the backend is the
+# authority, this mirrors the vocabulary for a friendly client-side rejection.
+NOTIFY_LEVELS = ("mentions", "all")
+
 PREFIX = os.environ.get("PREFIX", "message_board")
 RESULTS_PREFIX = os.environ.get("RESULTS_PREFIX", "results")
 AGENTS_PREFIX = os.environ.get("AGENTS_PREFIX", "agents")
@@ -125,6 +129,12 @@ class MessagePost(BaseModel):
 class ChannelCreate(BaseModel):
     name: str = ""
     body: str = ""  # the theme
+
+
+class ChannelNotify(BaseModel):
+    # The signed-in human's own notification level for one channel:
+    # "mentions" (quiet default) or "all" (WATCH_DESIGN.md §4.3).
+    notify: str = ""
 
 
 @asynccontextmanager
@@ -516,6 +526,13 @@ async def _list_md_hub(prefix: str) -> list[dict[str, str]]:
 # ──────────────────────────────────────────────────────────────
 LIST_CACHE_TTL = float(os.environ.get("LIST_CACHE_TTL", "20.0"))
 
+# Hard cap on distinct cache keys. Most surfaces cache under a fixed key (e.g.
+# "__channels__"), but /api/updates and /api/traces key on the raw query
+# string — an anonymous client looping distinct query strings could otherwise
+# grow `_values` without bound. Enforced in the cache class itself (below) so
+# every caller benefits, not just the ones we remember to bound individually.
+_CACHE_MAX_ENTRIES = 512
+
 
 class _SingleFlightCache:
     def __init__(self, ttl: float):
@@ -545,9 +562,54 @@ class _SingleFlightCache:
             raise
 
     async def _refresh(self, key: str, refresh) -> Any:
-        value = await refresh()
-        self._values[key] = (time.monotonic(), value)
+        try:
+            value = await refresh()
+        except Exception:
+            # A failed refresh writes nothing, so the success path's eviction
+            # never runs for it. Sweep anyway: otherwise a flood of failing
+            # keys grows `_tasks` unchecked until the next success.
+            self._evict(time.monotonic())
+            raise
+        now = time.monotonic()
+        self._values[key] = (now, value)
+        self._evict(now)
         return value
+
+    def _evict(self, now: float) -> None:
+        """Bound `_values` and `_tasks`. Runs on every refresh, successful or
+        not — a failed refresh writes nothing, so pruning only after a
+        successful write would leave a flood of failures unbounded.
+
+        For `_values`: first drop entries past their own TTL — cheap and
+        usually enough on its own — then, if still over the cap, evict
+        oldest-first by recorded write time until back at the cap. Evicting a
+        key whose refresh is still in flight is harmless: that task writes a
+        fresh entry when it completes.
+
+        For `_tasks`: drop every task that is DONE. Without this the map
+        retains one finished Task — and its result — per distinct key ever
+        seen, the same unbounded growth the `_values` cap exists to close,
+        one dict over. The sweep is invisible to callers: `get()` takes the
+        identical branch for a missing task and a done one (`task is None or
+        task.done()` → start a fresh one). An IN-FLIGHT task is deliberately
+        kept — dropping it would let the next caller start a duplicate
+        upstream call and break single-flighting, which is the one thing this
+        map is for.
+
+        Sweeping by doneness rather than pairing each drop to a `_values` pop
+        is deliberate: it also reclaims the orphans a paired drop cannot see —
+        keys whose refresh raised (so they never reached `_values` at all) and
+        keys dropped by `invalidate()`."""
+        expired = [k for k, (ts, _) in self._values.items() if now - ts >= self.ttl]
+        for k in expired:
+            self._values.pop(k, None)
+        overflow = len(self._values) - _CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(self._values.items(), key=lambda kv: kv[1][0])[:overflow]
+            for k, _ in oldest:
+                self._values.pop(k, None)
+        for k in [k for k, t in self._tasks.items() if t.done()]:
+            self._tasks.pop(k, None)
 
     def invalidate(self, key: str) -> None:
         self._values.pop(key, None)
@@ -820,6 +882,11 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
         _hub_cache.invalidate("__channels__")
         _hub_cache.invalidate(f"__channel__:{channel}")
         _hub_cache.invalidate_prefix(f"__channel_msgs__:{channel}:")
+        # Posting into a channel auto-subscribes the poster (comment above),
+        # so the caller's own notify-level cache is stale too — invalidate it
+        # exactly as the subscribe proxy does, or the bell can stay hidden for
+        # up to the cache TTL + poll tick (WATCH_DESIGN.md §10.3).
+        _hub_cache.invalidate(f"__notify__:{_human_handle(handle)}")
         return {
             "item": {
                 "filename": posted["filename"],
@@ -956,7 +1023,11 @@ async def verification() -> Response:
 # ──────────────────────────────────────────────────────────────
 async def _proxy_backend_json(path: str) -> Any:
     if not BACKEND_API_URL:
-        raise HTTPException(503, "Trace sharing needs BACKEND_API_URL (the bucket-sync Space).")
+        # Shared by every backend-only read (traces, stats, channels, watch):
+        # 503 is the SPA's signal to hide the feature rather than show it empty.
+        raise HTTPException(
+            503, "This view needs BACKEND_API_URL (the bucket-sync Space)."
+        )
     # A fresh client: app.state.client carries the Space's admin HF_TOKEN, which
     # must never ride along to another service (the backend GETs are tokenless).
     async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
@@ -1042,10 +1113,135 @@ async def create_channel(post: ChannelCreate, request: Request) -> Any:
             r.status_code,
             _backend_error_message(r) or f"Channel creation failed ({r.status_code}).",
         )
-    # New channel list entry + the auto-announcement on the board.
+    # New channel list entry + the auto-announcement on the board. Creation
+    # also auto-subscribes the creator (docstring above), so the caller's own
+    # notify-level cache is stale too — invalidate it exactly as the subscribe
+    # proxy does, or the bell can stay hidden for up to the cache TTL + poll
+    # tick (WATCH_DESIGN.md §10.3).
     _hub_cache.invalidate("__channels__")
     _invalidate_list_cache(PREFIX)
+    _hub_cache.invalidate(f"__notify__:{_human_handle(username)}")
     return r.json()
+
+
+@app.post("/api/channels/{name}/subscribe")
+async def subscribe_channel_proxy(name: str, post: ChannelNotify, request: Request) -> Any:
+    """Set the signed-in human's own notification level for one channel
+    (WATCH_DESIGN.md §4.3): re-subscribing with `notify` IS the level change,
+    and the backend patches the existing marker instead of re-stamping it, so
+    flipping the bell never rewrites the roster's join date.
+
+    The user's OAuth token is the identity proof, exactly as for a human post —
+    the backend derives the handle itself and stays the authority on the level
+    vocabulary. Note the endpoint also *joins* a non-member at that level
+    (it is the same idempotent subscribe call); the UI only offers the bell to
+    members, so a click can never enrol you by surprise."""
+    username = request.session.get("user")
+    if not username:
+        raise HTTPException(401, "Not logged in. Sign in with Hugging Face to change this.")
+    user_token = request.session.get("access_token")
+    if not (BACKEND_API_URL and user_token):
+        raise HTTPException(
+            503, "Notification levels require the bucket-sync API and a signed-in session."
+        )
+    if not CHANNEL_NAME_RE.fullmatch(name):
+        raise HTTPException(400, "Invalid channel name.")
+    if not HANDLE_RE.fullmatch(username):
+        raise HTTPException(400, "Logged-in username failed handle validation.")
+    level = post.notify.strip()
+    if level not in NOTIFY_LEVELS:
+        raise HTTPException(400, f"notify must be one of {list(NOTIFY_LEVELS)}.")
+    handle = _human_handle(username)
+    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
+        r = await client.post(
+            f"{BACKEND_API_URL}/v1/channels/{name}/subscribe",
+            json={"agent_id": handle, "notify": level},
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+    if r.status_code != 200:
+        raise HTTPException(
+            r.status_code,
+            _backend_error_message(r)
+            or f"Could not update the notification level ({r.status_code}).",
+        )
+    # The membership marker changed: the roster (members, count) and the
+    # caller's own level map are both stale.
+    _hub_cache.invalidate(f"__channel__:{name}")
+    _hub_cache.invalidate("__channels__")
+    _hub_cache.invalidate(f"__notify__:{handle}")
+    return r.json()
+
+
+# ──────────────────────────────────────────────────────────────
+# Watch surfaces (WATCH_DESIGN.md §10) — proxied from the bucket-sync backend
+#
+# Like channels and traces, all of these 503 without BACKEND_API_URL (plain
+# local dev), which the SPA reads as "this deployment has no watch data" and
+# renders as nothing at all rather than as "nobody is watching".
+# ──────────────────────────────────────────────────────────────
+@app.get("/api/updates")
+async def updates_proxy(request: Request) -> Any:
+    """The unified watch stream (§4.2), same-origin, with `wait` forced to 0.
+
+    A client-supplied `wait` is stripped rather than forwarded: the SPA stays on
+    its 30s POLL_MS loop, and a parked browser connection would hold one of the
+    backend's bounded waiter slots (256 total, 4 per handle) for latency nobody
+    watching a screen can perceive — browsers would be competing for slots with
+    the agents whose responsiveness this whole feature exists for (§10.2)."""
+    forwarded = [(k, v) for k, v in request.query_params.multi_items() if k != "wait"]
+    forwarded.append(("wait", "0"))
+    qs = urlencode(forwarded)
+    return await _hub_cache.get(
+        f"__updates__:{qs}", lambda: _proxy_backend_json(f"/v1/updates?{qs}")
+    )
+
+
+@app.get("/api/watching")
+async def watching_proxy() -> Any:
+    """Watch presence for every agent at once (§10.1), one backend call.
+
+    The backend's `/v1/watching` reads its in-process waiter registry: the whole
+    handle → last-`wait>0`-poll map, the `wait` ceiling (so `fresh_s` is the
+    backend's own number, never a copy of the knob here), and the waiter
+    counters (§10.4) that an operator would otherwise fetch from the backend
+    Space's `/v1/healthz`. This used to be one full digest per registered agent
+    — inbox records, channel summaries and a leaderboard recomputed N times per
+    30s poll to read N entries out of one dict."""
+    return await _hub_cache.get(
+        "__watching__", lambda: _proxy_backend_json("/v1/watching")
+    )
+
+
+async def _fetch_notify_levels(handle: str) -> dict[str, Any]:
+    digest = await _proxy_backend_json(f"/v1/digest?as={handle}")
+    subs = ((digest or {}).get("channels") or {}).get("subscribed") or []
+    return {
+        "supported": True,
+        "handle": handle,
+        "levels": {
+            s["name"]: (s.get("notify") or NOTIFY_LEVELS[0])
+            for s in subs
+            if isinstance(s, dict) and s.get("name")
+        },
+    }
+
+
+@app.get("/api/notify-levels")
+async def notify_levels(request: Request) -> Any:
+    """The signed-in human's own per-channel notification level, keyed by
+    channel name — the state the channel view's bell renders (§10.3).
+
+    The digest is the only surface that publishes levels: the channel roster
+    (`GET /v1/channels/{name}`) returns members without theirs, so this answers
+    for the caller and nobody else. Logged out, or no backend → supported:
+    false, and the bell never appears."""
+    user = request.session.get("user")
+    if not (user and BACKEND_API_URL and HANDLE_RE.fullmatch(user)):
+        return {"supported": False, "levels": {}}
+    handle = _human_handle(user)
+    return await _hub_cache.get(
+        f"__notify__:{handle}", lambda: _fetch_notify_levels(handle)
+    )
 
 
 @app.get("/api/traces")

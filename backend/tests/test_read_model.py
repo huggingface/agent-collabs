@@ -160,3 +160,97 @@ def test_inbox_records_dedups_by_filename():
     hub.seed(f"broadcasts/{fn}", content)
     hub.seed(f"inbox/agent-1/{fn}", content)  # same name in both sources
     assert [r.filename for r in rm.inbox_records("agent-1")] == [fn]
+
+
+# ── notify levels & the unified stream (WATCH_DESIGN.md §4.2/§4.3) ─────
+
+
+def _member(hub, channel: str, handle: str, notify: str | None = None):
+    fm = {"channel": channel, "agent": handle, "subscribed": "2026-06-01 10:00 UTC",
+          "via": "bucket"}
+    if notify is not None:
+        fm["notify"] = notify
+    hub.seed(f"channels/{channel}/members/{handle}.md", serialise(fm, ""))
+
+
+def _channel(hub, name: str):
+    hub.seed(f"channels/{name}/README.md", serialise({"channel": name}, "theme"))
+
+
+def test_channel_notify_levels_defaults_to_mentions():
+    """An ABSENT key reads as the quiet default, so every membership written
+    before this feature existed is already correct — no migration."""
+    rm, hub, _clock, _s = make_rm()
+    _channel(hub, "quiet")
+    _channel(hub, "loud")
+    _member(hub, "quiet", "agent-1")                 # legacy marker, no notify
+    _member(hub, "loud", "agent-1", notify="all")
+    assert rm.channel_notify_levels("agent-1") == {"loud": "all", "quiet": "mentions"}
+
+
+def test_channel_notify_levels_ignores_garbage_values():
+    """An unrecognised level must fall back to the QUIET side: failing open
+    would turn a hand-edited typo into a notification flood."""
+    rm, hub, _clock, _s = make_rm()
+    _channel(hub, "c1")
+    _member(hub, "c1", "agent-1", notify="URGENT")
+    assert rm.channel_notify_levels("agent-1") == {"c1": "mentions"}
+
+
+def test_channel_notify_levels_are_per_handle():
+    rm, hub, _clock, _s = make_rm()
+    _channel(hub, "c1")
+    _member(hub, "c1", "agent-1", notify="all")
+    _member(hub, "c1", "agent-2")
+    assert rm.channel_notify_levels("agent-1") == {"c1": "all"}
+    assert rm.channel_notify_levels("agent-2") == {"c1": "mentions"}
+    assert rm.channel_notify_levels("nobody") == {}
+
+
+def test_updates_records_unions_inbox_and_notify_all_channels():
+    rm, hub, _clock, _s = make_rm()
+    _channel(hub, "loud")
+    _channel(hub, "quiet")
+    _member(hub, "loud", "agent-1", notify="all")
+    _member(hub, "quiet", "agent-1")
+
+    mention = "20260601-100000-000_agent-2.md"
+    hub.seed(f"inbox/agent-1/{mention}", serialise({"agent": "agent-2"}, "ping @agent-1"))
+    bcast = "20260601-110000-000_human-org.md"
+    hub.seed(f"broadcasts/{bcast}", serialise({"agent": "human-org", "broadcast": True}, "hi"))
+    loud = "20260601-120000-000_agent-3.md"
+    hub.seed(f"channels/loud/{loud}", serialise({"agent": "agent-3", "channel": "loud"}, "x"))
+    quiet = "20260601-130000-000_agent-3.md"
+    hub.seed(f"channels/quiet/{quiet}", serialise({"agent": "agent-3", "channel": "quiet"}, "y"))
+
+    recs = rm.updates_records("agent-1")
+    got = {r.filename: r.reasons for r in recs}
+    assert got == {mention: ["mention"], bcast: ["broadcast"], loud: ["channel:loud"]}
+    # Chronological by filename, so one cursor drains the union.
+    assert [r.filename for r in recs] == sorted(got)
+
+
+def test_updates_records_merges_reasons_for_one_delivery():
+    """The same filename in the channel AND in the inbox is one item with two
+    reasons — the double-delivery bug the unified stream exists to kill."""
+    rm, hub, _clock, _s = make_rm()
+    _channel(hub, "loud")
+    _member(hub, "loud", "agent-1", notify="all")
+    fn = "20260601-120000-000_agent-3.md"
+    content = serialise({"agent": "agent-3", "channel": "loud"}, "@agent-1 look")
+    hub.seed(f"channels/loud/{fn}", content)
+    hub.seed(f"inbox/agent-1/{fn}", content)
+
+    recs = rm.updates_records("agent-1")
+    assert len(recs) == 1
+    assert sorted(recs[0].reasons) == ["channel:loud", "mention"]
+
+
+def test_updates_records_leaves_other_views_untagged():
+    """`reasons` is set only on this view, so nothing elsewhere reads meaning
+    into a field it never populated."""
+    rm, hub, _clock, _s = make_rm()
+    fn = "20260601-100000-000_agent-2.md"
+    hub.seed(f"inbox/agent-1/{fn}", serialise({"agent": "agent-2"}, "ping @agent-1"))
+    assert rm.updates_records("agent-1")[0].reasons == ["mention"]
+    assert rm.inbox_records("agent-1")[0].reasons is None
