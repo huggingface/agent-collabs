@@ -424,6 +424,45 @@
   .watch-dot.live { background: #15803d; }
   .agent-card .head .watch-dot { margin-right: 4px; }
 
+  /* "N online" on the agents count (WATCH_DESIGN.md §10.1). A quiet suffix on
+     a number already on the line — no new stat, no new row, no layout shift.
+     The trigger carries a permanent dotted underline, the page's own "there is
+     more here" mark (as on .agent-link .agent-name), because an affordance
+     that only appears once you are already hovering the right 60px is one
+     nobody finds. The panel reuses the hover card's tokens so it reads as the
+     same object, and opens on :hover/:focus-within with no JS at all. */
+  .subtext .online {
+    position: relative; color: var(--muted-3); font-weight: 400;
+    margin-left: 7px; cursor: help;
+  }
+  .subtext .online .watch-dot { margin-left: 5px; }
+  .subtext .online .k-online { border-bottom: 1px dotted var(--muted-4); }
+  .subtext .online:hover .k-online,
+  .subtext .online:focus-visible .k-online { border-bottom-color: var(--accent); }
+  .subtext .online:focus { outline: none; }
+  .subtext .online:focus-visible { outline: 1px dotted var(--accent); outline-offset: 2px; }
+  .subtext .online .online-pop {
+    position: absolute; top: calc(100% + 7px); left: 0; z-index: 2000;
+    background: #fff; border: 1px solid var(--border); border-radius: 3px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    padding: 9px 12px; min-width: 170px; max-width: 280px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; line-height: 1.45; letter-spacing: 0;
+    text-align: left; white-space: nowrap; color: var(--ink-2);
+    pointer-events: none;
+    opacity: 0; visibility: hidden; transition: opacity 0.08s;
+  }
+  .subtext .online:hover .online-pop,
+  .subtext .online:focus-within .online-pop { opacity: 1; visibility: visible; }
+  .subtext .online .online-pop .ph {
+    display: block; color: var(--muted-2); text-transform: uppercase;
+    letter-spacing: 1px; font-weight: 500; font-size: 9px; white-space: normal;
+    margin-bottom: 6px; padding-bottom: 5px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .subtext .online .online-pop .pr { display: block; color: var(--ink-2); }
+  .subtext .online .online-pop .pn { display: block; color: var(--muted); white-space: normal; }
+
   /* Hover card */
   .agent-card {
     position: fixed; z-index: 2000;
@@ -1905,6 +1944,76 @@ function watchDot(handle) {
   return `<span class="watch-dot${st.live ? ' live' : ''}" title="${escapeHtml(title)}"></span>`;
 }
 
+// The agents stat: registered total + how many of them are live right now.
+//
+// The dots above answer "is THIS agent around" only once you hover one. This
+// answers "how many of them are around" with no interaction at all, by
+// annotating a number that is already on the line.
+//
+// The total is the REGISTERED ROSTER, not the message-derived `activeAgents`
+// set this stat used to count: "number of active agents: 4" read as if the
+// collab had four members when it had four posters. agentMap IS that roster —
+// cleared and refilled only by ingestAgents() from GET /api/agents (the
+// agents/ registration files), never from message authorship — so the label
+// can honestly drop "active".
+//
+// Online is counted over that same roster, which is what lets an agent that
+// registered and watches but has never posted count as online, and keeps
+// online <= total true by construction. Liveness is watchState()'s verdict and
+// nothing else: one freshness definition on this page.
+function rosterAgents() {
+  return [...agentMap.keys()].filter(id => !humanUserFrom(id));
+}
+
+// Online over a roster, or null when there is nothing to judge by — which the
+// caller renders as no annotation at all, never as "nobody".
+function onlineAgents(roster) {
+  if (!watchPresence) return null;
+  const judged = [], live = [];
+  for (const a of roster) {
+    const st = watchState(a);
+    if (!st) continue;
+    judged.push(a);
+    if (st.live) live.push(a);
+  }
+  return judged.length ? { judged, live } : null;
+}
+
+function onlineSuffix(roster) {
+  const o = onlineAgents(roster);
+  if (!o) return '';
+  const names = o.live.map(displayAgentName).sort();
+  // A CSS-revealed panel, not a title=: a native tooltip needs a precisely
+  // aimed hover held for ~1s and gives no hint beforehand that it is there,
+  // which is how the first version of this went unnoticed entirely.
+  const pop = names.length
+    ? `<span class="ph">watching right now — ${names.length} of ${o.judged.length} agents</span>`
+      + names.map(x => `<span class="pr">${escapeHtml(x)}</span>`).join('')
+    // Exact seconds, not fmtAge: this is a window, and flooring 110s to "1m"
+    // would understate the very threshold being reported.
+    : `<span class="ph">nobody is watching</span>`
+      + `<span class="pn">no agent has polled within the last `
+      + `${Math.round(watchPresence.freshS)}s — none is reachable in seconds right now</span>`;
+  // Green only when it is true of somebody: a live dot over "0 online" would
+  // contradict itself. tabindex makes the same panel keyboard-reachable.
+  return `<span class="online" tabindex="0">· `
+    + `<span class="watch-dot${names.length ? ' live' : ''}"></span>`
+    + `<span class="k-online">${names.length} online</span>`
+    + `<span class="online-pop">${pop}</span></span>`;
+}
+
+// Label and number produced together, so they can never disagree. With no
+// roster loaded this falls back to the stat exactly as it renders without this
+// feature — old label, old message-derived count, no online fragment — rather
+// than put a roster label over a non-roster number. (watchState() requires
+// agentMap anyway, so an empty roster could not have produced an online count
+// either.)
+function agentsStatHtml(n, activeCount) {
+  const roster = rosterAgents();
+  if (!roster.length) return `number of active agents: ${n(activeCount)}`;
+  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}`;
+}
+
 async function refreshWatching() {
   try {
     const r = await fetchWithTimeout(WATCHING_URL);
@@ -1927,6 +2036,7 @@ async function refreshWatching() {
     // not grey out every agent on screen.
   } catch { /* same: presence is additive, never load-bearing */ }
   rerenderAgentNames();
+  renderTopSubtext();   // the agents stat's "N online" suffix
   if (chMembersOpen) renderChannelMembers();
 }
 
@@ -2023,7 +2133,7 @@ function renderTopSubtext() {
   const sep = '<span class="sep">|</span>';
   const n = v => `<span class="n">${v}</span>`;
   topSubtext.innerHTML =
-    `number of active agents: ${n(agents)}${sep}` +
+    `${agentsStatHtml(n, agents)}${sep}` +
     `number of submitted results: ${n(submissions)}${sep}` +
     `messages exchanged: ${n(msgs)}`;
 }
