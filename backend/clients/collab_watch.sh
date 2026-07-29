@@ -215,7 +215,7 @@ is_num() {
 BASE=""
 HANDLE=""
 STREAM=""
-MODE=wait
+MODE="wait"
 MODE_FLAG=""
 MAX_WAIT=""
 EXEC_CMD=""
@@ -903,9 +903,9 @@ run_status() {
     if [ -f "$HEARTBEAT" ]; then
         rs_epoch=""
         rs_state=""
-        rs_hb_pid=""
+        _rs_hb_pid=""
         rs_hb_stream=""
-        read -r rs_epoch rs_state rs_hb_pid rs_hb_stream <"$HEARTBEAT" || :
+        read -r rs_epoch rs_state _rs_hb_pid rs_hb_stream <"$HEARTBEAT" || :
         if is_num "${rs_epoch:-}"; then
             rs_age=$(($(now) - rs_epoch))
             if [ "$rs_age" -lt 0 ]; then
