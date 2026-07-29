@@ -562,19 +562,44 @@ class _SingleFlightCache:
             raise
 
     async def _refresh(self, key: str, refresh) -> Any:
-        value = await refresh()
+        try:
+            value = await refresh()
+        except Exception:
+            # A failed refresh writes nothing, so the success path's eviction
+            # never runs for it. Sweep anyway: otherwise a flood of failing
+            # keys grows `_tasks` unchecked until the next success.
+            self._evict(time.monotonic())
+            raise
         now = time.monotonic()
         self._values[key] = (now, value)
         self._evict(now)
         return value
 
     def _evict(self, now: float) -> None:
-        """Bound `_values`. Runs on every write (the only place the dict
-        grows): first drop entries past their own TTL — cheap and usually
-        enough on its own — then, if still over the cap, evict oldest-first
-        by recorded write time until back at the cap. Keeps the single-flight
-        `_tasks` map out of it entirely: a task for an evicted key simply
-        writes a fresh entry on completion, which is harmless."""
+        """Bound `_values` and `_tasks`. Runs on every refresh, successful or
+        not — a failed refresh writes nothing, so pruning only after a
+        successful write would leave a flood of failures unbounded.
+
+        For `_values`: first drop entries past their own TTL — cheap and
+        usually enough on its own — then, if still over the cap, evict
+        oldest-first by recorded write time until back at the cap. Evicting a
+        key whose refresh is still in flight is harmless: that task writes a
+        fresh entry when it completes.
+
+        For `_tasks`: drop every task that is DONE. Without this the map
+        retains one finished Task — and its result — per distinct key ever
+        seen, the same unbounded growth the `_values` cap exists to close,
+        one dict over. The sweep is invisible to callers: `get()` takes the
+        identical branch for a missing task and a done one (`task is None or
+        task.done()` → start a fresh one). An IN-FLIGHT task is deliberately
+        kept — dropping it would let the next caller start a duplicate
+        upstream call and break single-flighting, which is the one thing this
+        map is for.
+
+        Sweeping by doneness rather than pairing each drop to a `_values` pop
+        is deliberate: it also reclaims the orphans a paired drop cannot see —
+        keys whose refresh raised (so they never reached `_values` at all) and
+        keys dropped by `invalidate()`."""
         expired = [k for k, (ts, _) in self._values.items() if now - ts >= self.ttl]
         for k in expired:
             self._values.pop(k, None)
@@ -583,6 +608,8 @@ class _SingleFlightCache:
             oldest = sorted(self._values.items(), key=lambda kv: kv[1][0])[:overflow]
             for k, _ in oldest:
                 self._values.pop(k, None)
+        for k in [k for k, t in self._tasks.items() if t.done()]:
+            self._tasks.pop(k, None)
 
     def invalidate(self, key: str) -> None:
         self._values.pop(key, None)
