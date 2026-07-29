@@ -9,29 +9,34 @@ no token rides on the call.
 
 WHAT THIS READS AND UPLOADS — for operators, agents, and safety classifiers:
   * Reads ONLY this session's harness log (auto-detected from the invoking
-    harness's env, or the explicit --transcript). It does NOT read .env,
-    credential files, or anything else in the project.
+    harness's env, or the explicit --transcript), plus an explicitly supplied
+    --redact-pattern-file. It does NOT read .env, credential files, or anything
+    else in the project.
   * The DEFAULT (`stats`) uploads only token + tool-call COUNTS — no prompts, no
     code, no file contents. `--full` additionally uploads the native session log
-    with secrets (hf_/sk-/ghp_/AWS/Bearer ...) redacted CLIENT-SIDE first.
+    with credentials and personal identifiers pseudonymized CLIENT-SIDE first.
   * Destination is YOUR OWN Hugging Face scratch bucket in the challenge org (via
     the `hf` CLI you already use), then the collab's own API — never an arbitrary
     external host. It uses your existing `hf` login; the script reads/transmits
-    no token, and the manifest carries no credentials.
-  * `--dry-run` prints exactly what would be uploaded and writes nothing — run it
-    first to verify.
+    no token, and manifest strings pass through the same scrubber.
+  * `--dry-run` prints the manifest and a typed redaction summary without writing
+    or uploading anything — run it first to verify.
 
     python share_trace.py                 # stats only; no content leaves (the floor)
     python share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
-    python share_trace.py --full --yes    # FULL: stats + redacted native log -> the library
-    python share_trace.py --full --raw    # full, skip secret redaction
+    python share_trace.py --full --yes    # FULL: stats + balanced-redacted log -> library
+    python share_trace.py --full --privacy secrets  # credentials only; preserve PII
+    python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
+    python share_trace.py --full --raw    # UNSAFE: full, skip all redaction
     python share_trace.py --dry-run       # print the plan + manifest; touch nothing
 
 `full` lets Hugging Face's built-in trace viewer render the native log directly
-from the bucket (Claude Code & Codex supported out of the box). Redaction is
-best-effort and CLIENT-SIDE — your scratch bucket is org-readable, so content is
-scrubbed before it is written there at all. `--full` needs confirmation; pass
-`--yes` for non-interactive / agent runs.
+from the bucket (Claude Code & Codex supported out of the box). Redaction parses
+JSONL and makes surgical, typed substitutions that preserve prompts, responses,
+commands, tool structure, and relative paths. It is still best-effort and cannot
+infer whether ordinary task prose or source code is confidential. Your scratch
+bucket is org-readable, so content is scrubbed before it is written there at all.
+`--full` needs confirmation; pass `--yes` for non-interactive / agent runs.
 
 Auto-detection follows the harness that INVOKES this script (from its env —
 Claude Code's CLAUDE_CODE_SESSION_ID pins the *exact* session), so multiple
@@ -65,7 +70,9 @@ from pathlib import Path
 
 
 ADAPTER_VERSION = 1
+REDACTOR_VERSION = 2
 KNOWN_HARNESSES = ("claude-code", "codex")
+PRIVACY_LEVELS = ("secrets", "balanced", "strict")
 
 
 # ════════════════════════ per-harness adapters ════════════════════════
@@ -390,20 +397,361 @@ def detect(cwd: str, harness: str) -> tuple[str, Path, bool]:
 
 # ════════════════════════ manifest + upload ════════════════════════
 
-# secret scrubbing (best-effort, structure-preserving so the JSON still parses)
-_SECRET_PATTERNS = [
-    (re.compile(r"hf_[A-Za-z0-9]{20,}"), "<REDACTED>"),
-    (re.compile(r"gh[pousr]_[A-Za-z0-9]{20,}"), "<REDACTED>"),
-    (re.compile(r"sk-[A-Za-z0-9_-]{20,}"), "<REDACTED>"),
-    (re.compile(r"AKIA[0-9A-Z]{16}"), "<REDACTED>"),
-    (re.compile(r"(?i)(authorization\"?\s*[:=]\s*\"?bearer\s+)[A-Za-z0-9._-]+"), r"\1<REDACTED>"),
+# Best-effort, structure-preserving scrubber. Provider signatures catch secrets
+# wherever they appear; context patterns catch opaque values next to sensitive
+# keys. Deliberately avoid generic entropy detection: traces legitimately contain
+# commit SHAs, call IDs, hashes, and generated identifiers.
+_PROVIDER_SECRET_PATTERNS = [
+    ("HF_TOKEN", re.compile(r"(?<![A-Za-z0-9_])hf_[A-Za-z0-9]{20,}(?![A-Za-z0-9_])")),
+    (
+        "GITHUB_TOKEN",
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9]{20,}|"
+            r"github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
+        ),
+    ),
+    ("SK_TOKEN", re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")),
+    ("AWS_ACCESS_KEY", re.compile(r"(?<![0-9A-Z])(?:AKIA|ASIA)[0-9A-Z]{16}(?![0-9A-Z])")),
+    ("SLACK_TOKEN", re.compile(r"(?<![A-Za-z0-9-])xox[baprs]-[A-Za-z0-9-]{10,}(?![A-Za-z0-9-])")),
+    ("GITLAB_TOKEN", re.compile(r"(?<![A-Za-z0-9_-])glpat-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")),
+    ("GOOGLE_API_KEY", re.compile(r"(?<![A-Za-z0-9_-])AIza[0-9A-Za-z_-]{35}(?![A-Za-z0-9_-])")),
+    ("NPM_TOKEN", re.compile(r"(?<![A-Za-z0-9_])npm_[A-Za-z0-9]{36}(?![A-Za-z0-9_])")),
+    ("PYPI_TOKEN", re.compile(r"(?<![A-Za-z0-9_-])pypi-[A-Za-z0-9_-]{20,}(?![A-Za-z0-9_-])")),
+    (
+        "JWT",
+        re.compile(
+            r"(?<![A-Za-z0-9_-])eyJ[A-Za-z0-9_-]{8,}\."
+            r"[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?![A-Za-z0-9_-])"
+        ),
+    ),
 ]
 
+_PRIVATE_KEY_RE = re.compile(
+    r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----.*?"
+    r"-----END (?P=label)-----",
+    re.DOTALL,
+)
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(?P<prefix>\b(?:proxy[-_])?authorization\b"
+    r"(?:\\?[\"']?\s*[:=]\s*\\?[\"']?\s*))"
+    r"(?P<scheme>bearer|basic|token|api[-_]?key)\s+"
+    r"(?P<value>[A-Za-z0-9._~+/\-=]{4,})"
+)
+_COOKIE_HEADER_RE = re.compile(
+    r"(?i)(?P<prefix>\b(?:set-cookie|cookie)\b\s*:\s*)"
+    r"(?P<value>[^\"'\r\n]+)"
+)
+_CREDENTIAL_URL_RE = re.compile(
+    r"(?i)(?P<scheme>\b(?:https?|postgres(?:ql)?|mysql|mariadb|"
+    r"mongodb(?:\+srv)?|redis|amqps?|ssh|sftp|ftp)://)"
+    r"(?P<username>[^:@/\s]+):(?P<password>[^@/\s]+)@"
+)
+_QUERY_SECRET_RE = re.compile(
+    r"(?i)(?P<prefix>[?&](?P<key>access[_-]?token|refresh[_-]?token|"
+    r"api[_-]?key|token|secret|password|sig|signature)=)"
+    r"(?P<value>[^&#\s\"']+)"
+)
+_TEXT_SECRET_KEY = (
+    r"password|passwd|pwd|secret|secret[_-]?key|client[_-]?secret|"
+    r"api[_-]?key|access[_-]?token|refresh[_-]?token|id[_-]?token|"
+    r"session[_-]?token|aws[_-]?secret[_-]?access[_-]?key"
+)
+_QUOTED_SECRET_RE = re.compile(
+    rf"(?i)(?P<key>\b(?:{_TEXT_SECRET_KEY})\b)"
+    r"(?P<sep>\s*[:=]\s*)(?P<quote>[\"'])"
+    r"(?P<value>[^\r\n]*?)(?P=quote)"
+)
+_UNQUOTED_SECRET_RE = re.compile(
+    rf"(?i)(?P<key>\b(?:{_TEXT_SECRET_KEY})\b)"
+    r"(?P<sep>\s*[:=]\s*)(?![\"'])(?P<value>[^\s,;}\]]+)"
+)
+_EMAIL_RE = re.compile(
+    r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@"
+    r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
+)
+_POSIX_HOME_RE = re.compile(r"(?<![A-Za-z0-9])(?:/(?:Users|home)/[^/\s\"']+|/root)(?=/)")
+_WINDOWS_HOME_RE = re.compile(r"(?i)(?<![A-Za-z0-9])(?:[A-Z]:\\Users\\[^\\\s\"']+)(?=\\)")
+_URL_HOST_RE = re.compile(
+    r"(?i)(?P<prefix>\b[a-z][a-z0-9+.-]*://(?:[^@/\s]+@)?)"
+    r"(?P<host>\[[0-9A-Fa-f:.]+\]|localhost|"
+    r"(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}|(?:\d{1,3}\.){3}\d{1,3})"
+)
+_IPV4_RE = re.compile(r"(?<![A-Za-z0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9.])")
+_PLACEHOLDER_RE = re.compile(r"^<REDACTED:[A-Z0-9_]+_\d+>$")
 
-def redact(text: str) -> str:
-    for pat, repl in _SECRET_PATTERNS:
-        text = pat.sub(repl, text)
-    return text
+_SENSITIVE_KEYS = {
+    "authorization": "AUTHORIZATION",
+    "proxy_authorization": "AUTHORIZATION",
+    "password": "PASSWORD",
+    "passwd": "PASSWORD",
+    "pwd": "PASSWORD",
+    "secret": "SECRET",
+    "secret_key": "SECRET",
+    "client_secret": "CLIENT_SECRET",
+    "api_key": "API_KEY",
+    "apikey": "API_KEY",
+    "x_api_key": "API_KEY",
+    "access_token": "ACCESS_TOKEN",
+    "refresh_token": "REFRESH_TOKEN",
+    "id_token": "ID_TOKEN",
+    "session_token": "SESSION_TOKEN",
+    "token": "TOKEN",
+    "aws_secret_access_key": "AWS_SECRET_ACCESS_KEY",
+    "aws_session_token": "AWS_SESSION_TOKEN",
+    "cookie": "COOKIE",
+    "set_cookie": "COOKIE",
+    "private_key": "PRIVATE_KEY",
+}
+
+
+def _normalise_key(key: object) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", str(key).strip().lower()).strip("_")
+
+
+def _custom_patterns(path: str | None) -> list[re.Pattern]:
+    """Load one non-empty regex per line from an explicitly supplied file."""
+    if not path:
+        return []
+    pattern_path = Path(path).expanduser()
+    if not pattern_path.is_file():
+        raise SystemExit(f"no such redaction pattern file: {pattern_path}")
+    out = []
+    for lineno, raw in enumerate(pattern_path.read_text(encoding="utf-8").splitlines(), 1):
+        pattern = raw.strip()
+        if not pattern or pattern.startswith("#"):
+            continue
+        try:
+            compiled = re.compile(pattern)
+        except re.error as exc:
+            raise SystemExit(
+                f"invalid regex in {pattern_path}:{lineno}: {exc}"
+            ) from exc
+        if compiled.search(""):
+            raise SystemExit(
+                f"redaction regex in {pattern_path}:{lineno} matches empty text"
+            )
+        out.append(compiled)
+    return out
+
+
+class TraceRedactor:
+    """JSON-aware scrubber with stable, typed aliases for one trace."""
+
+    def __init__(
+        self,
+        privacy: str = "balanced",
+        custom_patterns: list[re.Pattern] | None = None,
+    ):
+        if privacy not in PRIVACY_LEVELS:
+            raise ValueError(f"unknown privacy level: {privacy!r}")
+        self.privacy = privacy
+        self.custom_patterns = custom_patterns or []
+        self._aliases: dict[str, tuple[str, str]] = {}
+        self._next: dict[str, int] = {}
+        self._counts: dict[str, int] = {}
+
+    @staticmethod
+    def _is_placeholder(value: object) -> bool:
+        return isinstance(value, str) and bool(_PLACEHOLDER_RE.fullmatch(value))
+
+    def _alias(self, category: str, value: object) -> str:
+        if self._is_placeholder(value):
+            return str(value)
+        if isinstance(value, str):
+            identity = value
+        else:
+            identity = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+        existing = self._aliases.get(identity)
+        if existing:
+            actual_category, placeholder = existing
+        else:
+            actual_category = re.sub(r"[^A-Z0-9]+", "_", category.upper()).strip("_")
+            index = self._next.get(actual_category, 0) + 1
+            self._next[actual_category] = index
+            placeholder = f"<REDACTED:{actual_category}_{index}>"
+            self._aliases[identity] = (actual_category, placeholder)
+        self._counts[actual_category] = self._counts.get(actual_category, 0) + 1
+        return placeholder
+
+    def _auth_value(self, value: str, category: str = "AUTHORIZATION") -> str:
+        if self._is_placeholder(value):
+            return value
+        match = re.fullmatch(
+            r"(?is)\s*(bearer|basic|token|api[-_]?key)\s+(.+?)\s*", value
+        )
+        if not match:
+            return self._alias(category, value)
+        scheme, credential = match.groups()
+        kind = {
+            "bearer": "BEARER_TOKEN",
+            "basic": "BASIC_CREDENTIAL",
+            "token": "AUTH_TOKEN",
+            "apikey": "API_KEY",
+            "api-key": "API_KEY",
+            "api_key": "API_KEY",
+        }[scheme.lower()]
+        return f"{scheme} {self._alias(kind, credential)}"
+
+    def _redact_text(self, text: str) -> str:
+        if not text:
+            return text
+
+        text = _PRIVATE_KEY_RE.sub(
+            lambda m: self._alias("PRIVATE_KEY", m.group(0)), text
+        )
+
+        def auth_repl(match: re.Match) -> str:
+            scheme = match.group("scheme")
+            value = match.group("value")
+            return match.group("prefix") + self._auth_value(f"{scheme} {value}")
+
+        text = _AUTH_HEADER_RE.sub(auth_repl, text)
+        text = _COOKIE_HEADER_RE.sub(
+            lambda m: m.group("prefix") + self._alias("COOKIE", m.group("value").rstrip())
+            + m.group("value")[len(m.group("value").rstrip()):],
+            text,
+        )
+        text = _CREDENTIAL_URL_RE.sub(
+            lambda m: (
+                m.group("scheme")
+                + self._alias("USERNAME", m.group("username"))
+                + ":"
+                + self._alias("PASSWORD", m.group("password"))
+                + "@"
+            ),
+            text,
+        )
+        text = _QUERY_SECRET_RE.sub(
+            lambda m: m.group("prefix")
+            + self._alias(_normalise_key(m.group("key")), m.group("value")),
+            text,
+        )
+
+        def quoted_repl(match: re.Match) -> str:
+            value = match.group("value")
+            if self._is_placeholder(value):
+                return match.group(0)
+            return (
+                match.group("key")
+                + match.group("sep")
+                + match.group("quote")
+                + self._alias(_normalise_key(match.group("key")), value)
+                + match.group("quote")
+            )
+
+        def unquoted_repl(match: re.Match) -> str:
+            value = match.group("value")
+            if self._is_placeholder(value):
+                return match.group(0)
+            return (
+                match.group("key")
+                + match.group("sep")
+                + self._alias(_normalise_key(match.group("key")), value)
+            )
+
+        text = _QUOTED_SECRET_RE.sub(quoted_repl, text)
+        text = _UNQUOTED_SECRET_RE.sub(unquoted_repl, text)
+        for category, pattern in _PROVIDER_SECRET_PATTERNS:
+            text = pattern.sub(lambda m, c=category: self._alias(c, m.group(0)), text)
+        for pattern in self.custom_patterns:
+            text = pattern.sub(lambda m: self._alias("CUSTOM", m.group(0)), text)
+
+        if self.privacy in ("balanced", "strict"):
+            text = _POSIX_HOME_RE.sub(
+                lambda m: self._count_static("HOME_PATH", "$HOME"), text
+            )
+            text = _WINDOWS_HOME_RE.sub(
+                lambda m: self._count_static("HOME_PATH", "$HOME"), text
+            )
+            text = _EMAIL_RE.sub(lambda m: self._alias("EMAIL", m.group(0)), text)
+
+        if self.privacy == "strict":
+            text = _URL_HOST_RE.sub(
+                lambda m: m.group("prefix") + self._alias("HOST", m.group("host")),
+                text,
+            )
+
+            def ipv4_repl(match: re.Match) -> str:
+                value = match.group(0)
+                if any(int(part) > 255 for part in value.split(".")):
+                    return value
+                return self._alias("IP", value)
+
+            text = _IPV4_RE.sub(ipv4_repl, text)
+        return text
+
+    def _count_static(self, category: str, replacement: str) -> str:
+        self._counts[category] = self._counts.get(category, 0) + 1
+        return replacement
+
+    def redact_value(self, value, *, key: object | None = None):
+        """Recursively scrub JSON-compatible data without dropping structure."""
+        category = _SENSITIVE_KEYS.get(_normalise_key(key)) if key is not None else None
+        if category and value not in (None, "", [], {}):
+            if self._is_placeholder(value):
+                return value
+            if isinstance(value, str) and category == "AUTHORIZATION":
+                return self._auth_value(value, category)
+            return self._alias(category, value)
+        if isinstance(value, dict):
+            return {
+                self._redact_text(k) if isinstance(k, str) else k: self.redact_value(v, key=k)
+                for k, v in value.items()
+            }
+        if isinstance(value, list):
+            return [self.redact_value(item) for item in value]
+        if isinstance(value, str):
+            return self._redact_text(value)
+        return value
+
+    def redact_jsonl(self, text: str) -> str:
+        """Scrub JSONL values by structure; fall back to text for malformed lines."""
+        out = []
+        for line in text.splitlines(keepends=True):
+            body = line.rstrip("\r\n")
+            newline = line[len(body):]
+            if not body.strip():
+                out.append(line)
+                continue
+            try:
+                value = json.loads(body)
+            except json.JSONDecodeError:
+                out.append(self._redact_text(body) + newline)
+                continue
+            redacted = self.redact_value(value)
+            out.append(json.dumps(redacted, ensure_ascii=False, separators=(",", ":")) + newline)
+        return "".join(out)
+
+    def summary(self) -> dict[str, int]:
+        return dict(sorted(self._counts.items()))
+
+
+def redact(
+    text: str,
+    *,
+    privacy: str = "balanced",
+    custom_patterns: list[re.Pattern] | None = None,
+) -> str:
+    """Compatibility wrapper for callers that only need the scrubbed text."""
+    return TraceRedactor(privacy, custom_patterns).redact_jsonl(text)
+
+
+def _safe_session_id(value: str) -> str:
+    """Require the client-side bucket component to be simple and non-ambiguous."""
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,191}", value):
+        raise SystemExit(
+            "session_id must be 1-192 characters using only letters, digits, "
+            "dot, underscore, and hyphen; pass a safe --session-id override"
+        )
+    return value
+
+
+def _native_log_name(log_path: Path) -> str:
+    """Avoid copying a potentially identifying local filename into shared storage."""
+    suffix = log_path.suffix.lower()
+    if suffix not in (".jsonl", ".json", ".log", ".txt"):
+        suffix = ".log"
+    return f"trace{suffix}"
 
 
 def _prune(value):
@@ -428,6 +776,7 @@ def build_manifest(
     session_id: str,
     result_ref: str | None,
     native_log_file: str | None = None,
+    redaction: dict | None = None,
 ) -> str:
     fm: dict = {
         "schema_version": 1,
@@ -442,6 +791,8 @@ def build_manifest(
         fm["result_ref"] = result_ref
     if native_log_file:
         fm["native_log_file"] = native_log_file
+    if redaction:
+        fm["redaction"] = redaction
     for k in ("usage", "activity", "extensions"):
         pruned = _prune(fields.get(k) or {})
         if pruned:
@@ -462,13 +813,30 @@ def _known_harness_complete(harness: str, fields: dict) -> bool:
     )
 
 
-def _confirm_or_exit(*, share: str, log_path: Path, uncertain: bool, yes: bool) -> None:
+def _confirm_or_exit(
+    *,
+    share: str,
+    log_path: Path,
+    uncertain: bool,
+    yes: bool,
+    raw: bool,
+    privacy: str,
+) -> None:
     reasons = []
     if uncertain:
         reasons.append("Could not pin the exact invoking session — selection fell back to "
                        "the newest log for this directory; confirm it is the right one.")
     if share == "full":
-        reasons.append("Full sharing uploads the redacted native session log to your org-readable scratch bucket.")
+        if raw:
+            reasons.append(
+                "Full --raw sharing uploads the UNREDACTED native session log "
+                "to your org-readable scratch bucket."
+            )
+        else:
+            reasons.append(
+                f"Full sharing uploads the {privacy}-redacted native session log "
+                "to your org-readable scratch bucket."
+            )
     if not reasons or yes:
         return
     print("\nconfirmation required:")
@@ -521,7 +889,12 @@ def main() -> int:
     ap.add_argument("--session-id", help="override the manifest/dest session id")
     ap.add_argument("--full", action="store_true", help="also upload the redacted native session log")
     ap.add_argument("--stats-only", action="store_true", help="deprecated no-op; stats-only is the default")
-    ap.add_argument("--raw", action="store_true", help="with --full, skip secret redaction (upload as-is)")
+    ap.add_argument("--raw", action="store_true",
+                    help="UNSAFE: with --full, skip transcript/manifest redaction")
+    ap.add_argument("--privacy", choices=PRIVACY_LEVELS, default="balanced",
+                    help="redaction level (default: balanced; applies to --full and manifest strings)")
+    ap.add_argument("--redact-pattern-file",
+                    help="optional file containing one additional redaction regex per line")
     ap.add_argument("--result-ref", help="filename in results/ this session produced")
     ap.add_argument("--agent-id", default=os.environ.get("AGENT_ID"), help="your registered agent_id")
     ap.add_argument("--org", default=os.environ.get("ORG"), help="challenge org")
@@ -537,6 +910,8 @@ def main() -> int:
         sys.exit("choose either --full or --stats-only (stats-only is the default)")
     if args.raw and not args.full:
         sys.exit("--raw only applies with --full")
+    if args.raw and args.redact_pattern_file:
+        sys.exit("--redact-pattern-file cannot be combined with --raw")
 
     # Auto-discover org/slug from the backend's GET /v1 when not provided, and
     # learn whether this backend even has the trace routes (older deploys don't).
@@ -568,13 +943,52 @@ def main() -> int:
             f"{harness} adapter did not produce both usage.total_tokens and "
             "activity.tool_calls; adapter likely needs updating"
         )
-    session_id = args.session_id or str(fields.get("session_id") or log_path.stem)
+    session_id = _safe_session_id(
+        args.session_id or str(fields.get("session_id") or log_path.stem)
+    )
     share = "full" if args.full else "stats"
+    native_log_file = _native_log_name(log_path) if share == "full" else None
+    log_text = None
+    if args.raw:
+        safe_fields = fields
+        safe_result_ref = args.result_ref
+        redaction_meta = {
+            "version": REDACTOR_VERSION,
+            "privacy": "raw",
+            "counts": {},
+        }
+        if share == "full":
+            log_text = log_path.read_text(encoding="utf-8", errors="replace")
+    else:
+        patterns = _custom_patterns(args.redact_pattern_file)
+        identifier_probe = TraceRedactor(args.privacy, patterns)
+        if identifier_probe.redact_value(session_id) != session_id:
+            sys.exit(
+                "session_id matches a sensitive/custom redaction pattern; "
+                "pass a non-sensitive --session-id override"
+            )
+        redactor = TraceRedactor(args.privacy, patterns)
+        # session_id and native_log_file are structural identifiers and must match
+        # their bucket path. Scrub all descriptive manifest fields around them.
+        safe_fields = redactor.redact_value(fields)
+        safe_result_ref = (
+            redactor.redact_value(args.result_ref) if args.result_ref else None
+        )
+        if share == "full":
+            log_text = redactor.redact_jsonl(
+                log_path.read_text(encoding="utf-8", errors="replace")
+            )
+        redaction_meta = {
+            "version": REDACTOR_VERSION,
+            "privacy": args.privacy,
+            "counts": redactor.summary(),
+        }
     manifest = build_manifest(
-        fields,
+        safe_fields,
         session_id=session_id,
-        result_ref=args.result_ref,
-        native_log_file=log_path.name if share == "full" else None,
+        result_ref=safe_result_ref,
+        native_log_file=native_log_file,
+        redaction=redaction_meta,
     )
 
     # 2) the plan
@@ -584,6 +998,11 @@ def main() -> int:
     print(f"log        : {log_path}")
     print(f"session    : {session_id}")
     print(f"share      : {share}" + ("  [redaction OFF]" if args.raw else ""))
+    if not args.raw:
+        print(f"privacy    : {args.privacy}  (redactor v{REDACTOR_VERSION})")
+        counts = redaction_meta["counts"]
+        summary = ", ".join(f"{kind}={count}" for kind, count in counts.items())
+        print(f"redactions : {summary or 'none'}")
     if uncertain:
         print("selection  : newest log for this cwd (exact session not pinned — verify it's yours)")
     print(f"tokens     : {usage.get('total_tokens', 'unknown')}")
@@ -612,6 +1031,8 @@ def main() -> int:
         log_path=log_path,
         uncertain=uncertain,
         yes=args.yes,
+        raw=args.raw,
+        privacy=args.privacy,
     )
 
     # 3) preflight
@@ -642,12 +1063,11 @@ def main() -> int:
         _hf_cp(str(man), f"hf://buckets/{bucket}/{dest}/manifest.md")
         n_files = 1
         if share == "full":
-            log_text = log_path.read_text(encoding="utf-8", errors="replace")
-            if not args.raw:
-                log_text = redact(log_text)
-            logf = Path(td) / log_path.name
+            assert log_text is not None
+            assert native_log_file is not None
+            logf = Path(td) / native_log_file
             logf.write_text(log_text, encoding="utf-8")
-            _hf_cp(str(logf), f"hf://buckets/{bucket}/{dest}/{log_path.name}")
+            _hf_cp(str(logf), f"hf://buckets/{bucket}/{dest}/{native_log_file}")
             n_files = 2
     print(f"\nwrote {n_files} file(s) to {source}")
     if not promote:
@@ -693,7 +1113,8 @@ def main() -> int:
     if central_bucket:
         print(f"central    : hf://buckets/{central_bucket}/{promoted['path']}")
         if share == "full":
-            log_rel = f"{promoted['path']}{log_path.name}"
+            assert native_log_file is not None
+            log_rel = f"{promoted['path']}{native_log_file}"
             viewer = f"https://huggingface.co/buckets/{central_bucket}/{log_rel}"
             print(f"view trace : {viewer}")
     return 0
