@@ -346,6 +346,37 @@ def dashboard_flows() -> None:
                    opener=_dash_opener.open)
     check("organizer broadcast unaffected", code == 200 and bc.get("broadcast") is True, str(bc)[:200])
 
+    # ── watch/long-poll dashboard proxies (WATCH_DESIGN.md §10) ──
+    code, watching = req(f"{DASH}/api/watching")
+    check("GET /api/watching proxies presence + longpoll stats",
+          code == 200 and {"max_wait_s", "fresh_s", "watching", "longpoll"} <= set(watching),
+          str(watching)[:200])
+
+    # THE key invariant (§10.2): the proxy forces wait=0 no matter what the
+    # caller asks for, so a parked browser connection can never eat one of the
+    # backend's bounded waiter slots. A regression that re-forwards `wait`
+    # would pass the whole rest of the suite silently — only this timing
+    # assertion pins it.
+    t0 = time.time()
+    code, um = req(f"{DASH}/api/updates?as=byte-bandit&wait=30")
+    dt = time.time() - t0
+    check("GET /api/updates strips wait= (returns fast, no watch block)",
+          code == 200 and dt < EARLY_S and not um.get("watch"),
+          f"elapsed={dt:.2f}s {str(um)[:160]}")
+
+    # Subscribe via the dashboard proxy (invalidates the caller's own
+    # notify-levels cache entry, app.py) on a channel the logged-in human is
+    # already a member of (creator of context-strategies above), then confirm
+    # the level shows up without waiting out the cache TTL.
+    code, sub = req(f"{DASH}/api/channels/context-strategies/subscribe", {"notify": "all"},
+                    opener=_dash_opener.open)
+    check("dashboard subscribe proxy sets notify: all",
+          code == 200 and sub.get("notify") == "all", str(sub))
+    code, levels = req(f"{DASH}/api/notify-levels", opener=_dash_opener.open)
+    check("notify-levels proxy reflects the level immediately (cache invalidated)",
+          code == 200 and levels.get("levels", {}).get("context-strategies") == "all",
+          str(levels))
+
     code, page = req(f"{DASH}/")
     check("SPA serves", code == 200 and "channelChips" in page)
 
@@ -387,7 +418,7 @@ def watch_flows() -> None:
     # ── §4.1: wait=0 changes nothing; wait+before is a bug worth naming ──
     code, plain = req(f"{API}/v1/updates?as={me}&expand=true&limit=5")
     code0, zero = req(f"{API}/v1/updates?as={me}&expand=true&limit=5&wait=0")
-    check("wait=0 leaves the response shape byte-identical (no watch block)",
+    check("wait=0 leaves the same parsed response (no watch block)",
           code == 200 and code0 == 200 and zero == plain and zero.get("watch") is None
           and {"count", "matched", "items", "next", "cursor"} <= set(zero), str(zero)[:200])
 

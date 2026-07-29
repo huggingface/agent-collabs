@@ -358,9 +358,13 @@ def main() -> int:
         create_repo(repo_id, repo_type="space", space_sdk="docker", exist_ok=True, token=token)
     print(f"backend space   {sp['backend']}: uploading code")
     # upload_folder walks the filesystem, not git, so local dev artefacts must be
-    # excluded explicitly — .gitignore does not protect the deploy. A venv here
-    # is the common case (testenv/up.sh and any local pytest run create one) and
-    # would otherwise ship hundreds of MB of site-packages into the Space.
+    # excluded explicitly — .gitignore does not protect the deploy. The venv
+    # patterns guard against a developer-created one (e.g. `python -m venv .venv`
+    # for a local pytest run) that would otherwise ship hundreds of MB of
+    # site-packages into the Space — testenv/up.sh itself never creates an
+    # on-tree venv (it runs via `uv run --no-project`, resolving deps from uv's
+    # central cache). Patterns match top-level venvs only ("venv/**" doesn't
+    # reach a nested "sub/venv/"), which is the intended scope here.
     # clients/ is deliberately NOT excluded: GET /v1/watch.sh serves
     # clients/collab_watch.sh off disk and 404s without it.
     upload_folder(
@@ -383,7 +387,10 @@ def main() -> int:
         upload_folder(
             repo_id=sp["eval"], repo_type="space",
             folder_path=str(REPO_ROOT / "eval-space"),
-            ignore_patterns=["__pycache__/**", "*.pyc"], token=token,
+            # Same venv exclusions as the backend upload above — a locally
+            # created eval-space/.venv is the identical failure mode.
+            ignore_patterns=["__pycache__/**", "*.pyc", ".venv/**", "venv/**"],
+            token=token,
         )
         for k, v in eval_space_variables(cfg, backend_url).items():
             add_space_variable(sp["eval"], k, v, token=token)

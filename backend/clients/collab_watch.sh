@@ -33,23 +33,33 @@
 #   --status       no parked connection: is a watcher alive (lock), has it
 #                  looped recently (heartbeat, within 3x the wait), am I behind
 #                  (one wait=0 request)? One line, one actionable exit code:
-#                    STATUS=BEHIND UNREAD=3 HEARTBEAT_AGE=412s PID=- LAST=gave_up
-#                  STATUS is OK | BEHIND | NO_WATCHER | STALE | OFFLINE; LAST is
-#                  the last loop status the watcher recorded. BEHIND outranks
-#                  the liveness verdicts — it is the one you must act on.
+#                    STATUS=BEHIND UNREAD=3 HEARTBEAT_AGE=412s PID=- STREAM=updates LAST=gave_up
+#                  STATUS is OK | BEHIND | NO_WATCHER | STALE | OFFLINE. PID and
+#                  STREAM come from the per-handle lock and heartbeat, so STREAM
+#                  is the stream that watcher is really on — not necessarily the
+#                  one you asked about; a watcher on another stream is
+#                  NO_WATCHER for this one (exit 11, naming the live stream on
+#                  stderr). LAST is the last loop status the watcher recorded.
+#                  BEHIND outranks every liveness verdict — act on it first.
 #   --help         this text
 #
 # exit codes:
 #   0   mail delivered (wait) · caught up (--status) · nothing pending (--peek)
-#   1   fatal: a 4xx from the server (printed verbatim), bad config, or a server
-#       that does not implement the watch API
+#   1   fatal: a 4xx from the server (printed verbatim — --peek and --status
+#       exit 1 on one too: an unregistered handle is a config error in every
+#       mode), a 3xx redirect (this client does not follow redirects, so a
+#       redirecting base URL is a permanent condition, not a transient one), bad
+#       config, or a server that does not implement the watch API
 #   2   usage error
 #   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death
 #   4   gave up after 10 consecutive request failures (also: --status could not
 #       reach the server); the heartbeat records status=gave_up
-#   5   another watcher already holds the lock for this handle+stream
+#   5   another watcher already holds the lock for this handle. The lock is
+#       per-HANDLE, not per-stream: one watcher covers an agent, which is what
+#       the unified `updates` stream is for
 #   10  BEHIND: items are pending (--status, --peek)
-#   11  no watcher process is running (--status)
+#   11  no watcher process is running for the queried stream (--status) —
+#       including "one is running, but on a different stream"
 #   12  a watcher holds the lock but its heartbeat is stale (--status)
 #
 # env:
@@ -78,6 +88,11 @@
 #                      fails `kill -0` is stale and is reclaimed
 #   delivered.jsonl    every delivered page, appended BEFORE it is printed
 #   dead-letter.jsonl  pages a --exec handler kept refusing (see --exec below)
+# The cursor is per-STREAM; the lock and heartbeat are per-HANDLE, because one
+# watcher per agent is the whole point of the unified `updates` stream. That is
+# why the heartbeat records which stream its watcher is on: --status for any
+# other stream must not read that pulse as liveness for the stream you asked
+# about.
 #
 # cursor: one line, the newest filename delivered so far (empty = nothing seen
 #   yet). The FIRST run in a fresh state directory records the newest EXISTING
@@ -122,11 +137,13 @@
 #   expected parked-connection drops when the Space restarts all share ONE
 #   small exponential backoff (2,4,8,...,60s) plus a 10-in-a-row streak that
 #   exits 4. Folding the normal drops in keeps this simple; the cost is that a
-#   Space restart reconnects after ~2s instead of instantly. 4xx does NOT back
-#   off — it fails immediately with the server's error body, because a typo'd
-#   handle is not a transient condition. The routine idle path is not a failure
-#   at all: when the wait elapses the server answers 200 with an empty page, so
-#   an idle watcher never backs off and costs ~1 request per wait window.
+#   Space restart reconnects after ~2s instead of instantly. 3xx and 4xx do NOT
+#   back off — they fail immediately (a 4xx with the server's error body),
+#   because neither a typo'd handle nor a redirecting base URL is a transient
+#   condition. The routine idle path is not a failure at all: when the wait
+#   elapses the server answers 200 with an empty page, so an idle watcher never
+#   backs off and costs ~1 request per wait window — but never faster than the
+#   idle floor, however instantly that empty page arrives (see idle_pace).
 set -eu
 
 # Every sort, comparison and character class in this script must be
@@ -333,7 +350,10 @@ cleanup() {
     if [ -n "$BODY" ]; then
         rm -f "$BODY" 2>/dev/null || :
     fi
-    if [ -n "$LOCK_HELD" ]; then
+    # Release the lock only while it is still OURS: if the pid inside is no
+    # longer $$, another watcher owns the directory (it reclaimed ours as stale)
+    # and removing it would hand a third one the same cursor file.
+    if [ -n "$LOCK_HELD" ] && [ "$(lock_pid)" = "$$" ]; then
         rm -f "$LOCKDIR/pid" 2>/dev/null || :
         rmdir "$LOCKDIR" 2>/dev/null || :
     fi
@@ -387,8 +407,11 @@ lock_alive() {
     return 0
 }
 
-# One watcher per handle+stream. Two watchers sharing a cursor file is the eq2
-# failure this prevents: double delivery plus last-write-wins cursor rollback.
+# One watcher per HANDLE — not per handle+stream: two watchers under one handle
+# would fight over the heartbeat and, on the same stream, over a cursor file,
+# which is the eq2 failure this prevents (double delivery plus last-write-wins
+# cursor rollback). Needing only one watcher is what the unified `updates`
+# stream is for.
 lock_acquire() {
     if mkdir "$LOCKDIR" 2>/dev/null; then
         LOCK_HELD=1
@@ -396,8 +419,18 @@ lock_acquire() {
         return 0
     fi
     lk_pid=$(lock_pid)
+    # `mkdir` and the pid write cannot be one atomic step, so an empty pid file
+    # is far more likely a lock acquired microseconds ago than an abandoned one.
+    # Treating it as stale here is how two watchers end up sharing one cursor.
+    # One second of grace tells the two apart: a live acquirer has written its
+    # pid by then, while a crash mid-acquire leaves the file empty forever and
+    # is still reclaimed on the second read.
+    if [ -z "$lk_pid" ]; then
+        sleep 1
+        lk_pid=$(lock_pid)
+    fi
     if lock_alive "$lk_pid"; then
-        log "another watcher already holds this stream (pid $lk_pid, lock $LOCKDIR); exiting 5"
+        log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
         exit 5
     fi
     log "reclaiming stale lock $LOCKDIR (pid ${lk_pid:-unknown} is gone)"
@@ -445,8 +478,12 @@ resp_cursor() {
 # The unread count is the number of items in the page — never `matched`, which
 # counts filter matches over the whole folder and is not cursor filtered (the
 # exact trap that produced a false "up to date" with three unread). Records are
-# counted by their "filename" key; same escaping argument as above, so a body
-# cannot forge one.
+# counted by their "filename" key, and two independent facts keep that key out
+# of reach of the agent-authored parts of the response: a '"' inside any JSON
+# string is serialized as '\"', so the key sequence cannot occur inside a body
+# or a frontmatter string value; and the server rejects non-scalar frontmatter
+# values (plus reserved keys, §5.5), so frontmatter cannot nest an object that
+# contributes a real `"filename":` key of its own.
 count_items() {
     grep -oE "\"filename\":\"$FILENAME_RE\"" "$BODY" | wc -l | tr -d ' '
 }
@@ -470,20 +507,37 @@ do_request() {
     [ -n "$HTTP" ] || HTTP=000
 }
 
-# 0 = usable 2xx, 1 = retryable (5xx, network, timeout), 2 = fatal 4xx.
+# 0 = usable 2xx, 1 = retryable (5xx, network, timeout), 2 = fatal (3xx, 4xx).
+#
+# 3xx is fatal on purpose. There is no `curl -L` here — following a redirect
+# blindly would let the server move a watcher to another host, scheme or handle —
+# so a redirecting base URL can never succeed, no matter how long we retry:
+# `http://<org>.hf.space` (which redirects to https) would otherwise walk the
+# whole backoff ladder for ~5 minutes and then exit 4, reporting an outage
+# instead of the one-word fix.
 classify() {
     [ "$CURL_RC" -eq 0 ] || return 1
     case "$HTTP" in
         2??) return 0 ;;
-        4??) return 2 ;;
+        3?? | 4??) return 2 ;;
         *) return 1 ;;
     esac
 }
 
-fail_4xx() {
-    log "server refused the request (HTTP $HTTP) — not retrying:"
-    cat "$BODY" >&2
-    printf '\n' >&2
+fail_http() {
+    case "$HTTP" in
+        3??)
+            log "the server redirected (HTTP $HTTP) and this client does not follow redirects — point it at the final URL, not the redirecting one"
+            case "$BASE" in
+                http://*) log "the base URL is plain http: try https://${BASE#http://}" ;;
+            esac
+            ;;
+        *)
+            log "server refused the request (HTTP $HTTP) — not retrying:"
+            cat "$BODY" >&2
+            printf '\n' >&2
+            ;;
+    esac
     hb "http_$HTTP"
     exit 1
 }
@@ -542,7 +596,7 @@ baseline_cursor() {
                 log "cold start: baseline cursor '${CURSOR:-<empty stream>}' (history is not delivered; delete $CURSOR_FILE to re-baseline)"
                 return 0
                 ;;
-            2) fail_4xx ;;
+            2) fail_http ;;
             *) on_retryable ;;
         esac
     done
@@ -612,7 +666,7 @@ run_wait() {
         rw_cls=0
         classify || rw_cls=$?
         case "$rw_cls" in
-            2) fail_4xx ;;
+            2) fail_http ;;
             1)
                 on_retryable
                 continue
@@ -651,17 +705,22 @@ require_page_cursor() {
     fi
 }
 
-# An empty page after a full park is the routine idle path: loop again at once.
-# An empty page that came back instantly is not — the server degraded us to a
-# plain poll, evicted us, or has waiting switched off — and re-looping at that
-# speed would turn degradation into a load spike. Trust watch.status when the
-# server sends it; fall back to the elapsed-time heuristic when it does not.
+# Every non-delivery pass costs at least IDLE_FLOOR_S seconds of wall clock, and
+# the floor is unconditional: watch.status only decides what is logged and
+# recorded, never whether to pace. A truthful `timeout` can still be instant —
+# a server whose effective wait budget is 0 (a self-hosted deployment with
+# LONGPOLL_MAX_WAIT_S=0) answers status=timeout, waited_ms=0 honestly and at
+# once — so believing the status instead of the clock would hot-loop at maximum
+# request rate against exactly the server least able to absorb it, which is the
+# degradation amplification WATCH_DESIGN §3.2.1 exists to prevent. Degraded /
+# evicted / no_streams say so out loud because an operator wants them in the
+# log. Deliveries never reach here: they exit (wait mode) or run the handler
+# (--exec), so mail is never paced.
 idle_pace() {
     ip_elapsed=$(($(now) - $1))
     case "$WSTATUS" in
         timeout)
             hb timeout
-            return 0
             ;;
         degraded | evicted | no_streams)
             hb "$WSTATUS"
@@ -706,7 +765,7 @@ run_exec() {
         re_cls=0
         classify || re_cls=$?
         case "$re_cls" in
-            2) fail_4xx ;;
+            2) fail_http ;;
             1)
                 on_retryable
                 continue
@@ -805,9 +864,9 @@ run_peek() {
     rp_cls=0
     classify || rp_cls=$?
     case "$rp_cls" in
-        2) fail_4xx ;;
+        2) fail_http ;;
         1)
-            log "could not reach the server (HTTP $HTTP, curl rc=$CURL_RC); --peek makes exactly one request"
+            log "could not reach the server (HTTP $HTTP, curl rc=$CURL_RC); --peek does not retry this request"
             exit 4
             ;;
     esac
@@ -824,9 +883,10 @@ run_peek() {
 
 # ── mode: --status ────────────────────────────────────────────────────
 # Cheap liveness triage, no parked connection: is a watcher process alive
-# (lock), has it looped recently (heartbeat, within 3x wait), and am I behind
-# (one wait=0 request, counting items). Being BEHIND outranks every liveness
-# verdict — it is the actionable one.
+# (lock), has it looped recently (heartbeat, within 3x wait), is it watching the
+# stream I asked about (heartbeat again), and am I behind (one wait=0 request,
+# counting items). Being BEHIND outranks every liveness verdict — it is the
+# actionable one.
 
 run_status() {
     rs_pid=$(lock_pid)
@@ -839,11 +899,13 @@ run_status() {
 
     rs_age="-"
     rs_last="-"
+    rs_stream="-"
     if [ -f "$HEARTBEAT" ]; then
         rs_epoch=""
         rs_state=""
-        rs_rest=""
-        read -r rs_epoch rs_state rs_rest <"$HEARTBEAT" || :
+        rs_hb_pid=""
+        rs_hb_stream=""
+        read -r rs_epoch rs_state rs_hb_pid rs_hb_stream <"$HEARTBEAT" || :
         if is_num "${rs_epoch:-}"; then
             rs_age=$(($(now) - rs_epoch))
             if [ "$rs_age" -lt 0 ]; then
@@ -851,6 +913,18 @@ run_status() {
             fi
         fi
         rs_last="${rs_state:--}"
+        rs_stream="${rs_hb_stream:--}"
+    fi
+
+    # The lock and the heartbeat are per-handle, so the live watcher may be on a
+    # different stream than the one being asked about — and liveness does not
+    # transfer between streams: nothing is advancing cursor.$STREAM, which is
+    # exactly the question. Report no watcher for THIS stream and name the one
+    # that does exist. A heartbeat without a stream field (an older watcher)
+    # tells us nothing, so it is not held against it.
+    rs_wrong_stream=0
+    if [ "$rs_alive" -eq 1 ] && [ "$rs_stream" != "-" ] && [ "$rs_stream" != "$STREAM" ]; then
+        rs_wrong_stream=1
     fi
 
     rs_unread="?"
@@ -862,7 +936,7 @@ run_status() {
         classify || rs_cls=$?
         case "$rs_cls" in
             0) rs_unread=$(count_items) ;;
-            2) fail_4xx ;;
+            2) fail_http ;;
             *) rs_offline=1 ;;
         esac
     fi
@@ -880,7 +954,7 @@ run_status() {
     elif [ "$rs_unread" != "?" ] && [ "$rs_unread" -gt 0 ]; then
         rs_status=BEHIND
         rs_rc=10
-    elif [ "$rs_alive" -eq 0 ]; then
+    elif [ "$rs_alive" -eq 0 ] || [ "$rs_wrong_stream" -eq 1 ]; then
         rs_status=NO_WATCHER
         rs_rc=11
     elif [ "$rs_age" = "-" ] || [ "$rs_age" -gt "$rs_stale_after" ]; then
@@ -891,12 +965,16 @@ run_status() {
         rs_rc=0
     fi
 
+    if [ "$rs_wrong_stream" -eq 1 ]; then
+        log "a watcher IS alive for this handle (pid $rs_pid) but it is watching '$rs_stream', not '$STREAM': nothing is advancing cursor.$STREAM"
+    fi
+
     rs_age_out="$rs_age"
     if [ "$rs_age_out" != "-" ]; then
         rs_age_out="${rs_age_out}s"
     fi
-    printf 'STATUS=%s UNREAD=%s HEARTBEAT_AGE=%s PID=%s LAST=%s\n' \
-        "$rs_status" "$rs_unread" "$rs_age_out" "$rs_pid" "$rs_last"
+    printf 'STATUS=%s UNREAD=%s HEARTBEAT_AGE=%s PID=%s STREAM=%s LAST=%s\n' \
+        "$rs_status" "$rs_unread" "$rs_age_out" "$rs_pid" "$rs_stream" "$rs_last"
     exit "$rs_rc"
 }
 

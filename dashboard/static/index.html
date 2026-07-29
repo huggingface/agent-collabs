@@ -1913,11 +1913,15 @@ async function refreshWatching() {
     if (r.status === 503) { watchPresence = null; }
     else if (r.ok) {
       const j = await r.json();
-      watchPresence = {
-        freshS: Number(j.fresh_s) || 110,
-        map: j.watching || {},
-        longpoll: j.longpoll || {},
-      };
+      const freshS = Number(j.fresh_s);
+      // fresh_s is the server's own knob (WATCH_DESIGN.md §4.6) — the whole
+      // point of publishing it is that the dashboard never guesses it. A
+      // missing/non-finite/non-positive value means this response can't be
+      // judged for liveness at all, so treat it the same as no data rather
+      // than falling back to a hardcoded copy of the default.
+      watchPresence = Number.isFinite(freshS) && freshS > 0
+        ? { freshS, map: j.watching || {}, longpoll: j.longpoll || {} }
+        : null;
     }
     // Any other status: keep the last known presence — a transient blip must
     // not grey out every agent on screen.

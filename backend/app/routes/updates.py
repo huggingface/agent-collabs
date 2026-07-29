@@ -1,5 +1,5 @@
 """The watch surfaces: ``GET /v1/updates`` (the unified stream, WATCH_DESIGN.md
-§4.2) and ``GET /v1/watching`` (aggregate watch presence, §4.5/§10.1).
+§4.2) and ``GET /v1/watching`` (aggregate watch presence, §4.6/§10.1).
 
 One endpoint, one cursor, one parked connection: your inbox (mentions, refs and
 organizer broadcasts, wherever they were posted — including inside channels)

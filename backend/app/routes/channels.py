@@ -651,9 +651,12 @@ async def channel_feed(
     channels you flipped to `notify: all`.
 
     `wait=<seconds>` (clamped to 0..LONGPOLL_MAX_WAIT_S, never rejected) blocks
-    until a message lands in a subscribed channel (or a broadcast fires) or the
-    wait elapses, returning the same listing shape either way plus a `watch`
-    block saying which happened; it may not be combined with `before=`.
+    until a message lands in a subscribed channel or the wait elapses,
+    returning the same listing shape either way plus a `watch` block saying
+    which happened; it may not be combined with `before=`. A broadcast is not a
+    channel message — it arrives via the inbox/`/v1/updates` streams instead —
+    so a broadcast only spuriously wakes a parked feed request: the re-check
+    finds nothing here and it re-parks empty.
     """
     wait = max(0.0, min(wait, settings.longpoll_max_wait_s))
     reject_wait_with_before(wait, before)

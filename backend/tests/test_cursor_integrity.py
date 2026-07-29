@@ -19,11 +19,29 @@ from __future__ import annotations
 import os
 import subprocess
 import tempfile
+from pathlib import Path
 
 from fakes import seed_agent
 
+SCRIPT = Path(__file__).resolve().parent.parent / "clients" / "collab_watch.sh"
+
 # Mirrors FILENAME_RE in clients/collab_watch.sh.
 FILENAME_RE = r"[0-9]{8}-[0-9]{6}-[0-9]{3}_[a-z0-9][a-z0-9-]*\.md"
+
+# Verbatim from clients/collab_watch.sh resp_cursor(), joined onto one line.
+# test_transcribed_pipeline_matches_the_shipped_script keeps this honest.
+PIPELINE = (
+    "sed 's/.*\\]//' \"$BODY\" | "
+    'grep -oE "\\"cursor\\":\\"$FILENAME_RE\\"" | '
+    "tail -1 | "
+    "sed 's/.*:\"//; s/\"$//'"
+)
+
+
+def _squeeze(text: str) -> str:
+    """Whitespace-insensitive view: the script wraps the pipeline over four
+    indented lines, this file keeps it on one."""
+    return " ".join(text.split())
 
 
 def shell_resp_cursor(payload: str) -> str:
@@ -33,11 +51,7 @@ def shell_resp_cursor(payload: str) -> str:
         "LC_ALL=C\nexport LC_ALL\n"
         f'FILENAME_RE="{FILENAME_RE}"\n'
         "BODY=$1\n"
-        # Verbatim from clients/collab_watch.sh resp_cursor()
-        "sed 's/.*\\]//' \"$BODY\" | "
-        'grep -oE "\\"cursor\\":\\"$FILENAME_RE\\"" | '
-        "tail -1 | "
-        "sed 's/.*:\"//; s/\"$//'\n"
+        f"{PIPELINE}\n"
     )
     with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
         fh.write(payload)
@@ -50,6 +64,24 @@ def shell_resp_cursor(payload: str) -> str:
     finally:
         os.unlink(path)
     return out.stdout.strip()
+
+
+def test_transcribed_pipeline_matches_the_shipped_script():
+    """Everything below runs a hand-copy of the client's extractor, and nothing
+    else keeps that copy in sync: an edit to resp_cursor() would leave these
+    tests happily proving a property of code that no longer ships. So compare
+    the transcription against the real file, whitespace aside."""
+    source = _squeeze(SCRIPT.read_text())
+
+    assert _squeeze(PIPELINE) in source, (
+        "resp_cursor() in clients/collab_watch.sh no longer contains the "
+        "pipeline transcribed in this file. Update PIPELINE above — and check "
+        "the poisoning tests still hold for the new extractor before you do."
+    )
+    assert f"FILENAME_RE='{FILENAME_RE}'" in source, (
+        "FILENAME_RE drifted from the shipped script; the anchors in the "
+        "extractor are only as tight as this pattern."
+    )
 
 
 def test_real_response_through_real_extractor_resists_poisoning(env):

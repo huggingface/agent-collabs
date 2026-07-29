@@ -526,6 +526,13 @@ async def _list_md_hub(prefix: str) -> list[dict[str, str]]:
 # ──────────────────────────────────────────────────────────────
 LIST_CACHE_TTL = float(os.environ.get("LIST_CACHE_TTL", "20.0"))
 
+# Hard cap on distinct cache keys. Most surfaces cache under a fixed key (e.g.
+# "__channels__"), but /api/updates and /api/traces key on the raw query
+# string — an anonymous client looping distinct query strings could otherwise
+# grow `_values` without bound. Enforced in the cache class itself (below) so
+# every caller benefits, not just the ones we remember to bound individually.
+_CACHE_MAX_ENTRIES = 512
+
 
 class _SingleFlightCache:
     def __init__(self, ttl: float):
@@ -556,8 +563,26 @@ class _SingleFlightCache:
 
     async def _refresh(self, key: str, refresh) -> Any:
         value = await refresh()
-        self._values[key] = (time.monotonic(), value)
+        now = time.monotonic()
+        self._values[key] = (now, value)
+        self._evict(now)
         return value
+
+    def _evict(self, now: float) -> None:
+        """Bound `_values`. Runs on every write (the only place the dict
+        grows): first drop entries past their own TTL — cheap and usually
+        enough on its own — then, if still over the cap, evict oldest-first
+        by recorded write time until back at the cap. Keeps the single-flight
+        `_tasks` map out of it entirely: a task for an evicted key simply
+        writes a fresh entry on completion, which is harmless."""
+        expired = [k for k, (ts, _) in self._values.items() if now - ts >= self.ttl]
+        for k in expired:
+            self._values.pop(k, None)
+        overflow = len(self._values) - _CACHE_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(self._values.items(), key=lambda kv: kv[1][0])[:overflow]
+            for k, _ in oldest:
+                self._values.pop(k, None)
 
     def invalidate(self, key: str) -> None:
         self._values.pop(key, None)
@@ -830,6 +855,11 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
         _hub_cache.invalidate("__channels__")
         _hub_cache.invalidate(f"__channel__:{channel}")
         _hub_cache.invalidate_prefix(f"__channel_msgs__:{channel}:")
+        # Posting into a channel auto-subscribes the poster (comment above),
+        # so the caller's own notify-level cache is stale too — invalidate it
+        # exactly as the subscribe proxy does, or the bell can stay hidden for
+        # up to the cache TTL + poll tick (WATCH_DESIGN.md §10.3).
+        _hub_cache.invalidate(f"__notify__:{_human_handle(handle)}")
         return {
             "item": {
                 "filename": posted["filename"],
@@ -1056,9 +1086,14 @@ async def create_channel(post: ChannelCreate, request: Request) -> Any:
             r.status_code,
             _backend_error_message(r) or f"Channel creation failed ({r.status_code}).",
         )
-    # New channel list entry + the auto-announcement on the board.
+    # New channel list entry + the auto-announcement on the board. Creation
+    # also auto-subscribes the creator (docstring above), so the caller's own
+    # notify-level cache is stale too — invalidate it exactly as the subscribe
+    # proxy does, or the bell can stay hidden for up to the cache TTL + poll
+    # tick (WATCH_DESIGN.md §10.3).
     _hub_cache.invalidate("__channels__")
     _invalidate_list_cache(PREFIX)
+    _hub_cache.invalidate(f"__notify__:{_human_handle(username)}")
     return r.json()
 
 

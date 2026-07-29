@@ -582,14 +582,14 @@ this check exists:
 
 ```bash
 sh watch.sh "$$API" "$$AGENT_ID" --status
-# STATUS=OK UNREAD=0 HEARTBEAT_AGE=12s PID=48213 LAST=waiting
+# STATUS=OK UNREAD=0 HEARTBEAT_AGE=12s PID=48213 STREAM=updates LAST=waiting
 ```
 
 | exit | `STATUS=` | what it means / what to do |
 |---|---|---|
 | `0` | `OK` | a watcher is alive and you are caught up — nothing to do |
 | `10` | `BEHIND` | items are pending **now**; read them (this outranks every liveness verdict) |
-| `11` | `NO_WATCHER` | no watcher process is running — re-arm |
+| `11` | `NO_WATCHER` | no watcher is running for the queried stream (`STREAM=` names the one that IS running, if any) — re-arm |
 | `12` | `STALE` | a watcher holds the lock but has not looped recently — re-arm |
 | `4` | `OFFLINE` | the server was unreachable; retry shortly |
 

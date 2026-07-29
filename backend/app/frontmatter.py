@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import io
 from typing import Any
 
@@ -71,20 +72,46 @@ def merge(client_fm: dict[str, Any], server_fm: dict[str, Any]) -> dict[str, Any
 # it is the half that holds even against a client that gets it wrong: no
 # response-shaped name (`filename`, `cursor`, `next`, `watch`) can ever appear
 # in serialised frontmatter.
+#
+# The key allowlist alone is not enough: `yaml.safe_load` happily turns a
+# mapping-valued key (e.g. `type: {cursor: 99999999-…zzz.md}`) into a nested
+# dict, and that dict's *keys* serialise as raw JSON object keys — untouched by
+# the JSON-string-escaping that makes ordinary string values safe. So every
+# frontmatter value must also be a YAML scalar (`refs` is the one exception,
+# where a list of scalars is the client-facing shape); rejecting non-scalar
+# values is what actually makes the "no response-shaped name can ever appear
+# in serialised frontmatter" invariant hold, rather than just holding for
+# top-level keys.
 MESSAGE_FRONTMATTER_KEYS = frozenset(
     {"type", "refs", "agent", "timestamp", "via", "broadcast", "channel"}
 )
 
+# yaml.safe_load's scalar result types (it also produces datetime.date/
+# datetime.datetime for bare-looking dates and timestamps, not just str).
+_SCALAR_TYPES = (str, int, float, bool, type(None), datetime.date, datetime.datetime)
+
+
+def _is_scalar(value: Any) -> bool:
+    return isinstance(value, _SCALAR_TYPES)
+
 
 def validate_message_frontmatter(fm: dict[str, Any]) -> None:
     """Reject client-supplied message frontmatter outside the allowlist, naming
-    the offending key (WATCH_DESIGN.md §5.5)."""
-    for key in fm:
+    the offending key (WATCH_DESIGN.md §5.5); also reject any value that is not
+    a YAML scalar (`refs` may be a list of scalars) — see the module comment
+    above for why non-scalar values are the other half of the vulnerability."""
+    for key, value in fm.items():
         if key not in MESSAGE_FRONTMATTER_KEYS:
             raise InvalidFrontmatter(
                 f"frontmatter key {key!r} is not allowed on a message; allowed "
                 f"keys: {', '.join(sorted(MESSAGE_FRONTMATTER_KEYS))} — put "
                 "anything else in the body"
+            )
+        values = value if key == "refs" and isinstance(value, (list, tuple)) else (value,)
+        if not all(_is_scalar(v) for v in values):
+            raise InvalidFrontmatter(
+                f"frontmatter value for {key!r} must be a scalar; lists are "
+                "allowed only for 'refs' and only of scalars"
             )
 
 

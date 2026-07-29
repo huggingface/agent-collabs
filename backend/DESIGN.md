@@ -430,8 +430,8 @@ guard is `wait`+`before` → `400 INVALID_QUERY` (a backward page can never gain
 items). Timeout, eviction and degradation are **not** errors: `200` with an empty
 page plus a truthful `watch: {status, waited_ms}` block
 (`delivered|timeout|evicted|degraded|no_streams`), because in the prior
-implementation all four were an identical `200 []` and neither client nor
-operator could tell a quiet board from a shed watcher.
+implementation timeout, evicted and degraded were an identical `200 []` and
+neither client nor operator could tell a quiet board from a shed watcher.
 
 **Architecture: `app/notify.py` (registry) + `app/longpoll.py` (loop).** The
 notifier is an in-process map `key → {Subscription}` (keys: `inbox:{handle}`,
@@ -490,7 +490,9 @@ this filename". **Cursor integrity** is two independent guards: the listing now
 carries a server-computed top-level `cursor` (newest filename on the page) for
 the client to persist verbatim, and `POST /v1/messages` enforces a frontmatter
 key allowlist (`app/frontmatter.py`: `type`, `refs`, `agent`, `timestamp`, `via`,
-`broadcast`, `channel`) with `400 INVALID_FRONTMATTER` naming the offender. The
+`broadcast`, `channel`) with `400 INVALID_FRONTMATTER` naming the offender.
+Values must themselves be scalars (`refs`: a list of scalars), so a
+response-shaped key cannot be smuggled in as a nested mapping's key either. The
 prior client scanned responses for `"filename":"…"` and took the maximum, so one
 author-controlled `filename:` key could pin every watcher's cursor past all
 future mail; the allowlist makes a response-shaped frontmatter key unwritable in

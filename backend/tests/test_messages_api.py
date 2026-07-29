@@ -1,3 +1,5 @@
+import json
+
 from fakes import seed_agent, seed_message
 
 
@@ -262,6 +264,95 @@ def test_allowlisted_frontmatter_still_round_trips(env):
     # Server stamps win over the client's stale copies.
     assert fm["agent"] == "agent-1" and fm["via"] == "bucket"
     assert fm["type"] == "note"
+
+
+# ── frontmatter value shapes (WATCH_DESIGN.md §5.5) ───────────────────
+# The key allowlist alone isn't enough: `yaml.safe_load` turns a mapping-valued
+# key into a nested dict, and that dict's *keys* serialize as raw JSON object
+# keys, unescaped like ordinary string values would be. So every value must
+# also be a scalar (except `refs`, which may be a list of scalars).
+
+
+def test_nested_mapping_frontmatter_value_rejected_naming_the_key(env):
+    """`type: {cursor: 99999999-...zzz.md}` is the same cursor-poisoning
+    vulnerability wearing a disguise: the key allowlist admits `type`, but the
+    *value* is a mapping whose own key, `cursor`, would serialize as a raw
+    JSON key once expanded — nothing keeps a watcher's naive grep from
+    matching it. The value-shape check has to reject this, naming `type`."""
+    seed_agent(env.hub, "agent-1")
+    poison = "99999999-999999-999_zzz.md"
+    uri = _seed_source(
+        env,
+        "agent-1",
+        "drafts/nested.md",
+        f"---\ntype: {{cursor: {poison}}}\n---\nbody",
+    )
+    r = env.client.post("/v1/messages", json={"source": uri})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "INVALID_FRONTMATTER"
+    assert "type" in err["message"]
+    # Nothing was promoted.
+    assert env.client.get("/v1/messages").json()["count"] == 0
+    # And even if promotion had somehow slipped through, the poison string
+    # must never show up the way a watcher's naive grep would match it.
+    data = env.client.get("/v1/messages?expand=true").json()
+    serialized = json.dumps(data, separators=(",", ":"))
+    assert serialized.count(f'"cursor":"{poison}"') == 0
+
+
+def test_refs_list_containing_mapping_rejected_naming_refs(env):
+    """`refs` may be a list, but only of scalars — a list element that is
+    itself a mapping (`refs: [{filename: x.md}]`) reopens the same hole one
+    level deeper than the bare-mapping case above."""
+    seed_agent(env.hub, "agent-1")
+    uri = _seed_source(
+        env, "agent-1", "drafts/refs-mapping.md", "---\ntype: note\nrefs: [{filename: x.md}]\n---\nbody"
+    )
+    r = env.client.post("/v1/messages", json={"source": uri})
+    assert r.status_code == 400
+    err = r.json()["error"]
+    assert err["code"] == "INVALID_FRONTMATTER"
+    assert "refs" in err["message"]
+
+
+def test_refs_scalar_and_list_of_scalars_still_201(env):
+    """`refs` accepts both its documented client-facing shapes — a bare
+    filename string or a list of filename strings — the value-shape check
+    only rejects non-scalars, not `refs`'s two legitimate scalar shapes."""
+    seed_agent(env.hub, "agent-1")
+    uri = _seed_source(
+        env,
+        "agent-1",
+        "drafts/refs-string.md",
+        "---\ntype: note\nrefs: 20260101-000000-000_agent-1.md\n---\nplain string ref",
+    )
+    assert env.client.post("/v1/messages", json={"source": uri}).status_code == 201
+
+    uri2 = _seed_source(
+        env,
+        "agent-1",
+        "drafts/refs-list.md",
+        "---\ntype: note\nrefs:\n  - 20260101-000000-000_agent-1.md\n  - 20260102-000000-000_agent-1.md\n"
+        "---\nlist of string refs",
+    )
+    assert env.client.post("/v1/messages", json={"source": uri2}).status_code == 201
+
+
+def test_scalar_edge_values_bool_and_date_still_201(env):
+    """YAML's implicit typing turns a bare `2026-01-01` into `datetime.date`
+    and `true` into `bool`, not `str` — both are still scalars and must pass
+    the value-shape check exactly like an ordinary string value does. (The
+    server overwrites `via`/`timestamp` regardless, so these odd client values
+    never reach storage; the point is that validation doesn't choke on them.)"""
+    seed_agent(env.hub, "agent-1")
+    uri = _seed_source(
+        env,
+        "agent-1",
+        "drafts/scalar-edges.md",
+        "---\ntype: note\nvia: true\ntimestamp: 2026-01-01\n---\nbody",
+    )
+    assert env.client.post("/v1/messages", json={"source": uri}).status_code == 201
 
 
 def test_raw_variant_needs_no_allowlist(env):

@@ -59,7 +59,11 @@ class Stub:
     # misbehaviour knobs
     http_status: int | None = None        # force this status on every request
     error_body: bytes = b'{"error":{"code":"BOOM","message":"boom"}}'
-    instant_status: str | None = None     # answer wait>0 instantly with this status
+    # Answer wait>0 instantly with this status instead of holding the request.
+    # "degraded"/"evicted" are the over-cap answers; "timeout" is the truthful
+    # instant answer of a server whose effective wait budget is 0
+    # (LONGPOLL_MAX_WAIT_S=0), which the client must still pace against.
+    instant_status: str | None = None
     omit_cursor: bool = False             # pretend the server predates §4.4
     matched_override: int | None = None   # lie about `matched`
     grow_polls: int = 0                   # land fresh mail during the next N polls
@@ -159,7 +163,9 @@ class _Handler(BaseHTTPRequestHandler):
         status = "delivered" if items else "timeout"
         if wait > 0 and not items:
             if stub.instant_status:
-                status = stub.instant_status  # degraded/evicted: no hold at all
+                # No hold at all: degraded/evicted, or a truthful zero-wait
+                # timeout — waited_ms comes out ~0 either way.
+                status = stub.instant_status
             else:
                 deadline = t0 + wait
                 while time.monotonic() < deadline:
@@ -480,18 +486,32 @@ def test_page_without_cursor_field_is_fatal(stub, tmp_path):
 
 
 def test_timeout_answers_keep_the_watcher_looping(stub, tmp_path):
-    """An empty page with watch.status=timeout is the routine idle path: loop
-    again immediately, rewriting the heartbeat every pass."""
+    """An empty page with watch.status=timeout is the routine idle path: the
+    watcher keeps polling, and rewrites the heartbeat on every pass.
+
+    The pulse assertion needs a barrier, not a tolerance: `hb waiting` is
+    stamped immediately before each poll, so once the stub has seen a FURTHER
+    request the heartbeat of that later pass is already on disk — and its epoch
+    must be strictly newer than the one captured before the barrier (passes are
+    at least the idle floor apart, well over `date +%s` granularity). Comparing
+    with >= instead would pass even against a watcher that never wrote again."""
     state = fresh(tmp_path, cursor="")
 
     proc = popen(stub, state)
     try:
-        assert wait_until(lambda: stub.n_requests() >= 3, timeout=15), \
+        assert wait_until(lambda: stub.n_requests() >= 2, timeout=20), \
             f"only {stub.n_requests()} requests — the loop stalled"
         assert proc.poll() is None
-        first_epoch, _ = heartbeat(state)
-        assert wait_until(lambda: heartbeat(state)[0] >= first_epoch, timeout=5)
+        before_epoch, before_status = heartbeat(state)
+        assert before_status in {"waiting", "timeout"}, before_status
+
+        assert wait_for_next_request(stub, timeout=20), \
+            f"only {stub.n_requests()} requests — the loop stalled"
+        assert wait_until(lambda: heartbeat(state)[0] > before_epoch, timeout=20), \
+            ("the heartbeat was not rewritten on the later pass: "
+             f"{before_epoch} {before_status} -> {heartbeat(state)}")
         assert heartbeat(state)[1] in {"waiting", "timeout"}
+        assert proc.poll() is None
     finally:
         out, _err = stop(proc)
     assert out.strip() == ""
@@ -517,6 +537,32 @@ def test_degraded_answers_do_not_hot_loop(stub, tmp_path):
     finally:
         _out, err = stop(proc)
     assert "degraded" in err
+
+
+def test_instant_timeout_answers_do_not_hot_loop(stub, tmp_path):
+    """A truthful `timeout` can still be instant, so the idle floor applies to it
+    too. A self-hosted server with LONGPOLL_MAX_WAIT_S=0 answers
+    status=timeout, waited_ms=0 immediately and honestly; a client that trusted
+    the status instead of the clock would poll it flat out — degradation
+    amplification against the server least able to take it (§3.2.1)."""
+    stub.instant_status = "timeout"
+    state = fresh(tmp_path, cursor="")
+
+    proc = popen(stub, state)
+    try:
+        assert wait_until(lambda: stub.n_requests() >= 1), "the watcher never polled"
+        before = stub.n_requests()
+        time.sleep(4.0)
+        extra = stub.n_requests() - before
+        assert proc.poll() is None
+        # IDLE_FLOOR_S is 2s, so 4s of wall clock allows 2 further polls (+1 for
+        # the second boundary); hundreds means the floor was skipped entirely.
+        assert 1 <= extra <= 3, f"{extra} further requests in 4s — pacing is broken"
+        assert heartbeat(state)[1] in {"waiting", "timeout"}
+    finally:
+        _out, err = stop(proc)
+    assert "watch.status=timeout" not in err, \
+        "a plain timeout is the routine idle path — pace it, do not log it"
 
 
 def test_instant_empty_without_watch_status_is_also_paced(stub, tmp_path):
@@ -557,6 +603,30 @@ def test_4xx_fails_fast_and_prints_the_error_body(stub, tmp_path):
     assert "register first via POST /v1/agents/register" in result.stderr
     assert result.stdout == ""
     assert stub.n_requests() == 1, "4xx must not be retried"
+
+
+def test_3xx_fails_fast_with_a_redirect_hint(stub, tmp_path):
+    """A redirect is permanent, not transient. `http://<org>.hf.space` redirects
+    to https and this client deliberately does not follow redirects (a redirect
+    can move a watcher to another host, scheme or handle), so retrying can never
+    succeed: it burned the whole backoff ladder and then reported an outage
+    instead of the one-word fix."""
+    stub.http_status = 301
+    state = fresh(tmp_path, cursor="")
+    t0 = time.monotonic()
+
+    result = run(stub, state, timeout=60)
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 1
+    assert stub.n_requests() == 1, "a 3xx must not be retried"
+    assert elapsed < 10, f"took {elapsed:.1f}s — that is the backoff ladder, not a fast fail"
+    assert "301" in result.stderr
+    assert "redirect" in result.stderr
+    assert f"https://{stub.base_url.split('://', 1)[1]}" in result.stderr, \
+        "an http:// base must be told to try https://"
+    assert result.stdout == ""
+    assert heartbeat(state)[1] == "http_301"
 
 
 def test_ten_failures_give_up_with_exit_4_and_gave_up_heartbeat(stub, tmp_path):
@@ -835,6 +905,137 @@ def test_stale_lock_is_reclaimed(stub, tmp_path):
     assert (state / "cursor.updates").read_text().strip() == filename
 
 
+def test_the_lock_is_per_handle_and_status_is_stream_aware(stub, tmp_path):
+    """The lock and heartbeat are per-HANDLE while cursors are per-stream: one
+    watcher per agent is the whole point of the unified `updates` stream.
+
+    So a second watcher is refused even on another stream (exit 5, naming the
+    live PID) — and the flip side must hold too: that watcher's pulse is NOT
+    liveness for the stream it is not watching, or `--status <base> <me> feed`
+    would report a healthy watcher while nothing advances cursor.feed."""
+    state = fresh(tmp_path, cursor="", stream="updates")
+    (state / "cursor.feed").write_text("\n")  # so --status feed does its request
+
+    watcher = popen(stub, state)
+    try:
+        assert wait_until((state / "lock" / "pid").exists), "no lock was taken"
+        assert wait_until((state / "heartbeat").exists)
+        assert wait_until(lambda: stub.n_requests() >= 1)
+
+        other_stream = run(stub, state, stream="feed", timeout=20)
+        assert other_stream.returncode == 5, other_stream.stderr
+        assert str(watcher.pid) in other_stream.stderr
+        assert "handle" in other_stream.stderr, "the message must say per-handle"
+        assert other_stream.stdout == ""
+
+        behind_on_feed = run(stub, state, "--status", stream="feed", timeout=20)
+        assert behind_on_feed.returncode == 11, behind_on_feed.stdout
+        fields = _status_line(behind_on_feed)
+        assert fields["STATUS"] == "NO_WATCHER"
+        assert fields["STREAM"] == "updates", "the live watcher's stream is reported"
+        assert fields["PID"] == str(watcher.pid)
+        assert "updates" in behind_on_feed.stderr, \
+            "the caller must be told a watcher is alive on the other stream"
+
+        on_updates = run(stub, state, "--status", stream="updates", timeout=20)
+        assert on_updates.returncode == 0, on_updates.stdout + on_updates.stderr
+        assert _status_line(on_updates)["STATUS"] == "OK"
+        assert _status_line(on_updates)["STREAM"] == "updates"
+    finally:
+        stop(watcher)
+
+
+def test_status_10_outranks_a_watcher_on_another_stream(stub, tmp_path):
+    """BEHIND still outranks every liveness verdict, including the new
+    wrong-stream one: pending items are the actionable fact."""
+    seen = stub.add()
+    state = fresh(tmp_path, cursor=seen, stream="feed")
+    stub.add()
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        (state / "heartbeat").write_text(f"{int(time.time())} waiting {alive.pid} updates\n")
+
+        result = run(stub, state, "--status", stream="feed", timeout=20)
+
+        assert result.returncode == 10, result.stdout + result.stderr
+        fields = _status_line(result)
+        assert fields["STATUS"] == "BEHIND" and fields["UNREAD"] == "1"
+        assert fields["STREAM"] == "updates"
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def test_an_empty_pid_file_is_not_stolen_from_a_live_acquirer(stub, tmp_path):
+    """`mkdir` and the pid write cannot be one atomic step, so an empty lock/pid
+    is usually a lock acquired microseconds ago. Reading it once and declaring
+    the lock stale is how two watchers end up sharing one cursor file — the eq2
+    failure the lock exists to prevent — so the pid is re-read after a second of
+    grace, which a live acquirer wins."""
+    state = fresh(tmp_path, cursor="")
+    (state / "lock").mkdir()
+    pid_file = state / "lock" / "pid"
+    pid_file.write_text("")  # an acquirer between its mkdir and its pid write
+    alive = subprocess.Popen(["sleep", "30"])
+    watcher = popen(stub, state)
+    try:
+        time.sleep(0.3)  # inside the grace window, where the real race lands
+        pid_file.write_text(f"{alive.pid}\n")
+        # It must exit 5 on its own — no terminate(), or the signal would be
+        # indistinguishable from the refusal under test.
+        _out, err = watcher.communicate(timeout=20)
+        assert watcher.returncode == 5, err
+        assert str(alive.pid) in err
+        assert pid_file.read_text().strip() == str(alive.pid), \
+            "the acquirer's lock must survive"
+    finally:
+        if watcher.poll() is None:
+            stop(watcher)
+        alive.terminate()
+        alive.wait()
+
+
+def test_a_permanently_empty_pid_file_is_still_reclaimed(stub, tmp_path):
+    """The other half of the grace: a crash between mkdir and the pid write
+    leaves lock/pid empty forever, and that lock must not become a wall."""
+    state = fresh(tmp_path, cursor="")
+    (state / "lock").mkdir()
+    (state / "lock" / "pid").write_text("")
+    filename = stub.add()
+
+    result = run(stub, state, timeout=30)
+
+    assert result.returncode == 0, result.stderr
+    assert "stale lock" in result.stderr
+    assert (state / "cursor.updates").read_text().strip() == filename
+
+
+def test_exit_does_not_remove_a_lock_that_is_no_longer_ours(stub, tmp_path):
+    """Whoever loses an acquisition race must not tear the winner's lock down on
+    its way out: cleanup releases the lock only while lock/pid still holds $$."""
+    state = fresh(tmp_path, cursor="")
+    other = subprocess.Popen(["sleep", "30"])
+    watcher = popen(stub, state)
+    try:
+        pid_file = state / "lock" / "pid"
+        assert wait_until(lambda: pid_file.exists()
+                          and pid_file.read_text().strip() == str(watcher.pid)), \
+            "the watcher never took the lock"
+        pid_file.write_text(f"{other.pid}\n")  # another watcher now owns it
+
+        stop(watcher, timeout=20)
+
+        assert (state / "lock").exists(), "the other watcher's lock was removed"
+        assert pid_file.read_text().strip() == str(other.pid)
+    finally:
+        if watcher.poll() is None:
+            stop(watcher)
+        other.terminate()
+        other.wait()
+
+
 def test_peek_and_status_ignore_the_lock(stub, tmp_path):
     """Peeking/statusing beside a running watcher is the whole point of them."""
     state = fresh(tmp_path, cursor="")
@@ -863,6 +1064,7 @@ def test_status_11_when_no_watcher_has_ever_run(stub, tmp_path):
     assert fields["UNREAD"] == "?"
     assert fields["HEARTBEAT_AGE"] == "-"
     assert fields["PID"] == "-"
+    assert fields["STREAM"] == "-", "no heartbeat -> no watched stream to report"
     assert stub.n_requests() == 0, "no cursor -> nothing to compare -> no request"
 
 
@@ -882,6 +1084,7 @@ def test_status_0_when_live_and_caught_up(stub, tmp_path):
         assert fields["STATUS"] == "OK"
         assert fields["UNREAD"] == "0"
         assert fields["PID"] == str(alive.pid)
+        assert fields["STREAM"] == "updates"
         assert fields["LAST"] == "waiting"
         assert fields["HEARTBEAT_AGE"].endswith("s")
     finally:
