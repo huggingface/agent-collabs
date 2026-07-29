@@ -1,20 +1,36 @@
 #!/usr/bin/env python3
-"""End-to-end smoke of the channels feature against a running testenv
+"""End-to-end smoke of the channels + watch features against a running testenv
 (./testenv/up.sh). Stdlib only — no deps, no venv:
 
-    python3 testenv/smoke.py
+    ./testenv/up.sh --reset && python3 testenv/smoke.py
 
-Exercises the backend as agents (raw + bucket-source + subscribe proofs) and
-the dashboard as a fake-logged-in human (proxies, composer channel post,
-creation endpoint). Prints one line per check; exits non-zero on any failure.
+These checks are NOT idempotent and require a FRESH bucket: they assert on
+first-creation (`created: True`), on auto-subscribe, on the default quiet notify
+level, and on exact content promotion. Re-running against a stack that has
+already been smoked fails in confusing ways (`created: False`,
+`ALREADY_PROMOTED`, a channel already flipped to `notify: all`) — that is dirty
+state, not a regression. Always `--reset` first.
+
+Exercises the backend as agents (raw + bucket-source + subscribe proofs), the
+dashboard as a fake-logged-in human (proxies, composer channel post, creation
+endpoint), and the watch/long-poll surface (parked `wait=` polls, per-channel
+notify levels, the digest's watch blocks, and the served collab_watch.sh client
+driven as a real agent would). Prints one line per check; exits non-zero on any
+failure.
 """
 from __future__ import annotations
 
 import http.cookiejar
 import json
+import os
+import shutil
+import subprocess
 import sys
+import tempfile
+import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -23,6 +39,12 @@ DASH = "http://127.0.0.1:7861"
 ROOT = Path(__file__).resolve().parent.parent
 BUCKETS = ROOT / ".testenv" / "buckets"
 ORG, SLUG = "local-org", "collab"
+WATCH_SH = ROOT / "backend" / "clients" / "collab_watch.sh"
+
+# Long-poll timings. Everything is kept short deliberately: this is a pre-merge
+# check, not a soak test, so no park here uses the 55s production default.
+PARK_SETTLE_S = 0.8   # time given to a background poll to reach the registry
+EARLY_S = 5.0         # a woken park must return well inside its wait budget
 
 _jar = http.cookiejar.CookieJar()
 _dash_opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(_jar))
@@ -60,6 +82,94 @@ def req(url: str, payload: dict | None = None, bearer: str | None = None,
         return code, json.loads(body)
     except json.JSONDecodeError:
         return code, body
+
+
+def get(url: str, timeout: float = 90) -> tuple[int, dict | list | str]:
+    """GET with an explicit socket timeout. Every `wait=` call goes through
+    here: a parked poll must never hang the whole smoke run if the server
+    forgets to answer it."""
+    try:
+        resp = urllib.request.urlopen(urllib.request.Request(url), timeout=timeout)
+        code, body = resp.status, resp.read().decode()
+    except urllib.error.HTTPError as e:
+        code, body = e.code, e.read().decode()
+    try:
+        return code, json.loads(body)
+    except json.JSONDecodeError:
+        return code, body
+
+
+def raw_get(url: str) -> tuple[int, str, str]:
+    """(status, body text, content-type) — for the non-JSON /v1/watch.sh."""
+    try:
+        resp = urllib.request.urlopen(urllib.request.Request(url), timeout=30)
+        return resp.status, resp.read().decode(), resp.headers.get("content-type", "")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(), e.headers.get("content-type", "")
+
+
+def stream_url(stream: str, handle: str, **params) -> str:
+    """A watchable stream URL with the list grammar spelled out as query args."""
+    q = {k: v for k, v in params.items() if v is not None}
+    if stream == "inbox":
+        path = f"/v1/inbox/{handle}"
+    else:
+        q["as"] = handle
+        path = "/v1/updates" if stream == "updates" else "/v1/channels/feed"
+    return f"{API}{path}?{urllib.parse.urlencode(q)}"
+
+
+class Park(threading.Thread):
+    """A `wait=` poll held open in a background thread, so the main thread can
+    post the message that is supposed to resolve it. Records how long the
+    server took to answer — the whole point of the feature is that a delivery
+    returns early instead of burning the wait budget."""
+
+    def __init__(self, url: str):
+        super().__init__(daemon=True)
+        self.url = url
+        self.code = 0
+        self.doc: dict = {}
+        self.elapsed = -1.0
+
+    def run(self) -> None:
+        t0 = time.time()
+        code, doc = get(self.url)
+        self.elapsed = time.time() - t0
+        self.code = code
+        self.doc = doc if isinstance(doc, dict) else {"raw": doc}
+
+    def settle(self) -> None:
+        self.start()
+        time.sleep(PARK_SETTLE_S)
+
+    def finish(self, timeout: float = 40) -> tuple[list, dict, str]:
+        """(items, watch block, watch.status) once the poll has returned."""
+        self.join(timeout)
+        items = self.doc.get("items") or []
+        watch = self.doc.get("watch") or {}
+        return items, watch, watch.get("status", "")
+
+
+def watch_run(state: Path, *args: str, wait: str = "2", timeout: float = 60):
+    """One `sh collab_watch.sh <base> <handle> ...` run, pinned to its own state
+    directory so runs are isolated and nothing is left in $HOME."""
+    env = dict(os.environ, COLLAB_WATCH_DIR=str(state), COLLAB_WATCH_WAIT=wait)
+    return subprocess.run(
+        ["sh", str(WATCH_SH), API, *args],
+        capture_output=True, text=True, env=env, timeout=timeout,
+    )
+
+
+def watch_bg(state: Path, *args: str, wait: str = "2") -> subprocess.Popen:
+    """The same, left running: the client is single-shot exit-on-mail, so the
+    only way to observe a live watcher (lock held, heartbeat fresh) is to have
+    one parked while we look at it."""
+    env = dict(os.environ, COLLAB_WATCH_DIR=str(state), COLLAB_WATCH_WAIT=wait)
+    return subprocess.Popen(
+        ["sh", str(WATCH_SH), API, *args],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+    )
 
 
 def backend_agent_flows() -> None:
@@ -240,10 +350,258 @@ def dashboard_flows() -> None:
     check("SPA serves", code == 200 and "channelChips" in page)
 
 
+def watch_flows() -> None:
+    """WATCH_DESIGN.md §11 — the long-poll surface end-to-end.
+
+    Runs last: it posts extra board/channel traffic and flips a notification
+    level, so keeping it after the channels flows leaves their counts alone.
+    """
+    print("backend — watch (long-poll) flows")
+    me, them = "byte-bandit", "delta-coder"
+    src = {"source": f"hf://buckets/{ORG}/{SLUG}-{me}/subscribe.md"}
+    ch = "watch-lab"
+
+    # The waiter registry's own observability — and the canary for the whole
+    # section: every wait= route resolves get_notifier, so a 500 here means
+    # nothing below can pass.
+    code, health = req(f"{API}/v1/healthz")
+    lp = health.get("longpoll") if isinstance(health, dict) else None
+    check("healthz exposes the longpoll waiter registry counters",
+          code == 200 and isinstance(lp, dict)
+          and {"waiters", "owners", "parks", "wakes", "evictions", "degradations"} <= set(lp),
+          f"{code} {health}")
+
+    code, doc = req(f"{API}/v1")
+    paths = {e["path"] for e in doc.get("endpoints", [])}
+    check("discovery lists the watch endpoints + wait= polling note",
+          {"/v1/updates", "/v1/watch.sh"} <= paths
+          and "wait=55" in doc["conventions"]["polling"], str(sorted(paths))[:120])
+
+    code, created = req(f"{API}/v1/channels", {
+        "name": ch, "agent_id": "human-tester",
+        "body": "Long-poll lab: parked polls, notify levels, and what wakes a watcher.",
+    }, bearer="any-token")
+    check("watch-lab channel created (organizer)", code == 201 and created.get("created") is True,
+          str(created))
+
+    # ── §4.1: wait=0 changes nothing; wait+before is a bug worth naming ──
+    code, plain = req(f"{API}/v1/updates?as={me}&expand=true&limit=5")
+    code0, zero = req(f"{API}/v1/updates?as={me}&expand=true&limit=5&wait=0")
+    check("wait=0 leaves the response shape byte-identical (no watch block)",
+          code == 200 and code0 == 200 and zero == plain and zero.get("watch") is None
+          and {"count", "matched", "items", "next", "cursor"} <= set(zero), str(zero)[:200])
+
+    anchor = plain["items"][0]["filename"] if plain["items"] else "20260101-000000-000_x.md"
+    code, e1 = req(f"{API}/v1/updates?as={me}&wait=5&before={anchor}")
+    code2, e2 = req(f"{API}/v1/inbox/{me}?wait=5&before={anchor}")
+    check("wait + before rejected on updates and inbox (400 INVALID_QUERY)",
+          code == 400 and e1["error"]["code"] == "INVALID_QUERY"
+          and code2 == 400 and e2["error"]["code"] == "INVALID_QUERY", f"{code}/{code2} {e1}")
+
+    # ── §4.2: a parked poll returns the moment a mention lands ──
+    cursor = plain.get("cursor")
+    park = Park(stream_url("updates", me, after=cursor, order="asc", expand="true",
+                           limit=10, wait=10))
+    park.settle()
+    code, msg = req(f"{API}/v1/messages", {"agent_id": them, "body": f"@{me} parked-poll delivery"})
+    items, watch, status = park.finish()
+    check("parked wait=10 updates poll wakes early on a mention (item, reasons, cursor)",
+          code == 201 and park.elapsed < EARLY_S and status == "delivered"
+          and [i["filename"] for i in items] == [msg["filename"]]
+          and items[0].get("reasons") == ["mention"]
+          and park.doc.get("cursor") == msg["filename"],
+          f"elapsed={park.elapsed:.2f}s watch={watch} items={[i['filename'] for i in items]}")
+    cursor = park.doc.get("cursor") or cursor
+
+    # ── §4.3: notification levels decide what wakes you ──
+    code, sub = req(f"{API}/v1/channels/{ch}/subscribe", src)
+    check("subscribe defaults to the quiet level (notify: mentions)",
+          code == 200 and sub.get("notify") == "mentions" and sub.get("changed") is True, str(sub))
+
+    park = Park(stream_url("updates", me, after=cursor, order="asc", expand="true",
+                           limit=10, wait=4))
+    park.settle()
+    code, quiet = req(f"{API}/v1/messages", {
+        "agent_id": them, "channel": ch, "body": "plain channel post, nobody mentioned"})
+    items, watch, status = park.finish()
+    check("mentions-level channel: a plain post does NOT resolve a parked poll (times out empty)",
+          code == 201 and items == [] and status == "timeout" and park.elapsed >= 3.5,
+          f"elapsed={park.elapsed:.2f}s watch={watch} items={items}")
+
+    park = Park(stream_url("updates", me, after=cursor, order="asc", expand="true",
+                           limit=10, wait=10))
+    park.settle()
+    code, msg = req(f"{API}/v1/messages", {
+        "agent_id": them, "channel": ch, "body": f"@{me} mention inside a quiet channel"})
+    items, watch, status = park.finish()
+    check("mentions-level channel: an @mention in it DOES resolve it (via the inbox side)",
+          code == 201 and park.elapsed < EARLY_S and status == "delivered"
+          and [i["filename"] for i in items] == [msg["filename"]]
+          and items[0].get("reasons") == ["mention"],
+          f"elapsed={park.elapsed:.2f}s watch={watch} items={items}")
+    cursor = park.doc.get("cursor") or cursor
+
+    code, sub = req(f"{API}/v1/channels/{ch}/subscribe", {**src, "notify": "all"})
+    check("re-subscribing with notify: all is the level change (changed: true)",
+          code == 200 and sub.get("notify") == "all" and sub.get("changed") is True, str(sub))
+
+    park = Park(stream_url("updates", me, after=cursor, order="asc", expand="true",
+                           limit=10, wait=10))
+    park.settle()
+    code, msg = req(f"{API}/v1/messages", {
+        "agent_id": them, "channel": ch, "body": "plain post, now at notify: all"})
+    items, watch, status = park.finish()
+    check("notify: all merges plain channel traffic into /v1/updates (reasons: channel:<name>)",
+          code == 201 and park.elapsed < EARLY_S and status == "delivered"
+          and [i["filename"] for i in items] == [msg["filename"]]
+          and items[0].get("reasons") == [f"channel:{ch}"],
+          f"elapsed={park.elapsed:.2f}s watch={watch} items={items}")
+    cursor = park.doc.get("cursor") or cursor
+
+    # ── §4.4: a timeout is a 200 that says so ──
+    t0 = time.time()
+    code, doc = get(stream_url("updates", me, after=cursor, order="asc", expand="true", wait=2))
+    dt = time.time() - t0
+    check("short wait, nothing posted: empty page + watch.status=timeout",
+          code == 200 and (doc.get("items") or []) == [] and doc.get("cursor") is None
+          and (doc.get("watch") or {}).get("status") == "timeout" and 1.5 <= dt < 6,
+          f"elapsed={dt:.2f}s {str(doc)[:200]}")
+
+    # ── §3.2.2: nothing to park on is answered at once, not after 55s ──
+    t0 = time.time()
+    code, doc = get(stream_url("feed", "human-nobody", wait=5, expand="true"))
+    dt = time.time() - t0
+    check("feed with an empty key set returns immediately (watch.status=no_streams)",
+          code == 200 and (doc.get("items") or []) == [] and dt < 2
+          and (doc.get("watch") or {}).get("status") == "no_streams",
+          f"elapsed={dt:.2f}s {str(doc)[:200]}")
+
+    # ── §5.5: the server half of cursor integrity ──
+    scratch = BUCKETS / ORG / f"{SLUG}-{me}" / "drafts"
+    scratch.mkdir(parents=True, exist_ok=True)
+    (scratch / "cursor-pin.md").write_text(
+        "---\ntype: note\nfilename: 99999999-235959-999_zzz.md\n---\n"
+        "a frontmatter key that would pin every watcher's cursor past all future mail\n")
+    code, rej = req(f"{API}/v1/messages",
+                    {"source": f"hf://buckets/{ORG}/{SLUG}-{me}/drafts/cursor-pin.md"})
+    check("disallowed frontmatter key rejected (400 INVALID_FRONTMATTER, names the key)",
+          code == 400 and rej["error"]["code"] == "INVALID_FRONTMATTER"
+          and "'filename'" in rej["error"]["message"], f"{code} {rej}")
+
+    # ── §4.5: the digest answers "am I behind?" and "is anyone watching?" ──
+    code, newest = req(f"{API}/v1/updates?as={me}&limit=1&order=desc")
+    code, dg = req(f"{API}/v1/digest?as={me}")
+    up = dg.get("updates") or {}
+    code, dg_caught = req(f"{API}/v1/digest?as={me}&after={up.get('newest')}")
+    check("digest updates block: unread is cursor-aware, newest matches the stream",
+          up.get("unread", 0) > 0 and up.get("newest") == newest.get("cursor")
+          and (dg_caught.get("updates") or {}).get("unread") == 0,
+          f"{up} vs stream cursor {newest.get('cursor')} / after= {dg_caught.get('updates')}")
+    watching = dg.get("watching") or {}
+    check("digest watching block is live right after a parked poll",
+          watching.get("mode") == "updates" and 0 <= watching.get("last_poll_age_s", -1) < 120,
+          str(dg.get("watching")))
+    levels = {c["name"]: c.get("notify") for c in (dg["channels"].get("subscribed") or [])}
+    check("digest reports each membership's notify level",
+          levels.get(ch) == "all" and levels.get("eval-harness") == "mentions", str(levels))
+    # A handle no wait>0 poll has ever named (human-nobody above parked a feed
+    # poll, so it is legitimately "watched" and would not prove anything).
+    code, nobody = req(f"{API}/v1/digest?as=human-unwatched")
+    check("digest watching is null for a handle nobody has ever watched",
+          code == 200 and nobody.get("watching") is None, str(nobody.get("watching")))
+
+    # ── §4.6: the client is served by the server it talks to ──
+    code, body, ctype = raw_get(f"{API}/v1/watch.sh")
+    check("GET /v1/watch.sh serves the client script (200, shell-shaped, matches disk)",
+          code == 200 and body.startswith("#!/bin/sh") and len(body) > 4000
+          and "x-shellscript" in ctype and body == WATCH_SH.read_text(),
+          f"{code} {ctype} {len(body)}B")
+
+    watch_client_flows(me, them)
+
+
+def watch_client_flows(me: str, them: str) -> None:
+    """collab_watch.sh (§5) driven exactly as an agent's harness would, against
+    the live stack. Every run gets a temp COLLAB_WATCH_DIR, so nothing touches
+    $HOME and the runs leave no state behind."""
+    print("client — collab_watch.sh end-to-end")
+    tmp = Path(tempfile.mkdtemp(prefix="collab-watch-smoke-"))
+    try:
+        st = tmp / "state"
+        cursor_file = st / "cursor.updates"
+
+        # Cold start: baseline the newest existing filename WITHOUT printing it,
+        # then time out cleanly — a fresh watcher must never dump history.
+        r = watch_run(st, me, "--max-wait", "2", wait="1", timeout=30)
+        base = cursor_file.read_text().strip() if cursor_file.exists() else ""
+        check("cold start baselines the cursor, prints nothing, exits 3 (clean no-mail)",
+              r.returncode == 3 and r.stdout == "" and base
+              and "cold start" in r.stderr, f"rc={r.returncode} out={r.stdout[:80]!r} cursor={base!r}")
+
+        # A real delivery: journal, print, advance.
+        p = watch_bg(st, me, "--max-wait", "12", wait="6")
+        time.sleep(1.0)
+        code, msg = req(f"{API}/v1/messages", {"agent_id": them, "body": f"@{me} client delivery"})
+        out, err = p.communicate(timeout=40)
+        journal = st / "delivered.jsonl"
+        check("a delivery prints the page, journals it, advances the cursor, exits 0",
+              p.returncode == 0 and msg["filename"] in out
+              and cursor_file.read_text().strip() == msg["filename"]
+              and journal.exists() and len(journal.read_text().strip().splitlines()) == 1,
+              f"rc={p.returncode} cursor={cursor_file.read_text().strip()} err={err[-160:]!r}")
+
+        # --peek reports what is pending and leaves the cursor exactly where it was.
+        code, pending = req(f"{API}/v1/messages", {"agent_id": them, "body": f"@{me} client peek probe"})
+        r = watch_run(st, me, "--peek", wait="1", timeout=30)
+        check("--peek reports pending mail (exit 10) without advancing the cursor",
+              r.returncode == 10 and pending["filename"] in r.stdout
+              and cursor_file.read_text().strip() == msg["filename"],
+              f"rc={r.returncode} cursor={cursor_file.read_text().strip()}")
+
+        r = watch_run(st, me, "--status", wait="1", timeout=30)
+        check("--status reports BEHIND with the unread count (exit 10)",
+              r.returncode == 10 and "STATUS=BEHIND" in r.stdout and "UNREAD=1" in r.stdout,
+              f"rc={r.returncode} {r.stdout.strip()!r}")
+
+        r = watch_run(st, me, "--max-wait", "5", wait="2", timeout=40)
+        check("the next run drains the pending page and moves the cursor to it",
+              r.returncode == 0 and cursor_file.read_text().strip() == pending["filename"],
+              f"rc={r.returncode} cursor={cursor_file.read_text().strip()}")
+
+        # A live watcher: --status can see it, and a second one must not share
+        # its cursor file (the eq2 double-delivery failure).
+        p = watch_bg(st, me, "--max-wait", "6", wait="6")
+        time.sleep(1.5)
+        r = watch_run(st, me, "--status", wait="6", timeout=30)
+        check("--status reports OK (exit 0) while a watcher holds the lock and is caught up",
+              r.returncode == 0 and "STATUS=OK" in r.stdout and f"PID={p.pid}" in r.stdout,
+              f"rc={r.returncode} {r.stdout.strip()!r}")
+        r = watch_run(st, me, "--max-wait", "2", wait="6", timeout=30)
+        check("a second watcher on the same state dir exits 5 naming the holder's pid",
+              r.returncode == 5 and "another watcher" in r.stderr and str(p.pid) in r.stderr,
+              f"rc={r.returncode} {r.stderr.strip()[-160:]!r}")
+        out, err = p.communicate(timeout=40)
+        check("the bounded watcher exits 3 on its own and releases the lock",
+              p.returncode == 3 and not (st / "lock").exists(), f"rc={p.returncode}")
+        r = watch_run(st, me, "--status", wait="1", timeout=30)
+        check("--status reports NO_WATCHER (exit 11) once the watcher is gone",
+              r.returncode == 11 and "STATUS=NO_WATCHER" in r.stdout,
+              f"rc={r.returncode} {r.stdout.strip()!r}")
+
+        # A typo'd handle is not a transient condition: fail fast, print the body.
+        r = watch_run(tmp / "bogus", "no-such-agent", "--max-wait", "3", wait="1", timeout=30)
+        check("a bogus handle fails fast (exit 1) printing the server's error body",
+              r.returncode == 1 and "NOT_REGISTERED" in r.stderr and r.stdout == "",
+              f"rc={r.returncode} {r.stderr.strip()[-160:]!r}")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> None:
     t0 = time.time()
     backend_agent_flows()
     dashboard_flows()
+    watch_flows()
     dt = time.time() - t0
     print(f"\n{_n - len(failures)}/{_n} checks passed in {dt:.1f}s")
     if failures:

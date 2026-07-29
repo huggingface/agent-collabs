@@ -30,7 +30,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Callable
 
 from app.config import Settings
@@ -42,6 +42,7 @@ from app.naming import (
     VERIFICATION_STATUS_PATH,
     channel_readme_path,
 )
+from app.validation import NOTIFY_ALL, NOTIFY_MENTIONS, stored_notify_level
 
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,10 @@ class Record:
     body: str
     size: int
     parse_error: bool = False
+    # Why this record is in the caller's unified watch stream; set only by
+    # ``updates_records`` (WATCH_DESIGN.md §4.2) and carried through the list
+    # grammar into the expanded item. Every other view leaves it None.
+    reasons: list[str] | None = None
 
 
 @dataclass
@@ -324,6 +329,67 @@ class ReadModel:
                 if (m := _CHANNEL_MEMBER_RE.match(e.rel_path))
                 and m.group(2) == handle
             }
+        )
+
+    def channel_notify_levels(self, handle: str) -> dict[str, str]:
+        """``{channel: notify level}`` for every channel the handle is a member
+        of, name-sorted. ``all`` when the marker carries ``notify: all``,
+        ``mentions`` otherwise — an absent or unrecognised value reads as the
+        quiet default, so every pre-existing (and backfilled) membership is
+        correct without a migration.
+
+        The sibling ``channel_subscriptions`` answers membership from marker
+        *paths* alone at zero content reads; levels need marker *content*, so
+        this costs one read per marker — resolved through the same
+        hash-keyed content cache as every other record, so a steady state
+        downloads nothing. Callers that only need membership keep the free
+        path."""
+        markers: dict[str, str] = {}
+        for e in self.listing(CHANNELS_FOLDER):
+            m = _CHANNEL_MEMBER_RE.match(e.rel_path)
+            if m and m.group(2) == handle:
+                markers[e.rel_path] = m.group(1)
+        recs = self.records_for(CHANNELS_FOLDER, list(markers))
+        levels: dict[str, str] = {}
+        for path, name in markers.items():
+            rec = recs.get(path)
+            levels[name] = (
+                stored_notify_level(rec.frontmatter) if rec else NOTIFY_MENTIONS
+            )
+        return dict(sorted(levels.items()))
+
+    def updates_records(self, handle: str) -> list[Record]:
+        """The handle's unified watch stream (WATCH_DESIGN.md §4.2): its inbox
+        (mentions/refs wherever they were posted, plus organizer broadcasts)
+        UNION the full traffic of only those channels it has flipped to
+        ``notify: all``. Channels left at the quiet default contribute nothing
+        here — their @mentions still arrive via the inbox side.
+
+        Deduped by filename: a channel post that also @mentions you exists twice
+        in the bucket (the channel copy and the inbox fan-out copy) and must be
+        delivered exactly once, carrying BOTH reasons. Sorted by
+        (filename, path) like ``channel_feed_records``, so one filename cursor
+        covers the whole union — stamps are server-issued and per-author
+        monotonic, which makes filenames globally unique and lexical order
+        chronological order."""
+        reasons: dict[str, list[str]] = {}
+        by_name: dict[str, Record] = {}
+        for r in self.inbox_records(handle):
+            by_name[r.filename] = r
+            # Provenance is the path: a broadcast is the one shared copy under
+            # broadcasts/, everything else got here by @mention or refs.
+            reasons[r.filename] = [
+                "broadcast" if r.path.startswith(f"{BROADCASTS_FOLDER}/") else "mention"
+            ]
+        for name, level in self.channel_notify_levels(handle).items():
+            if level != NOTIFY_ALL:
+                continue
+            for r in self.channel_message_records(name):
+                by_name.setdefault(r.filename, r)
+                reasons.setdefault(r.filename, []).append(f"channel:{name}")
+        return sorted(
+            (replace(r, reasons=reasons[fn]) for fn, r in by_name.items()),
+            key=lambda r: (r.filename, r.path),
         )
 
     def channel_feed_records(self, handle: str) -> list[Record]:

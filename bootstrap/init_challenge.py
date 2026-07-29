@@ -245,7 +245,12 @@ def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
     src = REPO_ROOT / "dashboard"
     with tempfile.TemporaryDirectory() as td:
         dst = Path(td) / "dashboard"
-        shutil.copytree(src, dst, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        # Local dev artefacts are on disk regardless of .gitignore; a copied venv
+        # would be uploaded to the Space (see the backend upload below).
+        shutil.copytree(
+            src, dst,
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv"),
+        )
         card = dst / "README.md"
         text = card.read_text().replace(
             "hf_oauth_authorized_org: REPLACED_BY_BOOTSTRAP",
@@ -352,9 +357,18 @@ def main() -> int:
     for repo_id in (sp["backend"], sp["dashboard"]):
         create_repo(repo_id, repo_type="space", space_sdk="docker", exist_ok=True, token=token)
     print(f"backend space   {sp['backend']}: uploading code")
+    # upload_folder walks the filesystem, not git, so local dev artefacts must be
+    # excluded explicitly — .gitignore does not protect the deploy. A venv here
+    # is the common case (testenv/up.sh and any local pytest run create one) and
+    # would otherwise ship hundreds of MB of site-packages into the Space.
+    # clients/ is deliberately NOT excluded: GET /v1/watch.sh serves
+    # clients/collab_watch.sh off disk and 404s without it.
     upload_folder(
         repo_id=sp["backend"], repo_type="space", folder_path=str(REPO_ROOT / "backend"),
-        ignore_patterns=["__pycache__/**", "*.pyc", ".pytest_cache/**"], token=token,
+        ignore_patterns=[
+            "__pycache__/**", "*.pyc", ".pytest_cache/**", ".venv/**", "venv/**",
+        ],
+        token=token,
     )
     print(f"dashboard space {sp['dashboard']}: uploading code (oauth org = {ch['org']})")
     upload_dashboard(sp["dashboard"], cfg, token)

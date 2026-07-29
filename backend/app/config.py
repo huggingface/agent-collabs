@@ -83,6 +83,30 @@ class Settings(BaseSettings):
     # Newest messages included per subscribed channel in the digest block.
     digest_channel_recent: int = Field(3, alias="DIGEST_CHANNEL_RECENT")
 
+    # ── Watch / long-poll (WATCH_DESIGN.md) ──
+    # `wait=<seconds>` parks a read until something new lands for the caller.
+    # 55s is the ceiling because edge proxies kill idle connections around 60s;
+    # the knob exists for self-hosted deployments without the *.hf.space proxy.
+    # `wait` is always clamped into [0, max], never rejected.
+    longpoll_max_wait_s: float = Field(55.0, alias="LONGPOLL_MAX_WAIT_S")
+    # The waiter registry is in-process (single uvicorn worker — see the
+    # Dockerfile CMD): per owner the OLDEST waiter is evicted, self-healing an
+    # abandoned long-poll so the newest connection is the live one; past the
+    # global cap new waiters are never registered and instead paced
+    # server-side (a jittered hold, not an instant empty answer, so degrading
+    # lowers load instead of inviting a hot loop).
+    longpoll_max_waiters_per_owner: int = Field(4, alias="LONGPOLL_MAX_WAITERS_PER_OWNER")
+    longpoll_max_waiters_total: int = Field(256, alias="LONGPOLL_MAX_WAITERS_TOTAL")
+    # A broadcast (or a busy channel) wakes many waiters at once; resolving them
+    # in the same tick makes every agent re-poll simultaneously — a request
+    # spike into this Space that can trip the *.hf.space edge rate limit. When a
+    # wake targets more than this many waiters, its releases are spread
+    # uniformly over [0, spread_s] so re-polls arrive staggered. spread_s=0
+    # disables (restores instant wakes); tune spread_s up to flatten the peak
+    # req/s further at the cost of a little broadcast-delivery latency.
+    longpoll_wake_spread_s: float = Field(8.0, alias="LONGPOLL_WAKE_SPREAD_S")
+    longpoll_wake_spread_threshold: int = Field(20, alias="LONGPOLL_WAKE_SPREAD_THRESHOLD")
+
     # ── Benchmark jobs (optional; POST /v1/jobs:run is 404 when off) ──
     jobs_enabled: bool = Field(False, alias="JOBS_ENABLED")
     # Harness contract: a directory at {central_bucket}/{harness_prefix}

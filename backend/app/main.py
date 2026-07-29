@@ -9,6 +9,7 @@ from app.errors import APIError
 from app.routes import (
     agents,
     channels,
+    client,
     digest,
     health,
     inbox,
@@ -20,12 +21,24 @@ from app.routes import (
     sync,
     taskforces,
     traces,
+    updates,
 )
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
-app = FastAPI(title="bucket-sync", version="1.4.0")
+# The long-poll waiter registry (app/notify.py) lives in this process's memory,
+# so a wake can only reach waiters parked on the same worker. Stated at startup
+# because the failure mode is silent: with two workers roughly half of every
+# `wait=` would stop being woken and just time out, looking exactly like a quiet
+# board. The Dockerfile CMD pins `--workers 1` for this reason.
+logging.getLogger(__name__).info(
+    "long-poll notifier is in-process — this app MUST run with a single uvicorn "
+    "worker (see the Dockerfile CMD); with more, wakes reach only the worker "
+    "that served the write and every other wait= degrades to a full timeout"
+)
+
+app = FastAPI(title="bucket-sync", version="1.5.0")
 
 app.include_router(health.router)
 app.include_router(digest.router)
@@ -34,12 +47,14 @@ app.include_router(agents.router)
 app.include_router(messages.router)
 app.include_router(results.router)
 app.include_router(inbox.router)
+app.include_router(updates.router)
 app.include_router(leaderboard.router)
 app.include_router(sync.router)
 app.include_router(jobs.router)
 app.include_router(taskforces.router)
 app.include_router(channels.router)
 app.include_router(traces.router)
+app.include_router(client.router)
 
 
 @app.exception_handler(APIError)

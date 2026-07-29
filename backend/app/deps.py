@@ -8,6 +8,7 @@ from app.dedup import PromotionLRU
 from app.hub import HubClient
 from app.job_quota import DurableJobQuota
 from app.jobs import JobRunner
+from app.notify import Notifier
 from app.org_roles import OrgRoles
 from app.rate_limit import CompoundLimiter, TokenBucket
 from app.read_model import ReadModel
@@ -46,6 +47,21 @@ def get_read_model() -> ReadModel:
 
 
 @lru_cache
+def get_notifier() -> Notifier:
+    """The one in-process long-poll waiter registry (WATCH_DESIGN.md §3). It is
+    per-process by design, which is why the Dockerfile pins `--workers 1`: with
+    more workers a writer would wake only the waiters that happen to share its
+    worker and every other `wait=` would silently time out."""
+    s = get_settings()
+    return Notifier(
+        max_waiters_per_owner=s.longpoll_max_waiters_per_owner,
+        max_waiters_total=s.longpoll_max_waiters_total,
+        wake_spread_s=s.longpoll_wake_spread_s,
+        wake_spread_threshold=s.longpoll_wake_spread_threshold,
+    )
+
+
+@lru_cache
 def get_audit() -> AuditLogger:
     return AuditLogger(get_hub())
 
@@ -75,6 +91,7 @@ def get_verifier() -> Verifier:
         get_read_model(),
         get_verification_status(),
         get_job_runner(),
+        notifier=get_notifier(),
     )
 
 

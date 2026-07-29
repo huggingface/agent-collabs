@@ -118,3 +118,58 @@ def test_inbox_since_high_water_mark_polling(env):
     assert [m["body"].strip() for m in fresh["items"]] == ["new @agent-2"]
     # `matched` counts filter matches; the cursor only trims the page
     assert fresh["matched"] == 2
+
+
+# ── server-computed `cursor` (WATCH_DESIGN.md §4.4) ───────────────────
+
+
+def test_cursor_is_the_newest_filename_on_the_page(env):
+    """The client persists this verbatim instead of computing a maximum from
+    record content — which is what let a hostile `filename:` frontmatter key pin
+    every eq2 watcher's cursor past all future mail."""
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "one @agent-2"})
+    env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "two @agent-2"})
+
+    desc = env.client.get("/v1/inbox/agent-2").json()
+    newest = max(desc["items"])
+    assert desc["cursor"] == newest
+
+    # Independent of `order`: an ascending page reports the same newest name.
+    asc = env.client.get("/v1/inbox/agent-2?order=asc").json()
+    assert asc["cursor"] == newest
+    # ...and of `expand`.
+    exp = env.client.get("/v1/inbox/agent-2?expand=true").json()
+    assert exp["cursor"] == newest
+
+
+def test_cursor_is_null_on_an_empty_page(env):
+    """Null, not "" and not the previous value — an empty page must not move a
+    client's read position."""
+    seed_agent(env.hub, "agent-1")
+    data = env.client.get("/v1/inbox/agent-1").json()
+    assert data["items"] == [] and data["cursor"] is None
+
+
+def test_cursor_tracks_the_page_not_the_folder(env):
+    """With a limit, the cursor is the newest item the caller actually RECEIVED
+    — advancing past unseen messages would skip them silently."""
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    for i in range(3):
+        env.client.post(
+            "/v1/messages", json={"agent_id": "agent-1", "body": f"m{i} @agent-2"}
+        )
+    page = env.client.get("/v1/inbox/agent-2?order=asc&limit=2").json()
+    assert len(page["items"]) == 2
+    assert page["cursor"] == page["items"][-1]
+    # The third message is still unread and reachable from that cursor.
+    rest = env.client.get(f"/v1/inbox/agent-2?order=asc&after={page['cursor']}").json()
+    assert len(rest["items"]) == 1
+
+
+def test_no_watch_block_without_wait(env):
+    """A wait=0 caller's response shape is unchanged by this feature."""
+    seed_agent(env.hub, "agent-1")
+    assert env.client.get("/v1/inbox/agent-1").json()["watch"] is None

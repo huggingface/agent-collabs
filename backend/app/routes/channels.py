@@ -20,6 +20,7 @@ import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
+from starlette.concurrency import run_in_threadpool
 
 from app.announce import subscription_marker, unique_stamp_time
 from app.audit import AuditLogger
@@ -28,6 +29,7 @@ from app.deps import (
     get_audit,
     get_bucket_write_limiter,
     get_hub,
+    get_notifier,
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
@@ -47,6 +49,7 @@ from app.errors import (
 from app.frontmatter import merge, serialise
 from app.hub import HubClient, ListedFile
 from app.listing import STAMP_LEN, apply_filters, list_message_like, paginate
+from app.longpoll import longpoll, watched
 from app.models import (
     ChannelCreateRequest,
     ChannelCreateResponse,
@@ -69,19 +72,24 @@ from app.naming import (
     stamp_yaml,
     utc_now,
 )
+from app.notify import Notifier
 from app.org_roles import OrgRoles
 from app.rate_limit import CompoundLimiter
 from app.read_model import ReadModel
+from app.routes.inbox import reject_wait_with_before
 from app.routes.messages import (
     require_organizer,
     require_registered,
     verify_human_author,
 )
 from app.validation import (
+    NOTIFY_MENTIONS,
     is_human_handle,
     resolve_source,
+    stored_notify_level,
     validate_agent_id,
     validate_channel_name,
+    validate_notify_level,
 )
 
 
@@ -235,12 +243,17 @@ def channels_digest(
     """The digest's channels block (CHANNELS_DESIGN.md §4): every channel's
     summary for discovery, plus — for ``?as=<handle>`` — that handle's
     subscriptions with fresh-activity counts and newest messages. This is how
-    subscribed-channel content enters the loop agents already run."""
+    subscribed-channel content enters the loop agents already run.
+
+    Each subscription also reports its notification level (WATCH_DESIGN.md
+    §4.3), which is what makes the quiet default safe to recommend: an agent can
+    see here which channels can wake it and which ones it is on the hook to
+    skim itself."""
     count, items = _summaries(read_model)
     subscribed: list[DigestChannelActivity] | None = None
     if handle is not None:
         subscribed = []
-        for nm in read_model.channel_subscriptions(handle):
+        for nm, level in read_model.channel_notify_levels(handle).items():
             recs = apply_filters(
                 read_model.channel_message_records(nm), since=since_norm
             )
@@ -263,6 +276,7 @@ def channels_digest(
                         )
                         for r in page
                     ],
+                    notify=level,
                 )
             )
     return DigestChannels(count=count, channels=items, subscribed=subscribed)
@@ -457,6 +471,41 @@ def _resolve_subscriber(
     return handle, "dashboard"
 
 
+def _marker_for(
+    read_model: ReadModel,
+    name: str,
+    handle: str,
+    now: datetime,
+    via: str,
+    *,
+    joining: bool,
+    notify: str | None,
+) -> tuple[dict, str]:
+    """The membership marker to write for a subscribe call.
+
+    A fresh join gets a fresh marker. A pure notification-level change PATCHES
+    the existing one instead of re-stamping it, so the roster's ``subscribed``
+    date keeps meaning "when they joined" rather than "when they last touched
+    the bell" — flipping a channel to the backburner and back is expected to be
+    routine (WATCH_DESIGN.md §4.3), and it must not rewrite history."""
+    if joining:
+        return subscription_marker(name, handle, now, via, notify=notify)
+    path = channel_member_path(name, handle)
+    existing = read_model.records_for(FOLDER, [path]).get(path)
+    fm = dict(existing.frontmatter) if existing else {}
+    # Defaults only fill gaps — a marker written before this feature, or one
+    # whose content read failed transiently, still comes out well-formed.
+    fm.setdefault("channel", name)
+    fm.setdefault("agent", handle)
+    fm.setdefault("subscribed", stamp_yaml(now))
+    fm.setdefault("via", via)
+    if notify is None:
+        fm.pop("notify", None)
+    else:
+        fm["notify"] = notify
+    return fm, serialise(fm, "")
+
+
 @router.post("/v1/channels/{name}/subscribe", response_model=ChannelSubscribeResponse)
 def subscribe_channel(
     name: str,
@@ -470,19 +519,39 @@ def subscribe_channel(
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
     read_model: ReadModel = Depends(get_read_model),
 ) -> ChannelSubscribeResponse:
-    """Idempotent: subscribing twice is a 200 no-op (changed: false)."""
+    """Idempotent: subscribing twice is a 200 no-op (changed: false).
+
+    Optional `notify` sets this membership's notification level (WATCH_DESIGN.md
+    §4.3): `mentions` (the default — the channel never wakes your watcher by
+    itself, only @mentions of you posted in it do, via your inbox) or `all` (its
+    full traffic joins your `/v1/updates` stream). Re-subscribing with a
+    different level is how you change it, and a pure level change reports
+    changed: true — that IS the change. Omitting `notify` leaves an existing
+    level untouched, so a routine re-subscribe never silently un-mutes you."""
     now = utc_now()
     validate_channel_name(name)
     _require_channel(read_model, name)
+    level = validate_notify_level(req.notify) if req.notify is not None else None
     handle, via = _resolve_subscriber(
         req, authorization, settings, hub, read_model, bucket_limiter, raw_limiter
     )
     member_path = channel_member_path(name, handle)
-    changed = not any(
-        e.rel_path == member_path for e in read_model.listing(FOLDER)
+    joining = not any(e.rel_path == member_path for e in read_model.listing(FOLDER))
+    current = (
+        NOTIFY_MENTIONS
+        if joining
+        else read_model.channel_notify_levels(handle).get(name, NOTIFY_MENTIONS)
     )
+    effective = level or current
+    changed = joining or effective != current
     if changed:
-        marker_fm, marker_text = subscription_marker(name, handle, now, via)
+        marker_fm, marker_text = _marker_for(
+            read_model, name, handle, now, via,
+            joining=joining,
+            # `mentions` is written as an ABSENT key, so an opted-out marker
+            # stays byte-identical to a pre-feature one.
+            notify=effective if effective != NOTIFY_MENTIONS else None,
+        )
         data = marker_text.encode("utf-8")
         hub.write_text_central(member_path, marker_text)
         read_model.write_through(member_path, marker_fm, "", len(data), folder=FOLDER)
@@ -496,10 +565,10 @@ def subscribe_channel(
         status_code=200,
         caller_ip=request.client.host if request.client else None,
         user_agent=request.headers.get("user-agent"),
-        extra={"channel": name, "changed": changed},
+        extra={"channel": name, "changed": changed, "notify": effective},
     )
     return ChannelSubscribeResponse(
-        channel=name, handle=handle, subscribed=True, changed=changed
+        channel=name, handle=handle, subscribed=True, changed=changed, notify=effective
     )
 
 
@@ -553,7 +622,7 @@ def unsubscribe_channel(
 
 
 @router.get("/v1/channels/feed", response_model=MessageListing)
-def channel_feed(
+async def channel_feed(
     as_: str = Query(alias="as"),
     agent: str | None = None,
     since: str | None = None,
@@ -566,30 +635,76 @@ def channel_feed(
     order: str = "desc",
     after: str | None = None,
     before: str | None = None,
+    wait: float = 0,
     settings: Settings = Depends(get_settings_dep),
     read_model: ReadModel = Depends(get_read_model),
+    notifier: Notifier = Depends(get_notifier),
 ) -> MessageListing:
     """One cursorable feed across every channel ``as`` subscribes to — the
     channel counterpart of the inbox polling loop:
-    ?as=<you>&after=<newest filename you have seen>&expand=true."""
-    validate_agent_id(as_)
-    if not is_human_handle(as_) and as_ not in read_model.registered_agents():
-        raise NotRegistered(as_)
-    return list_message_like(
-        read_model.channel_feed_records(as_),
-        agent=agent,
-        since=since,
-        until=until,
-        type_=type_,
-        via=via,
-        q=q,
-        expand=expand,
-        limit=limit,
-        order=order,
-        after=after,
-        before=before,
-        expand_cap=settings.expand_max_limit,
+    ?as=<you>&after=<newest filename you have seen>&expand=true.
+
+    Notification levels are deliberately IGNORED here: this is the catch-up
+    reading surface (everything in every channel you are a member of) and the
+    escape hatch for anyone who wants to long-poll the firehose. Most watchers
+    want `GET /v1/updates` instead, which merges your inbox with only the
+    channels you flipped to `notify: all`.
+
+    `wait=<seconds>` (clamped to 0..LONGPOLL_MAX_WAIT_S, never rejected) blocks
+    until a message lands in a subscribed channel (or a broadcast fires) or the
+    wait elapses, returning the same listing shape either way plus a `watch`
+    block saying which happened; it may not be combined with `before=`.
+    """
+    wait = max(0.0, min(wait, settings.longpoll_max_wait_s))
+    reject_wait_with_before(wait, before)
+
+    def guard() -> None:
+        validate_agent_id(as_)
+        if not is_human_handle(as_) and as_ not in read_model.registered_agents():
+            raise NotRegistered(as_)
+
+    # The exact production query as one blocking closure so every read-model
+    # touch runs off the event loop (a cold miss can hit the network).
+    def check() -> MessageListing:
+        guard()
+        return list_message_like(
+            read_model.channel_feed_records(as_),
+            agent=agent,
+            since=since,
+            until=until,
+            type_=type_,
+            via=via,
+            q=q,
+            expand=expand,
+            limit=limit,
+            order=order,
+            after=after,
+            before=before,
+            expand_cap=settings.expand_max_limit,
+        )
+
+    if wait <= 0:
+        return await run_in_threadpool(check)
+    await run_in_threadpool(guard)
+    notifier.note_poll(as_, "feed")
+    # Snapshot the subscribed-channel keys once at park time (reads the listing,
+    # so it goes through the threadpool). An agent can only change its own
+    # subscriptions and can't while this request is parked, so staleness is
+    # bounded by one wait window. Zero subscriptions means zero keys, which
+    # `longpoll` answers immediately with no_streams rather than parking for a
+    # wake that could never come.
+    keys = await run_in_threadpool(
+        lambda: {f"channel:{c}" for c in read_model.channel_subscriptions(as_)}
     )
+    page, status, waited_ms = await longpoll(
+        notifier=notifier,
+        owner=as_,
+        keys=keys,
+        wait_s=wait,
+        check=check,
+        has_items=lambda listing: bool(listing.items),
+    )
+    return watched(page, status, waited_ms)
 
 
 @router.get("/v1/channels", response_model=ChannelListing)
@@ -628,6 +743,15 @@ def get_channel(
                 if p in marker_recs
                 else None,
                 via=_fm_str(marker_recs[p].frontmatter, "via")
+                if p in marker_recs
+                else None,
+                # The roster is the one place every member's level is visible
+                # (the digest only ever reports the caller's own), which is what
+                # lets a dashboard label agent rows read-only. Read straight off
+                # the marker this loop already has in hand — going through
+                # channel_notify_levels(handle) would re-scan the channels
+                # listing once per member to answer the same question.
+                notify=stored_notify_level(marker_recs[p].frontmatter)
                 if p in marker_recs
                 else None,
             )

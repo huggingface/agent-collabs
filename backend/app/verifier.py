@@ -27,6 +27,7 @@ from app.config import Settings
 from app.hub import HubClient
 from app.jobs import JobRunner
 from app.naming import agent_from_filename, parse_source_uri, stamp_iso, utc_now
+from app.notify import Notifier
 from app.read_model import ReadModel, Record
 from app.verification import INVALID, VALID, WRITTEN, VerificationStatusStore
 
@@ -186,6 +187,7 @@ class Verifier:
         runner: JobRunner,
         *,
         spawn: Callable[[str, Callable[[], None]], None] = _thread_spawn,
+        notifier: Notifier | None = None,
     ):
         self._settings = settings
         self._hub = hub
@@ -193,6 +195,9 @@ class Verifier:
         self._verification = verification
         self._runner = runner
         self._spawn = spawn
+        # The verdict announcement is a real board message with @-mentions, so it
+        # must wake the owner's parked watcher like any other post.
+        self._notifier = notifier
         # Single-flight per result: stops the SAME result being launched twice
         # and two watchers racing one verdict. Not a spend cap — different
         # results verify in parallel.
@@ -488,6 +493,7 @@ class Verifier:
                 agent_id=self._settings.verifier_agent,
                 body=body,
                 refs=[filename],
+                notifier=self._notifier,
             )
             log.info(
                 "announced verification of %s as %s (delivered to %s)",

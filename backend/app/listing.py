@@ -176,11 +176,25 @@ def list_message_like(
     items: list[str] | list[MessageRecord]
     if expand:
         items = [
-            MessageRecord(filename=r.filename, frontmatter=r.frontmatter, body=r.body)
+            MessageRecord(
+                filename=r.filename,
+                frontmatter=r.frontmatter,
+                body=r.body,
+                reasons=r.reasons,
+            )
             for r in page
         ]
     else:
         items = [r.filename for r in page]
     return MessageListing(
-        count=len(records), matched=len(filtered), items=items, next=next_cursor
+        count=len(records),
+        matched=len(filtered),
+        items=items,
+        next=next_cursor,
+        # The cursor to persist verbatim (WATCH_DESIGN.md §4.4): the newest
+        # filename ON THIS PAGE, computed here so no client ever has to scan
+        # author-controlled record content for a maximum. Independent of
+        # `order` (asc pages end on it, desc pages start on it) and of `next`
+        # (which is a pagination handle, not a read position).
+        cursor=max((r.filename for r in page), default=None),
     )

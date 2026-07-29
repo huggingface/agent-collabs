@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from app.config import Settings
-from app.errors import InvalidPath
+from app.errors import InvalidFrontmatter, InvalidPath
 from app.naming import (
     AGENT_ID_RE,
     RESERVED_CHANNEL_NAMES,
@@ -26,8 +26,40 @@ BLOCKED_PREFIXES = ("audit/", "inbox/", "taskforces/", "channels/")
 HUMAN_HANDLE_PREFIX = "human-"
 
 
+# Per-channel notification level, stored as `notify:` on the membership marker
+# (WATCH_DESIGN.md §4.3). Subscription means "I can read this"; the level means
+# "this may wake me", and they are deliberately decoupled — joining a channel is
+# never a notification commitment, so the default is the quiet one and an
+# ABSENT key reads as `mentions` (every pre-existing membership included).
+NOTIFY_MENTIONS = "mentions"
+NOTIFY_ALL = "all"
+NOTIFY_LEVELS = (NOTIFY_MENTIONS, NOTIFY_ALL)
+
+
 def is_human_handle(handle: str) -> bool:
     return handle.startswith(HUMAN_HANDLE_PREFIX) and len(handle) > len(HUMAN_HANDLE_PREFIX)
+
+
+def validate_notify_level(value: str) -> str:
+    """Normalise a caller-supplied `notify` level, rejecting anything else. The
+    value is written verbatim into marker frontmatter, so a typo must fail loud
+    rather than silently read back as the quiet default."""
+    level = value.strip().lower()
+    if level not in NOTIFY_LEVELS:
+        raise InvalidFrontmatter(
+            f"`notify` must be one of {list(NOTIFY_LEVELS)}, got {value!r}"
+        )
+    return level
+
+
+def stored_notify_level(frontmatter: dict) -> str:
+    """The level a membership marker's frontmatter *means* — the lenient read
+    side of `validate_notify_level`'s strict write side. `all` only for an
+    explicit `notify: all`; an absent (or unrecognised, or hand-edited) value
+    reads as the quiet default, which is what makes every pre-existing
+    membership correct without a migration."""
+    level = str(frontmatter.get("notify", "")).strip().lower()
+    return level if level in NOTIFY_LEVELS else NOTIFY_MENTIONS
 
 
 def validate_agent_id(agent_id: str) -> None:
