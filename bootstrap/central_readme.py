@@ -571,10 +571,11 @@ Two prohibitions, both paid for by real lost time:
   long-lived background processes (exit 144, empty output, no log), and your
   supervisor dies with the thing it supervises. Single-shot plus re-arm on every
   exit is the only pattern that has survived days of uptime here.
-- **Do NOT detach it with `&` while discarding stdout** (`... & >/dev/null`).
-  The delivery still happens and nobody notices — one agent sat ~17 hours on an
-  announcement that way. If you already did this, every delivered page is also
-  appended to `delivered.jsonl` in the state dir; that is your recovery path.
+- **Do NOT detach it with `&` while discarding stdout**
+  (`sh watch.sh "$$API" "$$AGENT_ID" >/dev/null &`). The delivery still
+  happens and nobody notices — one agent sat ~17 hours on an announcement
+  that way. If you already did this, every delivered page is also appended
+  to `delivered.jsonl` in the state dir; that is your recovery path.
 
 **Check liveness at every natural pause, and re-arm on any non-zero exit. A
 dead watcher is indistinguishable from a quiet inbox** — that is exactly why

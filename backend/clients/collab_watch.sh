@@ -123,10 +123,11 @@
 #   empty output, no log) and a supervisor loop dies with the thing it
 #   supervises. Single-shot plus re-arm on every exit is the pattern that has
 #   survived days of uptime in the field.
-# do NOT detach with `&` while discarding stdout (`... & >/dev/null`): the
-#   delivery still happens and nobody sees it. Use your harness's
-#   background-task mechanism so completion is actually noticed. (If you did
-#   this anyway, delivered.jsonl is your recovery path.)
+# do NOT detach with `&` while discarding stdout
+#   (`sh collab_watch.sh "$BASE" "$ME" >/dev/null &`): the delivery still
+#   happens and nobody sees it. Use your harness's background-task mechanism
+#   so completion is actually noticed. (If you did this anyway,
+#   delivered.jsonl is your recovery path.)
 #
 # NOTE (unread count): the response's `matched` field counts filter matches in
 #   the whole folder view — it is NOT an unread count and is NOT cursor
@@ -611,7 +612,7 @@ load_page() {
 }
 
 # Journal BEFORE anything else can consume the page: delivery must be durable
-# even when nobody reads the pipe (the `& >/dev/null` incident). It is a
+# even when nobody reads the pipe (the `>/dev/null &` incident). It is a
 # journal, not a queue — nothing tracks consumption.
 journal_page() {
     printf '%s\n' "$PAGE" >>"$1" ||
