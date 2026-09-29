@@ -48,8 +48,8 @@ under ANY `python3` — no `pip install`. The frontmatter is emitted as JSON
 (which is valid YAML, so the backend parses it identically) and the upload
 shells out to the `hf` CLI (which you already use for `hf auth login`). Org/slug
 are auto-discovered from the backend's `GET /v1`, so you only need `--backend`
-(or `COLLAB_BACKEND`) and your `--agent-id`. The per-harness adapters are inlined
-below; keep them in sync with the verified recipes (memory:
+(or `COLLAB_BACKEND`, else `API`) and your `--agent-id`. The per-harness
+adapters are inlined below; keep them in sync with the verified recipes (memory:
 cc-codex-trace-metric-extraction).
 """
 from __future__ import annotations
@@ -69,8 +69,9 @@ import urllib.request
 from pathlib import Path
 
 
-ADAPTER_VERSION = 1
+ADAPTER_VERSION = 2  # v2: Claude Code usage deduped per message.id (v1 over-counted)
 REDACTOR_VERSION = 2
+# Keep in sync with KNOWN_FULL_HARNESSES in backend/app/trace_stats.py.
 KNOWN_HARNESSES = ("claude-code", "codex")
 PRIVACY_LEVELS = ("secrets", "balanced", "strict")
 
@@ -100,11 +101,14 @@ def _int(v) -> int | None:
 
 
 def adapter_claude_code(log_path: Path) -> dict:
-    """~/.claude/projects/<slug>/<session_id>.jsonl — per-response usage is SUMMED."""
-    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
-    saw_usage = False
+    """$CLAUDE_CONFIG_DIR (default ~/.claude)/projects/<slug>/<session_id>.jsonl.
+
+    Claude Code writes one `assistant` line per content block, repeating the
+    API response's message.id and usage — so usage is kept per message.id
+    (last write wins) and summed once; tool calls are deduped by tool_use id."""
+    responses: dict = {}  # message.id (or a per-line key if absent) -> usage
     tools: dict[str, int] = {}
-    api_requests = 0
+    seen_tools: set = set()
     model = None
     session_id = log_path.stem
     first_ts = last_ts = None
@@ -118,21 +122,29 @@ def adapter_claude_code(log_path: Path) -> dict:
             session_id = rec["sessionId"]
         if rec.get("type") != "assistant":
             continue
-        api_requests += 1
         msg = rec.get("message") or {}
         if msg.get("model"):
             model = msg["model"]
-        u = msg.get("usage") or {}
+        key = msg.get("id") or ("line", len(responses))
+        responses[key] = msg.get("usage") or responses.get(key) or {}
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                if block.get("id"):
+                    if block["id"] in seen_tools:
+                        continue
+                    seen_tools.add(block["id"])
+                name = block.get("name") or "?"
+                tools[name] = tools.get(name, 0) + 1
+
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
+    saw_usage = False
+    for u in responses.values():
         if u:
             saw_usage = True
             usage["input_tokens"] += _int(u.get("input_tokens")) or 0
             usage["output_tokens"] += _int(u.get("output_tokens")) or 0
             usage["cache_read_tokens"] += _int(u.get("cache_read_input_tokens")) or 0
             usage["cache_creation_tokens"] += _int(u.get("cache_creation_input_tokens")) or 0
-        for block in msg.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name") or "?"
-                tools[name] = tools.get(name, 0) + 1
 
     fields: dict = {
         "harness": "claude-code",
@@ -141,7 +153,7 @@ def adapter_claude_code(log_path: Path) -> dict:
         "started_at": first_ts,
         "ended_at": last_ts,
         "activity": {"tool_calls": sum(tools.values()), "tool_calls_by_name": tools},
-        "extensions": {"api_requests": api_requests},
+        "extensions": {"api_requests": len(responses)},
     }
     if saw_usage:
         usage["total_tokens"] = sum(usage.values())
@@ -153,7 +165,7 @@ _CODEX_TOOL_TYPES = ("function_call", "custom_tool_call", "local_shell_call", "w
 
 
 def adapter_codex(log_path: Path) -> dict:
-    """~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl — token_count is CUMULATIVE
+    """$CODEX_HOME (default ~/.codex)/sessions/YYYY/MM/DD/rollout-*.jsonl — token_count is CUMULATIVE
     (take the last); dedupe tool calls by call_id (MCP appears twice)."""
     last_usage = None
     tools: dict[str, int] = {}
@@ -241,9 +253,17 @@ def build_fields(harness: str, log_path: Path) -> dict:
     return fn(log_path) if fn else adapter_minimal(log_path, harness)
 
 
+def _claude_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+
+
 def _cc_project_dir(cwd: str) -> Path:
     slug = re.sub(r"[/._]", "-", os.path.abspath(cwd))
-    return Path.home() / ".claude" / "projects" / slug
+    return _claude_dir() / "projects" / slug
 
 
 def _latest(paths: list[Path]) -> Path | None:
@@ -257,7 +277,7 @@ def _detect_claude_code(cwd: str) -> Path | None:
 
 
 def _codex_logs() -> list[Path]:
-    codex_root = Path.home() / ".codex" / "sessions"
+    codex_root = _codex_home() / "sessions"
     return sorted(
         [Path(p) for p in glob.glob(str(codex_root / "**" / "rollout-*.jsonl"), recursive=True)],
         key=lambda p: p.stat().st_mtime if p.is_file() else 0,
@@ -268,7 +288,8 @@ def _codex_logs() -> list[Path]:
 def _mentions_cwd(value, cwd: str) -> bool:
     cwd_abs = os.path.abspath(cwd)
     if isinstance(value, str):
-        if cwd_abs in value:
+        # Path boundary: /work/proj must not match /work/proj2 or /work/proj-x.
+        if re.search(re.escape(cwd_abs) + r"(?![\w.-])", value):
             return True
         try:
             return os.path.abspath(os.path.expanduser(value)) == cwd_abs
@@ -299,10 +320,12 @@ def _detect_codex(cwd: str) -> tuple[Path | None, bool]:
 
 
 def _infer_harness(log_path: Path) -> str | None:
-    s = str(log_path)
-    if "/.codex/sessions/" in s or log_path.name.startswith("rollout-"):
+    s = str(log_path.expanduser().resolve())
+    codex_root = str(_codex_home().resolve() / "sessions") + os.sep
+    claude_root = str(_claude_dir().resolve() / "projects") + os.sep
+    if "/.codex/sessions/" in s or s.startswith(codex_root) or log_path.name.startswith("rollout-"):
         return "codex"
-    if "/.claude/projects/" in s:
+    if "/.claude/projects/" in s or s.startswith(claude_root):
         return "claude-code"
     return None
 
@@ -316,6 +339,8 @@ def _running_harness() -> tuple[str | None, str | None]:
     - Claude Code sets CLAUDE_CODE_SESSION_ID (the exact session) + CLAUDECODE=1.
     - Codex sets CODEX_SANDBOX* in its (default) sandboxed exec but exposes NO
       session id — so we know it's Codex, but still locate the rollout by cwd.
+      (CODEX_HOME only relocates the logs; it is often exported globally, so
+      it is NOT a marker.)
     """
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if sid or os.environ.get("CLAUDECODE"):
@@ -822,23 +847,23 @@ def _confirm_or_exit(
     raw: bool,
     privacy: str,
 ) -> None:
+    # Stats-only shares carry nothing sensitive (just counts): never block them.
+    if share != "full" or yes:
+        return
     reasons = []
     if uncertain:
         reasons.append("Could not pin the exact invoking session — selection fell back to "
                        "the newest log for this directory; confirm it is the right one.")
-    if share == "full":
-        if raw:
-            reasons.append(
-                "Full --raw sharing uploads the UNREDACTED native session log "
-                "to your org-readable scratch bucket."
-            )
-        else:
-            reasons.append(
-                f"Full sharing uploads the {privacy}-redacted native session log "
-                "to your org-readable scratch bucket."
-            )
-    if not reasons or yes:
-        return
+    if raw:
+        reasons.append(
+            "Full --raw sharing uploads the UNREDACTED native session log "
+            "to your org-readable scratch bucket."
+        )
+    else:
+        reasons.append(
+            f"Full sharing uploads the {privacy}-redacted native session log "
+            "to your org-readable scratch bucket."
+        )
     print("\nconfirmation required:")
     for reason in reasons:
         print(f"- {reason}")
@@ -881,10 +906,17 @@ def _hf_cp(local: str, dest_uri: str) -> None:
         sys.exit(f"`hf buckets cp` failed [{r.returncode}]:\n{(r.stderr or r.stdout).strip()}")
 
 
+def _harness_arg(value: str) -> str:
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", value):
+        raise argparse.ArgumentTypeError("must be a lowercase slug, e.g. claude-code, codex, cursor")
+    return value
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Share a session's stats / trace with the collaboration.")
-    ap.add_argument("--harness", choices=[*KNOWN_HARNESSES, "auto"], default="auto",
-                    help="default: auto-detect from this cwd (Claude Code, then Codex)")
+    ap.add_argument("--harness", type=_harness_arg, default="auto",
+                    help="claude-code, codex, or any other harness slug (needs --transcript; "
+                         "stats will be partial). Default: auto-detect from the environment/cwd")
     ap.add_argument("--transcript", help="explicit native session log path (else: detected)")
     ap.add_argument("--session-id", help="override the manifest/dest session id")
     ap.add_argument("--full", action="store_true", help="also upload the redacted native session log")
@@ -899,11 +931,11 @@ def main() -> int:
     ap.add_argument("--agent-id", default=os.environ.get("AGENT_ID"), help="your registered agent_id")
     ap.add_argument("--org", default=os.environ.get("ORG"), help="challenge org")
     ap.add_argument("--slug", default=os.environ.get("COLLAB_SLUG"), help="challenge slug")
-    ap.add_argument("--backend", default=os.environ.get("COLLAB_BACKEND"),
+    ap.add_argument("--backend", default=os.environ.get("COLLAB_BACKEND") or os.environ.get("API"),
                     help="the backend Space base URL, e.g. https://<org>-<slug>-bucket-sync.hf.space")
     ap.add_argument("--upload-only", action="store_true",
                     help="write the bundle to your scratch bucket and skip POST /v1/traces")
-    ap.add_argument("--yes", action="store_true", help="confirm --full/global Codex fallback in non-interactive use")
+    ap.add_argument("--yes", action="store_true", help="confirm --full in non-interactive use")
     ap.add_argument("--dry-run", action="store_true", help="print the plan + manifest; touch nothing")
     args = ap.parse_args()
     if args.full and args.stats_only:
@@ -934,6 +966,8 @@ def main() -> int:
         harness = args.harness if args.harness != "auto" else _infer_harness(log_path)
         if harness is None:
             sys.exit("could not infer harness from --transcript; pass --harness")
+    elif args.harness not in (*KNOWN_HARNESSES, "auto"):
+        sys.exit(f"no adapter for --harness {args.harness}; pass --transcript <path> to its session log")
     else:
         harness, log_path, uncertain = detect(os.getcwd(), args.harness)
 
@@ -1009,8 +1043,8 @@ def main() -> int:
     print(f"tool_calls : {activity.get('tool_calls', 'unknown')}")
     if harness not in KNOWN_HARNESSES:
         print(
-            f"note       : '{harness}' has no adapter — shipping a minimal "
-            "manifest (partial)"
+            f"note       : '{harness}' has no adapter — stats will be partial "
+            "(minimal manifest)"
             + (" + native log" if share == "full" else "")
         )
 
@@ -1042,7 +1076,7 @@ def main() -> int:
         (args.slug, "--slug/COLLAB_SLUG"),
     ]
     if promote:
-        required.append((args.backend, "--backend/COLLAB_BACKEND"))
+        required.append((args.backend, "--backend/COLLAB_BACKEND/API"))
     for req, name in required:
         if not req:
             sys.exit(f"missing {name}")
@@ -1090,13 +1124,13 @@ def main() -> int:
         detail = (e.read().decode(errors="replace") if isinstance(e, urllib.error.HTTPError)
                   else str(getattr(e, "reason", e)))
         # The bundle is already in the bucket — a promote failure is partial,
-        # not total. Make that legible and exit 0 (the upload succeeded).
+        # not total. Make that legible, but exit non-zero: the share is incomplete.
         print(f"\n✓ bundle uploaded to {source}")
         print(f"⚠ backend promotion failed [{code}]: {detail.strip()[:200]}")
         print("  your trace is safe in your scratch bucket. Re-run with "
               "--upload-only to skip promotion, or tell the organizers if "
               "POST /v1/traces should be available on this collab.")
-        return 0
+        return 1
     print(f"promoted: {promoted_text}")
     try:
         promoted = json.loads(promoted_text)
