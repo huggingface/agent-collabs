@@ -129,6 +129,50 @@ class ReadModel:
         self._local: dict[str, tuple[dict, str, int, float]] = {}
         self._verification: tuple[str, dict[str, str]] | None = None
         self._content_lock = threading.Lock()
+        # Set once ``warm_up`` has filled every startup folder (/v1/healthz).
+        self.warm = False
+
+    # ───────────────────────── warm-up & gauges ─────────────────────────
+
+    def warm_up(self, folders: list[str], retry_s: float = 5.0) -> None:
+        """Fill listing + content caches for ``folders`` so the reconnect
+        storm after a restart hits a warm cache. A folder that fails is
+        retried every ``retry_s`` until it fills; ``warm`` flips only then."""
+        pending = list(folders)
+        while True:
+            pending = [f for f in pending if not self._fill(f)]
+            if not pending:
+                break
+            time.sleep(retry_s)
+        self.warm = True
+        log.info("read model warm: %s", ", ".join(folders))
+
+    def _fill(self, folder: str) -> bool:
+        try:
+            self.records(folder)
+            return True
+        except Exception as e:
+            log.warning("warm-up of %s failed; will retry: %s", folder, e)
+            return False
+
+    def stats(self) -> dict[str, Any]:
+        """Gauges for /v1/healthz. ``listing_errors`` names every folder whose
+        latest listing failed (it is being served from cache, or 503s if it
+        never listed), so a "lost message" report can be traced to a stuck
+        folder."""
+        now = self._clock()
+        with self._folders_lock:
+            folders = dict(self._folders)
+        errors = {
+            name: {"error": f.last_error[0], "age_s": round(now - f.last_error[1], 1)}
+            for name, f in sorted(folders.items())
+            if f.last_error is not None
+        }
+        return {
+            "folders": len(folders),
+            "content_cache_bytes": self._content_bytes,
+            "listing_errors": errors,
+        }
 
     # ───────────────────────── listings ─────────────────────────
 
