@@ -85,6 +85,9 @@ class _Folder:
     fetched_at: float = float("-inf")
     overlay: dict[str, tuple[ListedFile, float]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Single-flight for content resolution: concurrent cold readers of one
+    # folder wait for the first batch download, then hit the cache.
+    resolve_lock: threading.Lock = field(default_factory=threading.Lock)
     # True once one listing has completed: until then there is no cached truth
     # to fall back on, so a failed listing must fail the request.
     listed: bool = False
@@ -182,7 +185,7 @@ class ReadModel:
     def records(self, folder: str) -> list[Record]:
         """Parsed records for every .md file under ``folder`` (READMEs
         excluded), ascending by filename. Cold misses are batch-fetched."""
-        out = self._resolve_many(self._md_entries(folder))
+        out = self._resolve_folder(folder, self._md_entries(folder))
         return [out[p] for p in sorted(out)]
 
     def records_for(self, folder: str, paths: list[str]) -> dict[str, Record]:
@@ -191,7 +194,14 @@ class ReadModel:
         (READMEs) or selective reads over a tree listing (channels).
         Unlisted paths are silently absent from the result."""
         by_path = {e.rel_path: e for e in self.listing(folder)}
-        return self._resolve_many([by_path[p] for p in paths if p in by_path])
+        return self._resolve_folder(folder, [by_path[p] for p in paths if p in by_path])
+
+    def _resolve_folder(self, folder: str, entries: list[ListedFile]) -> dict[str, Record]:
+        """``_resolve_many`` single-flighted per folder: after a restart every
+        watcher reconnects at once, and N cold readers must cost one batch
+        download, not N. Warm resolves are cache hits, so the lock is cheap."""
+        with self._folder(folder).resolve_lock:
+            return self._resolve_many(entries)
 
     def _resolve_many(self, entries: list[ListedFile]) -> dict[str, Record]:
         out: dict[str, Record] = {}

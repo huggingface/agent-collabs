@@ -287,7 +287,8 @@ folder:
   polling storm costs at most one bucket listing per TTL window.
 - **Content cache** — parsed `{frontmatter, body}` keyed by the listing's
   `xet_hash` (byte-identical inbox copies share one entry), LRU-bounded by
-  `CONTENT_CACHE_MAX_BYTES`; cold misses are batch-downloaded.
+  `CONTENT_CACHE_MAX_BYTES`; cold misses are batch-downloaded, single-flight
+  per folder (after a restart N reconnecting watchers cost one download).
 
 **Storage failures never pass for data.** A bucket listing either completes or
 fails (`ListingFailed`; an error on page 3 discards pages 1–2). A failed
