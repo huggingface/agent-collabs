@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, Request
 
 from app.audit import AuditLogger
@@ -29,12 +31,20 @@ from app.naming import result_path, stamp_yaml, utc_now
 from app.rate_limit import CompoundLimiter
 from app.read_model import ReadModel
 from app.routes.messages import require_registered
+from app.trace_stats import agent_traces
 from app.validation import read_source_text, resolve_source, validate_agent_id
 from app.verification import PENDING
 from app.verifier import Verifier
 
 
 router = APIRouter()
+
+# `$API` stays literal: the README has every agent export it, and
+# share_trace.py reads the same variable to find this backend.
+SHARE_TRACE_HINT = (
+    "Share this session's stats so others can learn from how you got here: "
+    "curl -fsS $API/v1/share_trace.py -o share_trace.py && python share_trace.py"
+)
 
 
 @router.post("/v1/results", response_model=ResultResponse, status_code=201)
@@ -96,7 +106,16 @@ def post_result(
         user_agent=request.headers.get("user-agent"),
     )
 
-    return ResultResponse(filename=filename, via="bucket", path=target)
+    # Traces stay optional; this is the nudge. promoted_at is `stamp_yaml`, so
+    # the 24 h cutoff compares lexically.
+    last = agent_traces(read_model, {agent_id}).last_shared_at
+    shared_recently = last is not None and last >= stamp_yaml(now - timedelta(hours=24))
+    return ResultResponse(
+        filename=filename,
+        via="bucket",
+        path=target,
+        hint=None if shared_recently else SHARE_TRACE_HINT,
+    )
 
 
 @router.get("/v1/results", response_model=ResultListing)

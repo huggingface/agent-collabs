@@ -15,13 +15,14 @@ from datetime import date, datetime
 
 from app.errors import InvalidFrontmatter
 from app.models import (
+    AgentTraces,
     DigestStats,
     StatsResponse,
     TokenTotals,
     TraceSummary,
 )
-from app.naming import split_trace_manifest_path
-from app.read_model import Record
+from app.naming import TRACES_FOLDER, split_trace_manifest_path
+from app.read_model import ReadModel, Record
 
 
 # Harnesses whose adapters are expected to deliver the full enforced set
@@ -256,6 +257,25 @@ def list_traces(
     else:
         items = [f"{s.agent}/{s.session_id}" for _k, s in ordered]
     return total, matched, items, nxt
+
+
+# ───────────────────────── per-agent summary ─────────────────────────
+
+def agent_traces(read_model: ReadModel, agents: set[str]) -> AgentTraces:
+    """Sessions shared by `agents` and the newest `promoted_at`. Filters the
+    cached listing by path first, so only these agents' manifests are read."""
+    paths = [
+        e.rel_path
+        for e in read_model.listing(TRACES_FOLDER)
+        if (ids := split_trace_manifest_path(e.rel_path)) and ids[0] in agents
+    ]
+    stamps = [
+        str(r.frontmatter["promoted_at"])
+        for r in read_model.records_for(TRACES_FOLDER, paths).values()
+        if r.frontmatter.get("promoted_at")
+    ]
+    # promoted_at is server-stamped `YYYY-MM-DD HH:MM UTC`: lexical max = newest.
+    return AgentTraces(sessions=len(paths), last_shared_at=max(stamps, default=None))
 
 
 # ───────────────────────── aggregate ─────────────────────────
