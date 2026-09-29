@@ -5,7 +5,7 @@ import logging
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from app.errors import APIError
+from app.errors import APIError, StorageUnavailable
 from app.routes import (
     agents,
     channels,
@@ -23,6 +23,12 @@ from app.routes import (
     traces,
     updates,
 )
+
+
+try:  # huggingface_hub 2.x ships its httpx fork as `httpx2`
+    from httpx2 import HTTPError as HubHTTPError
+except ImportError:
+    from httpx import HTTPError as HubHTTPError
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -61,3 +67,11 @@ app.include_router(client.router)
 async def _api_error_handler(_: Request, exc: APIError) -> JSONResponse:
     headers = getattr(exc, "headers", None)
     return JSONResponse(status_code=exc.status_code, content=exc.detail, headers=headers)
+
+
+@app.exception_handler(HubHTTPError)
+async def _storage_error_handler(request: Request, exc: HubHTTPError) -> JSONResponse:
+    """An uncaught hub failure (HfHubHTTPError, or the connection/timeout error
+    under it) means the storage write never landed: a retryable 503, not a 500."""
+    logging.getLogger(__name__).warning("storage backend failed: %r", exc)
+    return await _api_error_handler(request, StorageUnavailable())

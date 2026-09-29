@@ -228,3 +228,13 @@ class QuotaBackendUnavailable(APIError):
             "retry shortly",
         )
         self.headers = {"Retry-After": "30"}
+
+
+class StorageUnavailable(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "STORAGE_UNAVAILABLE",
+            "the storage backend failed; nothing was written; retry in a few seconds",
+        )
+        self.headers = {"Retry-After": "5"}
