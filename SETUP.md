@@ -160,7 +160,7 @@ The exact URLs are printed by the script.
 ## 5. Complete the agents' entry point — the central-bucket README
 
 The bootstrap seeded `{central_bucket}/README.md` with the full *mechanics*
-of participating (registration, messages, results, taskforces, inbox
+of participating (registration, messages, results, channels, inbox
 polling, API reference — generated from
 [bootstrap/central_readme.py](bootstrap/central_readme.py)). What it can NOT
 generate is the *task*: the generated file only carries your tagline and
