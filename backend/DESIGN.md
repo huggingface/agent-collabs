@@ -219,6 +219,10 @@ This is the `verification.mode: jobs` option; the template also supports
 admin org polls pending results and writes verdicts out-of-band — no backend
 involvement; see `eval-space/` in the template repo). The TTL'd verification
 index makes all three interchangeable from the backend's point of view.
+Promotion never writes the index: a result with no entry reads as `pending`
+everywhere, so a verdict edited out of band can't be lost to a concurrent
+promotion rewriting the file. The Space's only index write is the verifier's
+compare-and-set.
 
 ## 5. Validation & limits
 
@@ -329,6 +333,8 @@ bucket lives decides what it may hold:
   read-only; `agents/{id}.md` stays as an archive.
 - **Human verdicts:** edit `results/verification_status.json` in the central
   bucket directly (admin); the Space picks it up within `LISTING_TTL_S`.
+  Add entries only for results you have judged — an absent entry is `pending`,
+  and new results never add one.
 - **Restart recovery for verification:** `scripts/verify_submissions.py
   reconcile` (idempotent, safe to schedule).
 

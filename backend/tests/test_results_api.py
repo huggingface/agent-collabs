@@ -68,8 +68,29 @@ def test_post_result_visible_immediately(env):
     data = env.client.get("/v1/results?expand=true&limit=1").json()
     assert data["items"][0]["filename"] == filename
     assert data["items"][0]["verification"] == "pending"
-    # the verification index tracked the promotion
-    index = json.loads(
-        env.hub.buckets[env.settings.central_bucket]["results/verification_status.json"]
+    # promotion never creates the out-of-band verification index
+    assert "results/verification_status.json" not in env.hub.buckets[env.settings.central_bucket]
+
+
+def test_post_result_leaves_human_verdicts_alone_and_reads_pending(env):
+    """Promotion never rewrites the index humans / the eval Space edit, so a
+    verdict landing concurrently can't be lost; the new result reads pending."""
+    seed_agent(env.hub, "agent-1")
+    index_bytes = json.dumps({"20260601-100000-000_agent-1.md": "valid"}).encode()
+    central = env.hub.buckets[env.settings.central_bucket]
+    central["results/verification_status.json"] = index_bytes
+    env.hub.seed(
+        "results/run1.md",
+        "---\nscore: 142.7\nmethod: vllm-fp8\nstatus: agent-run\ndescription: fast\n---\nnotes\n",
+        bucket="test-org/test-agent-1",
     )
-    assert index[filename] == "pending"
+    r = env.client.post(
+        "/v1/results",
+        json={"source": "hf://buckets/test-org/test-agent-1/results/run1.md"},
+    )
+    assert r.status_code == 201
+    assert central["results/verification_status.json"] == index_bytes
+    rows = env.client.get("/v1/leaderboard").json()["rows"]
+    assert [(row["filename"], row["verification"]) for row in rows] == [
+        (r.json()["filename"], "pending")
+    ]
