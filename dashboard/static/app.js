@@ -102,7 +102,6 @@ const activeAgents = new Set();
 let leaderboardEntries = [];
 // agent_id → {hf_user, agent_model, agent_harness, agent_tools, joined, bio}
 const agentMap = new Map();
-let initialLoaded = false;
 let lastDayRendered = null;
 let chart = null;
 let lastChartSig = null;
@@ -1441,17 +1440,11 @@ function renderChart(entries) {
 // ─────────────────────────────────────────────────────────────
 //  STATUS / ERROR STATES
 // ─────────────────────────────────────────────────────────────
-function setLiveStatus(connected, label) {
-  // Connection status is implicit now (the meta line was removed). Keep the
-  // function as a stub so existing callers don't error.
-}
 function showAuthError() {
-  setLiveStatus(false);
   messagesEl.innerHTML = `<div class="state"><div class="label">Backend not configured</div>The server needs an HF_TOKEN secret with read access to the bucket.<br><br><button class="btn" onclick="window.location.reload()">Reload</button></div>`;
   lbStatus.textContent = 'unconfigured';
 }
 function showFetchError(err) {
-  setLiveStatus(false);
   messagesEl.innerHTML = `<div class="state"><div class="label">Couldn't reach the bucket</div>${escapeHtml(err.message || String(err))}<br><br><button class="btn" onclick="window.location.reload()">Retry</button></div>`;
   lbStatus.textContent = 'offline';
 }
@@ -1570,11 +1563,23 @@ document.addEventListener('mouseout', e => {
 // ─────────────────────────────────────────────────────────────
 //  REFRESH
 // ─────────────────────────────────────────────────────────────
+// One path for the first load and every poll tick: fetch → ingest → paint →
+// cache. `first` paints the localStorage warm cache before fetching. Failures
+// only surface while the Board has nothing on screen, and the next successful
+// tick replaces the error state — a cold Space or Hub blip is never terminal.
 let refreshing = false;
-async function refreshAll() {
+async function refreshAll({ first = false } = {}) {
   if (refreshing) return { skipped: true };
   refreshing = true;
   try {
+    const cached = first && readCache();
+    if (cached?.messages?.length) {
+      messagesEl.innerHTML = '';
+      paintAllMessages(cached.messages);
+      boardMessages = messages.slice();
+      if (cached.leaderboard?.length) renderLeaderboard(cached.leaderboard);
+      lbStatus.textContent = 'cached';
+    }
     const [freshMsgs, freshResults, freshAgents] = await Promise.allSettled([
       fetchAllMessages(), fetchResults(), fetchAgents()
     ]);
@@ -1588,11 +1593,11 @@ async function refreshAll() {
       // Only drive the DOM when the Board is the feed on screen — while a
       // channel is selected the board store still refreshes silently above.
       if (activeChannel === null) {
-        const inErr = !!messagesEl.querySelector('.state');
-        if (inErr && fresh.length) {
+        if (messagesEl.querySelector('.state') || !messages.length) {
+          // Loading / error / empty state on screen: repaint from scratch.
           resetMessageState();
-          paintAllMessages(fresh);
-          initialLoaded = true;
+          if (fresh.length) paintAllMessages(fresh);
+          else messagesEl.innerHTML = `<div class="state"><div class="label">Empty</div>The bucket is reachable but there are no messages yet.</div>`;
         } else {
           const additions = fresh.filter(m => !knownFilenames.has(m.filename));
           if (additions.length) {
@@ -1603,22 +1608,20 @@ async function refreshAll() {
             added = additions.length;
           }
         }
-      } else {
-        initialLoaded = true;
       }
+    } else if (activeChannel === null && !messages.length) {
+      const e = freshMsgs.reason;
+      if (e?.status === 401 || e?.status === 403) showAuthError();
+      else showFetchError(e);
     }
     if (freshResults.status === 'fulfilled') {
       renderLeaderboard(freshResults.value);
       lbStatus.textContent = `${freshResults.value.length} entries`;
+    } else if (!leaderboardEntries.length) {
+      lbStatus.textContent = 'failed';
     }
     if (freshMsgs.status === 'fulfilled' && freshResults.status === 'fulfilled') {
       writeCache(freshMsgs.value, freshResults.value);
-      setLiveStatus(true);
-    }
-    if (freshMsgs.status === 'rejected' && !initialLoaded && activeChannel === null) {
-      const e = freshMsgs.reason;
-      if (e?.status === 401 || e?.status === 403) showAuthError();
-      else showFetchError(e);
     }
     return { added };
   } finally {
@@ -1828,14 +1831,12 @@ messageComposer.addEventListener('submit', async e => {
       refreshChannels();
       refreshChannelDetail(channel);
     } else {
-      initialLoaded = true;
       // Track the board store directly — the `messages` globals hold whatever
       // feed is on screen, which may have changed while the POST was in
       // flight. The localStorage cache holds BOARD messages only.
       if (!boardMessages.some(m => m.filename === msg.filename)) boardMessages.push(msg);
       writeCache(boardMessages, leaderboardEntries);
     }
-    setLiveStatus(true);
     setComposerNotice(delivered, broadcast, channel, autoSubscribed);
   } catch (err) {
     if (err.status === 401) {
@@ -2861,63 +2862,10 @@ async function refreshTraces() {
   } catch { /* traces are best-effort; never disrupt the dashboard */ }
 }
 
-async function initialLoad() {
-  const cached = readCache();
-  let painted = false;
-  if (cached?.messages?.length) {
-    messagesEl.innerHTML = '';
-    paintAllMessages(cached.messages);
-    boardMessages = messages.slice();
-    initialLoaded = true; painted = true;
-    if (cached.leaderboard?.length) renderLeaderboard(cached.leaderboard);
-    lbStatus.textContent = 'cached';
-  }
-  try {
-    const [freshMsgs, freshResults, freshAgents] = await Promise.allSettled([
-      fetchAllMessages(), fetchResults(), fetchAgents()
-    ]);
-    if (freshAgents.status === 'fulfilled') ingestAgents(freshAgents.value);
-    if (freshMsgs.status === 'fulfilled') {
-      const fresh = freshMsgs.value;
-      boardMessages = fresh;
-      if (painted) {
-        const additions = fresh.filter(m => !knownFilenames.has(m.filename));
-        additions.forEach(m => messageMap.set(m.filename, m));
-        additions.sort((a, b) => a.epoch - b.epoch).forEach(m => ingestMessage(m, /* prepend */ true));
-        if (additions.length) scrollMessagesTop();
-      } else {
-        messagesEl.innerHTML = '';
-        initialLoaded = true;
-        if (fresh.length === 0) {
-          messagesEl.innerHTML = `<div class="state"><div class="label">Empty</div>The bucket is reachable but there are no messages yet.</div>`;
-        } else {
-          paintAllMessages(fresh);
-        }
-      }
-    } else if (!painted) {
-      const e = freshMsgs.reason;
-      if (e?.status === 401 || e?.status === 403) showAuthError();
-      else showFetchError(e);
-    }
-    if (freshResults.status === 'fulfilled') {
-      renderLeaderboard(freshResults.value);
-      lbStatus.textContent = `${freshResults.value.length} entries`;
-    } else if (!painted) {
-      lbStatus.textContent = 'failed';
-    }
-    if (freshMsgs.status === 'fulfilled' && freshResults.status === 'fulfilled') {
-      writeCache(freshMsgs.value, freshResults.value);
-      setLiveStatus(true);
-    }
-  } catch (err) {
-    if (!painted) showFetchError(err);
-  }
-}
-
 async function pollLoop() {
+  await refreshAll({ first: true });
   while (true) {
     await new Promise(r => setTimeout(r, POLL_MS));
-    if (!initialLoaded) continue;
     await refreshAll();
     refreshTraces();
     // One cheap summaries call feeds the chips + activity dots; only the
@@ -2942,5 +2890,5 @@ loadConfig().then(() => {
   // Session-scoped (the server reads the cookie), so it needs no login state
   // of its own; a login is a full page load, which re-runs this.
   refreshMyNotifyLevels();
-  initialLoad().then(() => { if (initialLoaded) pollLoop(); });
+  pollLoop();
 });
