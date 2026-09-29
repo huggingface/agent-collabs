@@ -280,6 +280,12 @@
     background: var(--accent); color: #fff;
     white-space: nowrap;
   }
+  .lb-table .lb-verified.pending { background: var(--bg-soft); color: var(--muted-3); font-weight: 500; }
+  .lb-table .lb-verified.invalid { background: #b91c1c; }
+  .lb-filter {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    font-size: 10px; letter-spacing: 0.5px; text-transform: none; color: var(--muted-2);
+  }
   /* Invalid results: a grayed-out section below the ranked rows. */
   .lb-table tr.lb-invalid-sep td {
     padding-top: 16px;
