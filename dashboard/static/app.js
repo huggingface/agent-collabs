@@ -19,8 +19,6 @@ const HANDLE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 const MESSAGE_PREVIEW_CHARS = 520;
 const FILENAME_RE = /^(\d{8})-(\d{6})(?:-\d{3})?_(.+?)(?:_(.+))?\.md$/;
 const ARTIFACT_REF_RE = /artifacts\/[^\s<>"'`]+/g;
-const SCORE_MIN = 0;
-const SCORE_MAX = Number.MAX_VALUE;
 const ACCENT = '#0f3787';
 const ACCENT_DIM = 'rgba(15, 55, 135, 0.08)';
 const GREY = '#9ca3af';
@@ -102,7 +100,6 @@ const activeAgents = new Set();
 let leaderboardEntries = [];
 // agent_id → {hf_user, agent_model, agent_harness, agent_tools, joined, bio}
 const agentMap = new Map();
-let initialLoaded = false;
 let lastDayRendered = null;
 let chart = null;
 let lastChartSig = null;
@@ -413,7 +410,7 @@ function parseResultFile(filename, raw) {
   const rawScore = fields[CFG.score_field];
   if (rawScore === undefined || rawScore === null || rawScore === '') return null;
   const score = parseFloat(String(rawScore).replace(/[,_\s]/g, ''));
-  if (isNaN(score) || score <= SCORE_MIN || score > SCORE_MAX) return null;
+  if (isNaN(score)) return null;
   const status = (fields.status || 'agent-run').trim();
   if (!['agent-run', 'baseline', 'negative'].includes(status)) return null;
   const epoch = epochFromFilename(filename);
@@ -490,11 +487,10 @@ function parseAgentFile(filename, raw) {
   };
 }
 
+// null when unchanged since the last fetch (304).
 async function fetchAgents() {
-  const r = await fetchWithTimeout(AGENTS_URL);
-  if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
-  const { items = [] } = await r.json();
-  return items.map(it => parseAgentFile(it.filename, it.content)).filter(Boolean);
+  const j = await fetchJsonIfChanged(AGENTS_URL);
+  return j && (j.items || []).map(it => parseAgentFile(it.filename, it.content)).filter(Boolean);
 }
 
 function ingestAgents(list) {
@@ -671,9 +667,23 @@ function agentsStatHtml(n, activeCount) {
   return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}`;
 }
 
+// One global notice while the backend proxies fail (a 503 is not a failure:
+// it means this deployment has no backend). Cleared by the next success.
+const backendBanner = document.getElementById('backendBanner');
+let backendDownSince = null;
+function noteBackend(ok) {
+  backendDownSince = ok ? null : (backendDownSince || new Date());
+  backendBanner.hidden = !backendDownSince;
+  if (backendDownSince) {
+    const t = backendDownSince.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    backendBanner.textContent = `Backend unreachable since ${t} — presence and channels may be stale`;
+  }
+}
+
 async function refreshWatching() {
   try {
     const r = await fetchWithTimeout(WATCHING_URL);
+    noteBackend(r.ok || r.status === 503);
     // 503 = this deployment has no bucket-sync backend (plain local dev):
     // drop the dots entirely rather than claim nobody is watching.
     if (r.status === 503) { watchPresence = null; }
@@ -691,7 +701,7 @@ async function refreshWatching() {
     }
     // Any other status: keep the last known presence — a transient blip must
     // not grey out every agent on screen.
-  } catch { /* same: presence is additive, never load-bearing */ }
+  } catch { noteBackend(false); /* same: presence is additive, never load-bearing */ }
   rerenderAgentNames();
   renderTopSubtext();   // the agents stat's "N online" suffix
   if (chMembersOpen) renderChannelMembers();
@@ -817,15 +827,30 @@ async function fetchWithTimeout(url, init = {}, ms = FETCH_TIMEOUT_MS) {
   try { return await fetch(url, { ...init, signal: ctrl.signal }); }
   finally { clearTimeout(t); }
 }
-async function fetchAllMessages() {
-  const r = await fetchWithTimeout(MESSAGES_URL);
+// Conditional GET for the list endpoints: resolves to the parsed JSON, or null
+// when the server answers 304 (nothing changed since the ETag we hold).
+const etags = new Map();  // url → last ETag
+async function fetchJsonIfChanged(url) {
+  const etag = etags.get(url);
+  const r = await fetchWithTimeout(url, etag ? { headers: { 'If-None-Match': etag } } : {});
+  if (r.status === 304) return null;
   if (!r.ok) {
     const detail = await r.text().catch(() => '');
     const e = new Error(`HTTP ${r.status} ${detail.slice(0, 200)}`);
     e.status = r.status; throw e;
   }
-  const { items = [] } = await r.json();
-  return items.map(it => parseMessage(it.filename, it.content)).filter(Boolean)
+  const j = await r.json();
+  if (r.headers.get('ETag')) etags.set(url, r.headers.get('ETag'));
+  return j;
+}
+// Board files are immutable once written, so only filenames not already in
+// the board store are parsed (marked + DOMPurify is the expensive part).
+// Unchanged (304) → the current board store.
+async function fetchAllMessages() {
+  const j = await fetchJsonIfChanged(MESSAGES_URL);
+  if (!j) return boardMessages;
+  const known = new Map(boardMessages.map(m => [m.filename, m]));
+  return (j.items || []).map(it => known.get(it.filename) || parseMessage(it.filename, it.content)).filter(Boolean)
     .sort((a, b) => a.epoch !== b.epoch ? a.epoch - b.epoch : a.filename.localeCompare(b.filename));
 }
 // verification_status.json: { "<result-filename.md>": "valid" | "invalid" | "pending" }.
@@ -844,11 +869,13 @@ function verificationState(map, filename) {
   const raw = map[filename];
   return VERIFY_STATES.has(raw) ? raw : 'pending';
 }
+// Verification can change while results/ does not, so a 304 re-uses the last
+// result items and still re-applies the fresh verification map.
+let resultItems = [];
 async function fetchResults() {
-  const [r, verifyMap] = await Promise.all([fetchWithTimeout(RESULTS_URL), fetchVerification()]);
-  if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
-  const { items = [] } = await r.json();
-  return items.map(it => parseResultFile(it.filename, it.content)).filter(Boolean)
+  const [j, verifyMap] = await Promise.all([fetchJsonIfChanged(RESULTS_URL), fetchVerification()]);
+  if (j) resultItems = j.items || [];
+  return resultItems.map(it => parseResultFile(it.filename, it.content)).filter(Boolean)
     .map(e => ({ ...e, verification: verificationState(verifyMap, e.filename) }));
 }
 async function postUserMessage(body, refFilename = null, broadcast = false, channel = null) {
@@ -868,10 +895,10 @@ async function postUserMessage(body, refFilename = null, broadcast = false, chan
     try { const p = await r.json(); detail = p?.detail || ''; } catch { detail = await r.text().catch(() => ''); }
     const e = new Error(detail || `HTTP ${r.status}`); e.status = r.status; throw e;
   }
-  const { item, mentions_delivered = [], auto_subscribed = false } = await r.json();
+  const { item, mentions_delivered = [], auto_subscribed = false, board_only = false } = await r.json();
   const parsed = item && parseMessage(item.filename, item.content);
   if (!parsed) throw new Error('Server returned an unreadable message.');
-  return { msg: parsed, delivered: mentions_delivered, autoSubscribed: auto_subscribed };
+  return { msg: parsed, delivered: mentions_delivered, autoSubscribed: auto_subscribed, boardOnly: board_only };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1441,17 +1468,11 @@ function renderChart(entries) {
 // ─────────────────────────────────────────────────────────────
 //  STATUS / ERROR STATES
 // ─────────────────────────────────────────────────────────────
-function setLiveStatus(connected, label) {
-  // Connection status is implicit now (the meta line was removed). Keep the
-  // function as a stub so existing callers don't error.
-}
 function showAuthError() {
-  setLiveStatus(false);
   messagesEl.innerHTML = `<div class="state"><div class="label">Backend not configured</div>The server needs an HF_TOKEN secret with read access to the bucket.<br><br><button class="btn" onclick="window.location.reload()">Reload</button></div>`;
   lbStatus.textContent = 'unconfigured';
 }
 function showFetchError(err) {
-  setLiveStatus(false);
   messagesEl.innerHTML = `<div class="state"><div class="label">Couldn't reach the bucket</div>${escapeHtml(err.message || String(err))}<br><br><button class="btn" onclick="window.location.reload()">Retry</button></div>`;
   lbStatus.textContent = 'offline';
 }
@@ -1570,16 +1591,28 @@ document.addEventListener('mouseout', e => {
 // ─────────────────────────────────────────────────────────────
 //  REFRESH
 // ─────────────────────────────────────────────────────────────
+// One path for the first load and every poll tick: fetch → ingest → paint →
+// cache. `first` paints the localStorage warm cache before fetching. Failures
+// only surface while the Board has nothing on screen, and the next successful
+// tick replaces the error state — a cold Space or Hub blip is never terminal.
 let refreshing = false;
-async function refreshAll() {
+async function refreshAll({ first = false } = {}) {
   if (refreshing) return { skipped: true };
   refreshing = true;
   try {
+    const cached = first && readCache();
+    if (cached?.messages?.length) {
+      messagesEl.innerHTML = '';
+      paintAllMessages(cached.messages);
+      boardMessages = messages.slice();
+      if (cached.leaderboard?.length) renderLeaderboard(cached.leaderboard);
+      lbStatus.textContent = 'cached';
+    }
     const [freshMsgs, freshResults, freshAgents] = await Promise.allSettled([
       fetchAllMessages(), fetchResults(), fetchAgents()
     ]);
     // Update agentMap before re-rendering so any new agents resolve to links.
-    if (freshAgents.status === 'fulfilled') ingestAgents(freshAgents.value);
+    if (freshAgents.status === 'fulfilled' && freshAgents.value) ingestAgents(freshAgents.value);
 
     let added = 0;
     if (freshMsgs.status === 'fulfilled') {
@@ -1588,11 +1621,11 @@ async function refreshAll() {
       // Only drive the DOM when the Board is the feed on screen — while a
       // channel is selected the board store still refreshes silently above.
       if (activeChannel === null) {
-        const inErr = !!messagesEl.querySelector('.state');
-        if (inErr && fresh.length) {
+        if (messagesEl.querySelector('.state') || !messages.length) {
+          // Loading / error / empty state on screen: repaint from scratch.
           resetMessageState();
-          paintAllMessages(fresh);
-          initialLoaded = true;
+          if (fresh.length) paintAllMessages(fresh);
+          else messagesEl.innerHTML = `<div class="state"><div class="label">Empty</div>The bucket is reachable but there are no messages yet.</div>`;
         } else {
           const additions = fresh.filter(m => !knownFilenames.has(m.filename));
           if (additions.length) {
@@ -1603,22 +1636,20 @@ async function refreshAll() {
             added = additions.length;
           }
         }
-      } else {
-        initialLoaded = true;
       }
+    } else if (activeChannel === null && !messages.length) {
+      const e = freshMsgs.reason;
+      if (e?.status === 401 || e?.status === 403) showAuthError();
+      else showFetchError(e);
     }
     if (freshResults.status === 'fulfilled') {
       renderLeaderboard(freshResults.value);
       lbStatus.textContent = `${freshResults.value.length} entries`;
+    } else if (!leaderboardEntries.length) {
+      lbStatus.textContent = 'failed';
     }
     if (freshMsgs.status === 'fulfilled' && freshResults.status === 'fulfilled') {
       writeCache(freshMsgs.value, freshResults.value);
-      setLiveStatus(true);
-    }
-    if (freshMsgs.status === 'rejected' && !initialLoaded && activeChannel === null) {
-      const e = freshMsgs.reason;
-      if (e?.status === 401 || e?.status === 403) showAuthError();
-      else showFetchError(e);
     }
     return { added };
   } finally {
@@ -1678,9 +1709,12 @@ function setComposerStatus(html = '', isError = false) {
 // comes from the bucket-sync API; an empty list still confirms the send.
 let composerNoticeHtml = '';
 let composerNoticeUntil = 0;
-function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false) {
+function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false, boardOnly = false) {
   const inboxed = (delivered || []).map(h => `@${h}`).join(', ');
-  if (broadcast) {
+  if (boardOnly) {
+    // The backend was down and the server wrote straight to the board.
+    composerNoticeHtml = `<span class="board-only">⚠ posted to the board only; inboxes were not notified</span>`;
+  } else if (broadcast) {
     composerNoticeHtml = `<span class="delivered">✓ broadcast — every inbox</span>`;
   } else if (channel) {
     composerNoticeHtml =
@@ -1806,7 +1840,7 @@ messageComposer.addEventListener('submit', async e => {
   const channel = activeChannel;
   const broadcast = !channel && !!me.is_organizer && broadcastToggle.checked;
   try {
-    const { msg, delivered, autoSubscribed } = await postUserMessage(
+    const { msg, delivered, autoSubscribed, boardOnly } = await postUserMessage(
       body, pendingRefFilename, broadcast, channel
     );
     humanMessageInput.value = '';
@@ -1828,15 +1862,13 @@ messageComposer.addEventListener('submit', async e => {
       refreshChannels();
       refreshChannelDetail(channel);
     } else {
-      initialLoaded = true;
       // Track the board store directly — the `messages` globals hold whatever
       // feed is on screen, which may have changed while the POST was in
       // flight. The localStorage cache holds BOARD messages only.
       if (!boardMessages.some(m => m.filename === msg.filename)) boardMessages.push(msg);
       writeCache(boardMessages, leaderboardEntries);
     }
-    setLiveStatus(true);
-    setComposerNotice(delivered, broadcast, channel, autoSubscribed);
+    setComposerNotice(delivered, broadcast, channel, autoSubscribed, boardOnly);
   } catch (err) {
     if (err.status === 401) {
       // Session expired — bounce to /login.
@@ -2297,7 +2329,8 @@ async function fetchChannels() {
 async function refreshChannels() {
   let fresh;
   try { fresh = await fetchChannels(); }
-  catch { return; }  // transient — keep the current chips
+  catch { noteBackend(false); return; }  // transient — keep the current chips
+  noteBackend(true);
   channels = fresh;
   renderChannelChips();
   renderMsgCount();
@@ -2861,63 +2894,13 @@ async function refreshTraces() {
   } catch { /* traces are best-effort; never disrupt the dashboard */ }
 }
 
-async function initialLoad() {
-  const cached = readCache();
-  let painted = false;
-  if (cached?.messages?.length) {
-    messagesEl.innerHTML = '';
-    paintAllMessages(cached.messages);
-    boardMessages = messages.slice();
-    initialLoaded = true; painted = true;
-    if (cached.leaderboard?.length) renderLeaderboard(cached.leaderboard);
-    lbStatus.textContent = 'cached';
-  }
-  try {
-    const [freshMsgs, freshResults, freshAgents] = await Promise.allSettled([
-      fetchAllMessages(), fetchResults(), fetchAgents()
-    ]);
-    if (freshAgents.status === 'fulfilled') ingestAgents(freshAgents.value);
-    if (freshMsgs.status === 'fulfilled') {
-      const fresh = freshMsgs.value;
-      boardMessages = fresh;
-      if (painted) {
-        const additions = fresh.filter(m => !knownFilenames.has(m.filename));
-        additions.forEach(m => messageMap.set(m.filename, m));
-        additions.sort((a, b) => a.epoch - b.epoch).forEach(m => ingestMessage(m, /* prepend */ true));
-        if (additions.length) scrollMessagesTop();
-      } else {
-        messagesEl.innerHTML = '';
-        initialLoaded = true;
-        if (fresh.length === 0) {
-          messagesEl.innerHTML = `<div class="state"><div class="label">Empty</div>The bucket is reachable but there are no messages yet.</div>`;
-        } else {
-          paintAllMessages(fresh);
-        }
-      }
-    } else if (!painted) {
-      const e = freshMsgs.reason;
-      if (e?.status === 401 || e?.status === 403) showAuthError();
-      else showFetchError(e);
-    }
-    if (freshResults.status === 'fulfilled') {
-      renderLeaderboard(freshResults.value);
-      lbStatus.textContent = `${freshResults.value.length} entries`;
-    } else if (!painted) {
-      lbStatus.textContent = 'failed';
-    }
-    if (freshMsgs.status === 'fulfilled' && freshResults.status === 'fulfilled') {
-      writeCache(freshMsgs.value, freshResults.value);
-      setLiveStatus(true);
-    }
-  } catch (err) {
-    if (!painted) showFetchError(err);
-  }
-}
-
+// A hidden tab polls 5× less often, and refreshes as soon as it is shown again.
+let wakePoll = () => {};
+document.addEventListener('visibilitychange', () => { if (!document.hidden) wakePoll(); });
 async function pollLoop() {
+  await refreshAll({ first: true });
   while (true) {
-    await new Promise(r => setTimeout(r, POLL_MS));
-    if (!initialLoaded) continue;
+    await new Promise(r => { wakePoll = r; setTimeout(r, document.hidden ? POLL_MS * 5 : POLL_MS); });
     await refreshAll();
     refreshTraces();
     // One cheap summaries call feeds the chips + activity dots; only the
@@ -2942,5 +2925,5 @@ loadConfig().then(() => {
   // Session-scoped (the server reads the cookie), so it needs no login state
   // of its own; a login is a full page load, which re-runs this.
   refreshMyNotifyLevels();
-  initialLoad().then(() => { if (initialLoaded) pollLoop(); });
+  pollLoop();
 });
