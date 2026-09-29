@@ -157,31 +157,54 @@ def test_digest_watching_is_null_until_someone_watches(env):
     assert env.client.get("/v1/digest?as=watcher").json()["watching"] is None
 
 
-def test_digest_watching_appears_after_a_wait_poll(env):
-    """A wait>0 poll stamps the handle's presence; a plain wait=0 poll does
-    not — polling is not watching."""
+def test_a_digest_read_counts_as_a_poll_but_does_not_answer_itself(env):
+    """The digest reports presence as it stood BEFORE the read, then stamps it:
+    the next digest sees the previous one."""
+    seed_agent(env.hub, "watcher")
+    assert env.client.get("/v1/digest?as=watcher").json()["watching"] is None
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert block["mode"] == "poll" and block["stream"] == "digest"
+
+
+def test_digest_watching_records_parked_and_plain_reads(env):
+    """Any /v1/updates read stamps presence — a synchronous `--max-wait` caller
+    is present between calls — and `mode` says whether it parked."""
     seed_agent(env.hub, "watcher")
 
-    env.client.get("/v1/updates?as=watcher")  # wait=0: not a watch
-    assert env.client.get("/v1/digest?as=watcher").json()["watching"] is None
+    env.client.get("/v1/updates?as=watcher")  # wait=0
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("poll", "updates")
 
     env.client.get("/v1/updates?as=watcher&wait=0.15")
-    data = env.client.get("/v1/digest?as=watcher").json()
-    assert data["watching"]["mode"] == "updates"
-    assert data["watching"]["last_poll_age_s"] >= 0
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("parked", "updates")
+    assert block["last_poll_age_s"] >= 0
 
 
-def test_digest_watching_reports_the_mode(env):
+def test_digest_watching_reports_last_after(env):
+    """The state-loss safety net: the newest after= cursor the handle sent comes
+    back as last_after, and a later read without after= does not erase it."""
+    seed_agent(env.hub, "watcher")
+    cursor = "20260728-120000-000_agent-b.md"
+    env.client.get(f"/v1/updates?as=watcher&after={cursor}&wait=0.05")
+    env.client.get("/v1/updates?as=watcher")  # no cursor: keeps the last one
+
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert block["last_after"] == cursor
+
+
+def test_digest_watching_reports_the_stream(env):
     """inbox / feed / updates are distinguishable, so an organizer can see WHAT
     an agent is watching, not just that it is alive."""
     seed_agent(env.hub, "watcher")
     env.client.get("/v1/inbox/watcher?wait=0.1")
-    assert env.client.get("/v1/digest?as=watcher").json()["watching"]["mode"] == "inbox"
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("parked", "inbox")
 
     _create_channel(env, "room")
     _subscribe(env, "room", "watcher")
     env.client.get("/v1/channels/feed?as=watcher&wait=0.1")
-    assert env.client.get("/v1/digest?as=watcher").json()["watching"]["mode"] == "feed"
+    assert env.client.get("/v1/digest?as=watcher").json()["watching"]["stream"] == "feed"
 
 
 def test_digest_watching_is_visible_while_a_poll_is_parked(env):
@@ -206,7 +229,7 @@ def test_digest_watching_is_visible_while_a_poll_is_parked(env):
             else:
                 time.sleep(0.01)
         assert seen is not None, "watch presence never became visible"
-        assert seen["mode"] == "updates"
+        assert (seen["mode"], seen["stream"]) == ("parked", "updates")
     finally:
         t.join(timeout=5)
 

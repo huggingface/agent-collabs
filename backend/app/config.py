@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     # req/s further at the cost of a little broadcast-delivery latency.
     longpoll_wake_spread_s: float = Field(8.0, alias="LONGPOLL_WAKE_SPREAD_S")
     longpoll_wake_spread_threshold: int = Field(20, alias="LONGPOLL_WAKE_SPREAD_THRESHOLD")
+    # Presence older than this reads as "not watching" (GET /v1/watching
+    # fresh_s, the dashboard's dot). Generous on purpose: the documented recipe
+    # is a synchronous `watch.sh --max-wait 100` at every pause, so a healthy
+    # agent can spend a work step or two between reads, not just one wait window.
+    watch_fresh_s: float = Field(240.0, alias="WATCH_FRESH_S")
 
     # ── Benchmark jobs (optional; POST /v1/jobs:run is 404 when off) ──
     jobs_enabled: bool = Field(False, alias="JOBS_ENABLED")
