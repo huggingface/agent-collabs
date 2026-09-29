@@ -26,6 +26,7 @@ from app.read_model import Record
 
 # Harnesses whose adapters are expected to deliver the full enforced set
 # (tokens + tool_calls). Anything else degrades to `partial` (never blocked).
+# Keep in sync with KNOWN_HARNESSES in clients/share_trace.py.
 KNOWN_FULL_HARNESSES: frozenset[str] = frozenset({"claude-code", "codex"})
 
 REQUIRED_MANIFEST_FIELDS: tuple[str, ...] = ("schema_version", "harness", "session_id")
