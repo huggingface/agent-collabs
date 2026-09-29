@@ -45,3 +45,13 @@ def test_oversized_source_is_413_naming_the_limit(make_env):
     env.hub.seed("drafts/note.md", "x" * 101, bucket="test-org/test-agent-1")
     err = _error(env.client.post("/v1/messages", json={"source": SOURCE}), 413, "TOO_LARGE")
     assert "100" in err["message"]
+
+
+def test_hub_write_failure_is_503_with_retry_after(env):
+    seed_agent(env.hub, "agent-1")
+    env.hub.fail_next_write()
+    r = env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "hi"})
+    err = _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert "nothing was written" in err["message"]
+    assert r.headers["retry-after"] == "5"
+    assert env.client.get("/v1/messages").json()["count"] == 0
