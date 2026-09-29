@@ -605,6 +605,7 @@
   }
   .composer-status.error { color: #b91c1c; }
   .composer-status .delivered { color: var(--accent); font-weight: 500; }
+  .composer-status .board-only { color: #b45309; font-weight: 500; }
   .composer-status .me { color: var(--ink-3); }
   .composer-status .me strong { color: var(--ink); font-weight: 500; }
   .composer-status .logout-link {

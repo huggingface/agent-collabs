@@ -799,8 +799,10 @@ async def _post_message_via_api(
     agent inboxes (its human-post path). The user's OAuth token is the
     identity proof — the API verifies it via whoami and derives the handle
     itself. Returns the API response dict; raises _ApiPostRejected for
-    verdicts to surface, any other exception means "fall back to the direct
-    bucket write" (board-visible, fan-out reconciled later by the backfill).
+    verdicts to surface. Only a backend outage (5xx, network) raises anything
+    else, meaning "fall back to the direct bucket write" (board-visible,
+    fan-out reconciled later by the backfill). A refused user token is a
+    session expiry, never a fallback: the admin-token write would hide it.
     Broadcasts and channel posts never fall back (see the callers)."""
     payload: dict[str, Any] = {
         "agent_id": _human_handle(username),
@@ -823,17 +825,21 @@ async def _post_message_via_api(
             429, _backend_error_message(r) or "Rate limited — please slow down."
         )
     if r.status_code != 201:
-        if broadcast or channel:
-            # Broadcasts and channel posts never fall back to a direct write
-            # (only the backend can do the gated broadcasts/ write, and a
-            # direct channels/ write would skip validation, mention fan-out,
-            # and auto-subscribe) — surface the backend's verdict verbatim.
-            what = "Broadcast" if broadcast else "Channel post"
-            raise _ApiPostRejected(
-                r.status_code,
-                _backend_error_message(r) or f"{what} rejected ({r.status_code}).",
-            )
-        raise RuntimeError(f"bucket-sync API returned {r.status_code}: {r.text[:200]}")
+        if not (broadcast or channel):
+            if r.status_code in (401, 403):
+                raise _ApiPostRejected(401, "Session expired. Please sign in again.")
+            if r.status_code >= 500:
+                raise RuntimeError(f"bucket-sync API returned {r.status_code}: {r.text[:200]}")
+        # Broadcasts and channel posts never fall back to a direct write
+        # (only the backend can do the gated broadcasts/ write, and a direct
+        # channels/ write would skip validation, mention fan-out, and
+        # auto-subscribe) — surface the backend's verdict verbatim, as for
+        # any other 4xx.
+        what = "Broadcast" if broadcast else "Channel post" if channel else "Message"
+        raise _ApiPostRejected(
+            r.status_code,
+            _backend_error_message(r) or f"{what} rejected ({r.status_code}).",
+        )
     return r.json()
 
 
@@ -994,6 +1000,9 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
     return {
         "item": {"filename": filename, "content": content},
         "mentions_delivered": delivered,
+        # A backend exists but did not take the post: nobody's inbox heard of
+        # it until the backfill runs — the composer says so.
+        "board_only": posted is None and bool(BACKEND_API_URL),
     }
 
 

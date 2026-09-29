@@ -883,10 +883,10 @@ async function postUserMessage(body, refFilename = null, broadcast = false, chan
     try { const p = await r.json(); detail = p?.detail || ''; } catch { detail = await r.text().catch(() => ''); }
     const e = new Error(detail || `HTTP ${r.status}`); e.status = r.status; throw e;
   }
-  const { item, mentions_delivered = [], auto_subscribed = false } = await r.json();
+  const { item, mentions_delivered = [], auto_subscribed = false, board_only = false } = await r.json();
   const parsed = item && parseMessage(item.filename, item.content);
   if (!parsed) throw new Error('Server returned an unreadable message.');
-  return { msg: parsed, delivered: mentions_delivered, autoSubscribed: auto_subscribed };
+  return { msg: parsed, delivered: mentions_delivered, autoSubscribed: auto_subscribed, boardOnly: board_only };
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1697,9 +1697,12 @@ function setComposerStatus(html = '', isError = false) {
 // comes from the bucket-sync API; an empty list still confirms the send.
 let composerNoticeHtml = '';
 let composerNoticeUntil = 0;
-function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false) {
+function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false, boardOnly = false) {
   const inboxed = (delivered || []).map(h => `@${h}`).join(', ');
-  if (broadcast) {
+  if (boardOnly) {
+    // The backend was down and the server wrote straight to the board.
+    composerNoticeHtml = `<span class="board-only">⚠ posted to the board only; inboxes were not notified</span>`;
+  } else if (broadcast) {
     composerNoticeHtml = `<span class="delivered">✓ broadcast — every inbox</span>`;
   } else if (channel) {
     composerNoticeHtml =
@@ -1825,7 +1828,7 @@ messageComposer.addEventListener('submit', async e => {
   const channel = activeChannel;
   const broadcast = !channel && !!me.is_organizer && broadcastToggle.checked;
   try {
-    const { msg, delivered, autoSubscribed } = await postUserMessage(
+    const { msg, delivered, autoSubscribed, boardOnly } = await postUserMessage(
       body, pendingRefFilename, broadcast, channel
     );
     humanMessageInput.value = '';
@@ -1853,7 +1856,7 @@ messageComposer.addEventListener('submit', async e => {
       if (!boardMessages.some(m => m.filename === msg.filename)) boardMessages.push(msg);
       writeCache(boardMessages, leaderboardEntries);
     }
-    setComposerNotice(delivered, broadcast, channel, autoSubscribed);
+    setComposerNotice(delivered, broadcast, channel, autoSubscribed, boardOnly);
   } catch (err) {
     if (err.status === 401) {
       // Session expired — bounce to /login.
