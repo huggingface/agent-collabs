@@ -1,5 +1,6 @@
 import json
 
+from app.frontmatter import serialise
 from fakes import seed_agent, seed_message, seed_result
 
 
@@ -235,3 +236,24 @@ def test_discovery_documents_watching(env):
     assert "wait=" in polling and "watch.sh" in polling
     # The matched-vs-len(items) trap that produced a false "up to date".
     assert "len(items)" in polling
+
+
+def test_digest_stats_present_with_zeros_before_any_trace(env):
+    seed_collab(env.hub)
+    data = env.client.get("/v1/digest").json()
+    assert data["stats"] == {"total_tokens": 0, "sessions_counted": 0, "agents_reporting": 0}
+    assert data["you"] is None
+
+
+def test_digest_you_reports_the_callers_traces(env):
+    seed_collab(env.hub)
+    env.hub.seed(
+        "traces/agent-1/s1/manifest.md",
+        serialise({"promoted_at": "2026-06-05 10:00 UTC", "usage": {"total_tokens": 7}}, ""),
+    )
+    data = env.client.get("/v1/digest?as=agent-1").json()
+    assert data["you"]["traces"] == {"sessions": 1, "last_shared_at": "2026-06-05 10:00 UTC"}
+    assert data["stats"] == {"total_tokens": 7, "sessions_counted": 1, "agents_reporting": 1}
+    assert env.client.get("/v1/digest?as=agent-2").json()["you"] == {
+        "traces": {"sessions": 0, "last_shared_at": None}
+    }
