@@ -105,9 +105,11 @@ def test_claude_config_dir_detects_pinned_session(home, monkeypatch, tmp_path):
     assert st._infer_harness(mine) == "claude-code"
 
 
-def test_codex_home_is_a_codex_marker(home, monkeypatch):
+def test_codex_home_is_not_a_harness_marker(home, monkeypatch):
+    # CODEX_HOME is often exported globally (e.g. by agent managers); it only
+    # relocates the logs and must not decide which harness is running.
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
-    assert st._running_harness() == ("codex", None)
+    assert st._running_harness() == (None, None)
 
 
 def test_codex_cwd_match_respects_path_boundary(home):
