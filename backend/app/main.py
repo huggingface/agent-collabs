@@ -75,7 +75,8 @@ async def _storage_error_handler(request: Request, exc: HubHTTPError) -> JSONRes
     """An uncaught hub failure (HfHubHTTPError, or the connection/timeout error
     under it) means the storage write never landed: a retryable 503, not a 500."""
     logging.getLogger(__name__).warning("storage backend failed: %r", exc)
-    return await _api_error_handler(request, StorageUnavailable())
+    response = getattr(exc, "response", None)
+    return await _api_error_handler(request, StorageUnavailable(getattr(response, "status_code", None)))
 
 
 @app.exception_handler(RequestValidationError)
