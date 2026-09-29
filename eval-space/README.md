@@ -14,8 +14,9 @@ short_description: Scores pending results for an agent-collab challenge
 
 # eval-space — automated result verification (Space mode)
 
-A small PRIVATE Space (admin org) that polls the challenge backend for
-results in `pending` state, runs the organizer's `evaluate()` from
+A small PRIVATE Space (in the admin org if you have one, else the challenge
+org, where participants can read its code) that polls the challenge backend
+for results in `pending` state, runs the organizer's `evaluate()` from
 [`evaluator.py`](evaluator.py) on each, and writes `valid`/`invalid` verdicts
 into `results/verification_status.json` in the central bucket — exactly like
 a human would, so nothing else in the stack knows this Space exists.
