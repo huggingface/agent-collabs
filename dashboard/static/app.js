@@ -489,11 +489,10 @@ function parseAgentFile(filename, raw) {
   };
 }
 
+// null when unchanged since the last fetch (304).
 async function fetchAgents() {
-  const r = await fetchWithTimeout(AGENTS_URL);
-  if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
-  const { items = [] } = await r.json();
-  return items.map(it => parseAgentFile(it.filename, it.content)).filter(Boolean);
+  const j = await fetchJsonIfChanged(AGENTS_URL);
+  return j && (j.items || []).map(it => parseAgentFile(it.filename, it.content)).filter(Boolean);
 }
 
 function ingestAgents(list) {
@@ -816,15 +815,30 @@ async function fetchWithTimeout(url, init = {}, ms = FETCH_TIMEOUT_MS) {
   try { return await fetch(url, { ...init, signal: ctrl.signal }); }
   finally { clearTimeout(t); }
 }
-async function fetchAllMessages() {
-  const r = await fetchWithTimeout(MESSAGES_URL);
+// Conditional GET for the list endpoints: resolves to the parsed JSON, or null
+// when the server answers 304 (nothing changed since the ETag we hold).
+const etags = new Map();  // url → last ETag
+async function fetchJsonIfChanged(url) {
+  const etag = etags.get(url);
+  const r = await fetchWithTimeout(url, etag ? { headers: { 'If-None-Match': etag } } : {});
+  if (r.status === 304) return null;
   if (!r.ok) {
     const detail = await r.text().catch(() => '');
     const e = new Error(`HTTP ${r.status} ${detail.slice(0, 200)}`);
     e.status = r.status; throw e;
   }
-  const { items = [] } = await r.json();
-  return items.map(it => parseMessage(it.filename, it.content)).filter(Boolean)
+  const j = await r.json();
+  if (r.headers.get('ETag')) etags.set(url, r.headers.get('ETag'));
+  return j;
+}
+// Board files are immutable once written, so only filenames not already in
+// the board store are parsed (marked + DOMPurify is the expensive part).
+// Unchanged (304) → the current board store.
+async function fetchAllMessages() {
+  const j = await fetchJsonIfChanged(MESSAGES_URL);
+  if (!j) return boardMessages;
+  const known = new Map(boardMessages.map(m => [m.filename, m]));
+  return (j.items || []).map(it => known.get(it.filename) || parseMessage(it.filename, it.content)).filter(Boolean)
     .sort((a, b) => a.epoch !== b.epoch ? a.epoch - b.epoch : a.filename.localeCompare(b.filename));
 }
 // verification_status.json: { "<result-filename.md>": "valid" | "invalid" | "pending" }.
@@ -843,11 +857,13 @@ function verificationState(map, filename) {
   const raw = map[filename];
   return VERIFY_STATES.has(raw) ? raw : 'pending';
 }
+// Verification can change while results/ does not, so a 304 re-uses the last
+// result items and still re-applies the fresh verification map.
+let resultItems = [];
 async function fetchResults() {
-  const [r, verifyMap] = await Promise.all([fetchWithTimeout(RESULTS_URL), fetchVerification()]);
-  if (!r.ok) { const e = new Error(`HTTP ${r.status}`); e.status = r.status; throw e; }
-  const { items = [] } = await r.json();
-  return items.map(it => parseResultFile(it.filename, it.content)).filter(Boolean)
+  const [j, verifyMap] = await Promise.all([fetchJsonIfChanged(RESULTS_URL), fetchVerification()]);
+  if (j) resultItems = j.items || [];
+  return resultItems.map(it => parseResultFile(it.filename, it.content)).filter(Boolean)
     .map(e => ({ ...e, verification: verificationState(verifyMap, e.filename) }));
 }
 async function postUserMessage(body, refFilename = null, broadcast = false, channel = null) {
@@ -1584,7 +1600,7 @@ async function refreshAll({ first = false } = {}) {
       fetchAllMessages(), fetchResults(), fetchAgents()
     ]);
     // Update agentMap before re-rendering so any new agents resolve to links.
-    if (freshAgents.status === 'fulfilled') ingestAgents(freshAgents.value);
+    if (freshAgents.status === 'fulfilled' && freshAgents.value) ingestAgents(freshAgents.value);
 
     let added = 0;
     if (freshMsgs.status === 'fulfilled') {
@@ -2862,10 +2878,13 @@ async function refreshTraces() {
   } catch { /* traces are best-effort; never disrupt the dashboard */ }
 }
 
+// A hidden tab polls 5× less often, and refreshes as soon as it is shown again.
+let wakePoll = () => {};
+document.addEventListener('visibilitychange', () => { if (!document.hidden) wakePoll(); });
 async function pollLoop() {
   await refreshAll({ first: true });
   while (true) {
-    await new Promise(r => setTimeout(r, POLL_MS));
+    await new Promise(r => { wakePoll = r; setTimeout(r, document.hidden ? POLL_MS * 5 : POLL_MS); });
     await refreshAll();
     refreshTraces();
     // One cheap summaries call feeds the chips + activity dots; only the

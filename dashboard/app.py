@@ -30,6 +30,9 @@ When neither is set, the API endpoints return 401 with a helpful message.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import http.cookiejar
+import json
 import logging
 import os
 import re
@@ -47,6 +50,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.middleware.gzip import GZipMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -150,6 +154,15 @@ async def lifespan(app: FastAPI):
         follow_redirects=True,  # Hub redirects /resolve/ → cas-bridge.xethub
         limits=httpx.Limits(max_connections=200, max_keepalive_connections=50),
     )
+    # Tokenless client for everything that is not a Hub bucket read (OAuth,
+    # the bucket-sync backend): app.state.client's admin HF_TOKEN must never
+    # ride along to another service. Per-user tokens go in per-request
+    # headers; the cookie jar refuses every cookie so nothing one user's
+    # request receives is replayed on another's.
+    app.state.plain_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(HUB_FETCH_TIMEOUT),
+        cookies=http.cookiejar.CookieJar(http.cookiejar.DefaultCookiePolicy(allowed_domains=[])),
+    )
     if LOCAL_BUCKET_DIR:
         log.info("Local mode — reading from %s", LOCAL_BUCKET_DIR)
     elif HF_TOKEN:
@@ -176,6 +189,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await app.state.client.aclose()
+        await app.state.plain_client.aclose()
 
 
 app = FastAPI(title=CHALLENGE_TITLE, lifespan=lifespan)
@@ -192,6 +206,8 @@ app.add_middleware(
     same_site="none" if OAUTH_CLIENT_ID else "lax",
     https_only=bool(OAUTH_CLIENT_ID),
 )
+# /api/messages ships every board file's content; markdown compresses well.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
 
 
 # ──────────────────────────────────────────────────────────────
@@ -311,34 +327,35 @@ async def oauth_callback(request: Request):
         log.warning("[oauth %s] server_unconfigured", rid)
         return RedirectResponse("/?login_error=server_unconfigured")
 
-    # Use a fresh client so we don't inherit `Authorization: Bearer HF_TOKEN`
-    # from app.state.client — HF's /oauth/token expects client_id+client_secret,
+    # The tokenless client: HF's /oauth/token expects client_id+client_secret,
     # not a Space-token Bearer header, and rejects the request otherwise.
+    oauth_client: httpx.AsyncClient = app.state.plain_client
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT), follow_redirects=True) as oauth_client:
-            token_resp = await oauth_client.post(
-                f"{HUB}/oauth/token",
-                data={
-                    "grant_type": "authorization_code",
-                    "code": code,
-                    "redirect_uri": _redirect_uri(request),
-                    "client_id": OAUTH_CLIENT_ID,
-                    "client_secret": OAUTH_CLIENT_SECRET,
-                },
-                headers={"Accept": "application/json"},
-            )
-            if not token_resp.is_success:
-                log.warning("[oauth %s] token_exchange status=%s body=%s", rid, token_resp.status_code, token_resp.text[:300])
-                return RedirectResponse("/?login_error=token_exchange")
-            access_token = token_resp.json().get("access_token")
-            if not access_token:
-                log.warning("[oauth %s] no_token body=%s", rid, token_resp.text[:200])
-                return RedirectResponse("/?login_error=no_token")
+        token_resp = await oauth_client.post(
+            f"{HUB}/oauth/token",
+            data={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _redirect_uri(request),
+                "client_id": OAUTH_CLIENT_ID,
+                "client_secret": OAUTH_CLIENT_SECRET,
+            },
+            headers={"Accept": "application/json"},
+            follow_redirects=True,
+        )
+        if not token_resp.is_success:
+            log.warning("[oauth %s] token_exchange status=%s body=%s", rid, token_resp.status_code, token_resp.text[:300])
+            return RedirectResponse("/?login_error=token_exchange")
+        access_token = token_resp.json().get("access_token")
+        if not access_token:
+            log.warning("[oauth %s] no_token body=%s", rid, token_resp.text[:200])
+            return RedirectResponse("/?login_error=no_token")
 
-            me_resp = await oauth_client.get(
-                f"{HUB}/api/whoami-v2",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
+        me_resp = await oauth_client.get(
+            f"{HUB}/api/whoami-v2",
+            headers={"Authorization": f"Bearer {access_token}"},
+            follow_redirects=True,
+        )
         if not me_resp.is_success:
             log.warning("[oauth %s] whoami status=%s body=%s", rid, me_resp.status_code, me_resp.text[:200])
             return RedirectResponse("/?login_error=whoami")
@@ -388,11 +405,10 @@ async def _fetch_is_organizer(access_token: str | None) -> bool | None:
     if not (BACKEND_API_URL and access_token):
         return None
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
-            r = await client.get(
-                f"{BACKEND_API_URL}/v1/me",
-                headers={"Authorization": f"Bearer {access_token}"},
-            )
+        r = await app.state.plain_client.get(
+            f"{BACKEND_API_URL}/v1/me",
+            headers={"Authorization": f"Bearer {access_token}"},
+        )
         if r.status_code == 200:
             return bool(r.json().get("is_organizer"))
     except Exception as e:
@@ -638,22 +654,30 @@ def _invalidate_list_cache(prefix: str) -> None:
 # ──────────────────────────────────────────────────────────────
 # /api/messages and /api/results
 # ──────────────────────────────────────────────────────────────
+def _list_response(request: Request, items: list[dict[str, str]]) -> Response:
+    """The listing as JSON with an ETag over its bytes; a matching
+    If-None-Match gets an empty 304, so an idle 30s poll costs no body."""
+    body = json.dumps({"items": items, "count": len(items)}).encode()
+    # Weak: GZipMiddleware re-encodes the body, the content is what matches.
+    etag = f'W/"{hashlib.sha1(body).hexdigest()}"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return Response(body, media_type="application/json", headers={"ETag": etag})
+
+
 @app.get("/api/messages")
-async def messages() -> dict[str, Any]:
-    items = await _cached_list_md(PREFIX)
-    return {"items": items, "count": len(items)}
+async def messages(request: Request) -> Response:
+    return _list_response(request, await _cached_list_md(PREFIX))
 
 
 @app.get("/api/results")
-async def results() -> dict[str, Any]:
-    items = await _cached_list_md(RESULTS_PREFIX)
-    return {"items": items, "count": len(items)}
+async def results(request: Request) -> Response:
+    return _list_response(request, await _cached_list_md(RESULTS_PREFIX))
 
 
 @app.get("/api/agents")
-async def agents() -> dict[str, Any]:
-    items = await _cached_list_md(AGENTS_PREFIX)
-    return {"items": items, "count": len(items)}
+async def agents(request: Request) -> Response:
+    return _list_response(request, await _cached_list_md(AGENTS_PREFIX))
 
 
 def _normalize_refs(refs: list[str]) -> list[str]:
@@ -789,14 +813,11 @@ async def _post_message_via_api(
         payload["broadcast"] = True
     if channel:
         payload["channel"] = channel
-    # A fresh client: app.state.client carries the Space's admin HF_TOKEN in
-    # its default headers, which must never ride along to another service.
-    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
-        r = await client.post(
-            f"{BACKEND_API_URL}/v1/messages",
-            json=payload,
-            headers={"Authorization": f"Bearer {user_token}"},
-        )
+    r = await app.state.plain_client.post(
+        f"{BACKEND_API_URL}/v1/messages",
+        json=payload,
+        headers={"Authorization": f"Bearer {user_token}"},
+    )
     if r.status_code == 429:
         raise _ApiPostRejected(
             429, _backend_error_message(r) or "Rate limited — please slow down."
@@ -1028,10 +1049,7 @@ async def _proxy_backend_json(path: str) -> Any:
         raise HTTPException(
             503, "This view needs BACKEND_API_URL (the bucket-sync Space)."
         )
-    # A fresh client: app.state.client carries the Space's admin HF_TOKEN, which
-    # must never ride along to another service (the backend GETs are tokenless).
-    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
-        r = await client.get(f"{BACKEND_API_URL}{path}")
+    r = await app.state.plain_client.get(f"{BACKEND_API_URL}{path}")
     if not r.is_success:
         raise HTTPException(r.status_code, f"backend {path}: {r.text[:200]}")
     return r.json()
@@ -1102,12 +1120,11 @@ async def create_channel(post: ChannelCreate, request: Request) -> Any:
     if not HANDLE_RE.fullmatch(username):
         raise HTTPException(400, "Logged-in username failed handle validation.")
     payload = {"name": name, "agent_id": _human_handle(username), "body": body}
-    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
-        r = await client.post(
-            f"{BACKEND_API_URL}/v1/channels",
-            json=payload,
-            headers={"Authorization": f"Bearer {user_token}"},
-        )
+    r = await app.state.plain_client.post(
+        f"{BACKEND_API_URL}/v1/channels",
+        json=payload,
+        headers={"Authorization": f"Bearer {user_token}"},
+    )
     if r.status_code not in (200, 201):
         raise HTTPException(
             r.status_code,
@@ -1152,12 +1169,11 @@ async def subscribe_channel_proxy(name: str, post: ChannelNotify, request: Reque
     if level not in NOTIFY_LEVELS:
         raise HTTPException(400, f"notify must be one of {list(NOTIFY_LEVELS)}.")
     handle = _human_handle(username)
-    async with httpx.AsyncClient(timeout=httpx.Timeout(HUB_FETCH_TIMEOUT)) as client:
-        r = await client.post(
-            f"{BACKEND_API_URL}/v1/channels/{name}/subscribe",
-            json={"agent_id": handle, "notify": level},
-            headers={"Authorization": f"Bearer {user_token}"},
-        )
+    r = await app.state.plain_client.post(
+        f"{BACKEND_API_URL}/v1/channels/{name}/subscribe",
+        json={"agent_id": handle, "notify": level},
+        headers={"Authorization": f"Bearer {user_token}"},
+    )
     if r.status_code != 200:
         raise HTTPException(
             r.status_code,
