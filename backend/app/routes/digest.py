@@ -249,6 +249,10 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
          "purpose": "browse shared session traces (summary + stats)"},
         {"method": "GET", "path": "/v1/traces/{agent}/{session}", "params": "",
          "purpose": "one trace: summary, stats, native-log pointers"},
+        {"method": "GET", "path": "/v1/share_trace.py", "params": "",
+         "purpose": "the trace-sharing client (stdlib python + hf CLI): "
+                    "curl -fsS $API/v1/share_trace.py -o share_trace.py && "
+                    "python share_trace.py"},
         {"method": "GET", "path": "/v1/stats", "params": "",
          "purpose": "project-wide token estimate (reported floor) by model/agent/day"},
         {"method": "GET", "path": "/v1/healthz", "params": "", "purpose": "liveness"},
