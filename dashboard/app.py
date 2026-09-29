@@ -197,9 +197,39 @@ app.add_middleware(
 # ──────────────────────────────────────────────────────────────
 # Health & config
 # ──────────────────────────────────────────────────────────────
+# /api/health used to return 200 just for the process being up, even in "hub"
+# mode with a dead/unscoped HF_TOKEN — bootstrap's health poll would then call
+# the dashboard "ready" while every /api/* call 401s. This does one cheap real
+# Hub read (a tree listing, no file contents) so health reflects whether the
+# token can actually read the bucket. Cached briefly since bootstrap (and any
+# uptime monitor) may poll every few seconds.
+_HEALTH_CACHE_TTL = 15.0
+_health_cache: dict[str, Any] = {"ts": 0.0, "detail": None}
+
+
+async def _check_bucket_reachable() -> str | None:
+    if time.monotonic() - _health_cache["ts"] < _HEALTH_CACHE_TTL:
+        return _health_cache["detail"]
+    try:
+        client: httpx.AsyncClient = app.state.client
+        r = await client.get(f"{HUB}/api/buckets/{BUCKET}/tree/{AGENTS_PREFIX}")
+        # 404 just means the agents/ folder doesn't exist yet — the bucket
+        # itself is still reachable with this token.
+        detail = None if (r.is_success or r.status_code == 404) else f"HTTP {r.status_code}"
+    except Exception as exc:
+        detail = str(exc)
+    _health_cache["ts"] = time.monotonic()
+    _health_cache["detail"] = detail
+    return detail
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     mode = "local" if LOCAL_BUCKET_DIR else ("hub" if HF_TOKEN else "unconfigured")
+    if mode == "hub":
+        detail = await _check_bucket_reachable()
+        if detail:
+            raise HTTPException(503, f"HF_TOKEN cannot read {BUCKET}: {detail}")
     return {
         "ok": True,
         "mode": mode,
