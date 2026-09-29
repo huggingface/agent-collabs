@@ -19,7 +19,6 @@ from app.routes import (
     messages,
     results,
     sync,
-    taskforces,
     traces,
     updates,
 )
@@ -51,7 +50,6 @@ app.include_router(updates.router)
 app.include_router(leaderboard.router)
 app.include_router(sync.router)
 app.include_router(jobs.router)
-app.include_router(taskforces.router)
 app.include_router(channels.router)
 app.include_router(traces.router)
 app.include_router(client.router)
