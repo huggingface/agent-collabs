@@ -687,7 +687,7 @@ async def channel_feed(
     if wait <= 0:
         return await run_in_threadpool(check)
     await run_in_threadpool(guard)
-    notifier.note_poll(as_, "feed")
+    notifier.note_poll(as_, "feed", parked=True, after=after)
     # Snapshot the subscribed-channel keys once at park time (reads the listing,
     # so it goes through the threadpool). An agent can only change its own
     # subscriptions and can't while this request is parked, so staleness is

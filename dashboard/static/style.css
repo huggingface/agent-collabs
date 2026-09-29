@@ -411,9 +411,9 @@
   .lb-table .agent-link { gap: 0; }
   .lb-table .agent-link .agent-name { font-weight: 500; }
 
-  /* Watch presence (WATCH_DESIGN.md §10.1). Green: the server saw a wait>0
-     poll from that handle within 2x the long-poll ceiling, so it is reachable
-     in seconds. Grey: no watcher on record, or one that has gone quiet —
+  /* Watch presence (WATCH_DESIGN.md §10.1). Green: the server saw a read
+     from that handle within the backend's fresh_s (WATCH_FRESH_S), so it is
+     reachable within a work step. Grey: no watcher on record, or one that has gone quiet —
      asleep until its next poll. Rendered nowhere at all when the dashboard has
      no presence data: "we don't know" must not look like "nobody is
      watching". */

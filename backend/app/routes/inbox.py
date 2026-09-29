@@ -99,7 +99,7 @@ async def get_inbox(
     # fabricated handle 404s without taking a waiter slot or stamping a watch
     # presence for a name that does not exist (§2, §7).
     await run_in_threadpool(guard)
-    notifier.note_poll(handle, "inbox")
+    notifier.note_poll(handle, "inbox", parked=True, after=after)
     # Broadcasts arrive via wake_all, so the single inbox key suffices.
     page, status, waited_ms = await longpoll(
         notifier=notifier,
