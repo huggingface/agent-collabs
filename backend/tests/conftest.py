@@ -86,7 +86,9 @@ def make_env():
                 get_read_model: lambda: read_model,
                 get_notifier: lambda: notifier,
                 get_org_roles: lambda: OrgRoles(hub, settings),
-                get_audit: lambda: AuditLogger(hub),
+                get_audit: lambda: AuditLogger(
+                    hub, record_client=not settings.audit_bucket_in_org
+                ),
                 get_dedup: lambda: dedup,
                 get_verification_status: lambda: verification,
                 get_verifier: lambda: verifier,

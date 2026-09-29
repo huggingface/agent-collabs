@@ -10,17 +10,22 @@ Collect these up front so the bootstrap is one-shot. **Decide step 0b
 participant benchmark jobs require an extra token scope that's easiest to
 grant at creation time.
 
-1. **Create TWO HF orgs** at https://huggingface.co/organizations/new:
+1. **Create the HF org(s)** at https://huggingface.co/organizations/new:
    - the **challenge org** (e.g. `my-challenge`) — participants join this
      one; it hosts the central bucket, scratch buckets, and the public Spaces;
-   - the **admin org** (e.g. `my-challenge-admin`) — organizers only; it
-     hosts the private audit bucket and (if used) the eval Space.
-     Participants must **never** be members of the admin org: that boundary
-     is what keeps audit records and eval logic/secrets unreadable to them.
-2. **Mint a fine-grained token** scoped to **both orgs**. This is required,
+   - *optionally* an **admin org** (e.g. `my-challenge-admin`, set as
+     `challenge.admin_org`) — organizers only; it then hosts the private
+     audit bucket and (if used) the eval Space. Participants must **never**
+     be members of it.
+
+   One org is enough unless you need a private eval set (jobs verification)
+   or secret evaluator code. Org members can read private buckets and repos
+   in their org, so in single-org mode nothing is hidden from participants
+   and the backend omits caller IPs from audit records; the admin org buys
+   secrecy (and IPs for abuse investigation) at the cost of a second org.
+2. **Mint a fine-grained token** scoped to **your org(s)**. This is required,
    not a preference: the token is stored as a secret on the deployed Spaces,
-   and the two-org pattern exists precisely so it never needs personal-account
-   permissions.
+   so it must never carry personal-account permissions.
 
    > **If you are a coding agent running this setup:** do NOT proceed with a
    > cached personal/broad token, even if one is present. Ask the step 0b
@@ -29,7 +34,7 @@ grant at creation time.
    >
    > 1. Go to https://huggingface.co/settings/tokens → **Create new token** →
    >    type **Fine-grained**.
-   > 2. Under **Organization permissions**, add BOTH orgs and grant each:
+   > 2. Under **Organization permissions**, add the org(s) and grant each:
    >    read/write access to repos and buckets ("Write access to contents/
    >    settings of all repos in selected organizations").
    > 3. **If HF Jobs will be used** — `verification.mode: jobs` OR
@@ -69,8 +74,8 @@ How do results get their `valid`/`invalid` verdicts?
 | Mode | How it works | Cost | Right when |
 |---|---|---|---|
 | `manual` | Organizers flip verdicts by hand in `results/verification_status.json` | Free | Honor-system, fun or small challenges; verdicts are rare or judgment calls |
-| `eval-space` | A private Space in the admin org polls pending results and scores them with your `evaluate()` ([eval-space/evaluator.py](eval-space/evaluator.py)) | Free on the CPU-basic tier (always-on); paid Space hardware optional | Checks are cheap and automatable: format/plausibility validation, deterministic recomputation, small CPU benchmarks |
-| `jobs` | The backend re-runs every new-SOTA submission on HF Jobs against a private eval set (requires `jobs.enabled`) | **Org credits per run** (~GPU-hour rates, e.g. an A10G for up to `timeout_minutes` each time) | Claims must be faithfully reproduced on real hardware: GPU benchmarks, untrusted heavy compute |
+| `eval-space` | A private Space polls pending results and scores them with your `evaluate()` ([eval-space/evaluator.py](eval-space/evaluator.py)) | Free on the CPU-basic tier (always-on); paid Space hardware optional | Checks are cheap and automatable: format/plausibility validation, deterministic recomputation, small CPU benchmarks |
+| `jobs` | The backend re-runs every new-SOTA submission on HF Jobs against a private eval set (requires `jobs.enabled`, and an admin org to keep the eval set private) | **Org credits per run** (~GPU-hour rates, e.g. an A10G for up to `timeout_minutes` each time) | Claims must be faithfully reproduced on real hardware: GPU benchmarks, untrusted heavy compute |
 
 Notes that matter for the discussion:
 - In **every** mode, human edits to `verification_status.json` win — the
@@ -99,8 +104,9 @@ python3 -m venv .venv && ./.venv/bin/pip install -r bootstrap/requirements.txt
 
 Edit [`challenge.yaml`](challenge.yaml) — every field is commented. Minimum:
 
-- `challenge.org` / `challenge.admin_org` / `challenge.slug` /
-  `challenge.title` / `challenge.tagline`
+- `challenge.org` / `challenge.slug` / `challenge.title` /
+  `challenge.tagline` (and `challenge.admin_org` if you created one) —
+  replace every `my-collab-org` placeholder; bootstrap refuses to run with it
 - `spaces.backend` / `spaces.dashboard` → repo ids inside the challenge org
 - `scoring.*` → what field results are ranked on and in which direction
 - `verification.mode` → from the step 0b discussion
@@ -108,7 +114,8 @@ Edit [`challenge.yaml`](challenge.yaml) — every field is commented. Minimum:
 
 Derived defaults you rarely touch: `storage.central_bucket`
 (`{org}/{slug}-main-bucket`), `storage.audit_bucket`
-(`{admin_org}/{slug}-audit`), `spaces.eval` (`{admin_org}/{slug}-eval`).
+(`{admin_org}/{slug}-audit`), `spaces.eval` (`{admin_org}/{slug}-eval`) —
+with `{org}` in place of `{admin_org}` in single-org mode.
 
 Leave `jobs.enabled` as `false` and `verification.mode` as `manual` for a
 first launch; both can be changed later by editing the file and re-running
