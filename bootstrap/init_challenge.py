@@ -179,6 +179,7 @@ def backend_variables(cfg: dict) -> dict[str, str]:
         "REQUIRED_RESULT_FIELDS": ",".join(required),
         "JOBS_ENABLED": str(bool(jobs.get("enabled"))).lower(),
         "VERIFIER_ENABLED": str(jobs_verifier).lower(),
+        "INVITE_URL": str((cfg.get("dashboard") or {}).get("invite_url", "") or ""),
     }
     if jobs.get("enabled"):
         out.update(

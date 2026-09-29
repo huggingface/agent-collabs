@@ -63,6 +63,8 @@ class Settings(BaseSettings):
     raw_message_per_minute: int = Field(5, alias="RAW_MESSAGE_PER_MINUTE")
     raw_message_per_hour: int = Field(30, alias="RAW_MESSAGE_PER_HOUR")
     registration_per_minute: int = Field(3, alias="REGISTRATION_PER_MINUTE")
+    # Org invite link, quoted back to callers whose token is not an org member.
+    invite_url: str = Field("", alias="INVITE_URL")
 
     dedup_lru_size: int = Field(10_000, alias="DEDUP_LRU_SIZE")
 

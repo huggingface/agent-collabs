@@ -9,7 +9,7 @@ from huggingface_hub.errors import HfHubHTTPError
 
 from app.config import Settings
 from app.frontmatter import serialise
-from app.hub import HubIdentity, ListedFile, OrgMemberRole
+from app.hub import HubIdentity, HubUnreachable, ListedFile, OrgMemberRole
 from app.naming import SourceURI, parse_source_uri
 
 
@@ -48,6 +48,13 @@ class FakeHub:
         self.whoami_email: str | None = "test-user@example.com"
         self.whoami_orgs: set[str] = {settings.org}
         self.whoami_fails = False
+        self.whoami_unreachable = False
+        # Writes made with a caller's token: a bucket's creator is its owner
+        # and only the owner may write (the org ACL). A bucket seeded by a
+        # test without an owner is writable by the caller.
+        self.bucket_owners: dict[str, str] = {}
+        self.caller_writes: list[tuple[str, str, str]] = []  # (bucket, path, token)
+        self.created_buckets: list[tuple[str, str]] = []  # (bucket, token)
         # Scripted challenge-org member roles for the organizer-broadcast gate.
         self.org_roles: dict[str, str] = {}
         self.org_roles_by_email: dict[str, tuple[str, str]] = {}
@@ -237,10 +244,23 @@ class FakeHub:
     def bucket_exists(self, bucket: str) -> bool:
         return bucket in self.buckets
 
+    def create_bucket_as(self, bucket: str, token: str) -> None:
+        self.created_buckets.append((bucket, token))
+        self.buckets.setdefault(bucket, {})
+        self.bucket_owners.setdefault(bucket, self.whoami_user)
+
+    def write_text_as(self, bucket: str, path: str, text: str, token: str) -> None:
+        if self.bucket_owners.get(bucket, self.whoami_user) != self.whoami_user:
+            raise PermissionError(f"403: {bucket} is not yours")
+        self.caller_writes.append((bucket, path, token))
+        self.write_text_to_bucket(bucket, path, text)
+
     def whoami_for_token(self, token: str) -> str:
         return self.whoami_user
 
     def whoami_identity(self, token: str) -> HubIdentity:
+        if self.whoami_unreachable:
+            raise HubUnreachable("503 from whoami")
         if self.whoami_fails:
             raise ValueError("whoami did not return a `name` field")
         return HubIdentity(

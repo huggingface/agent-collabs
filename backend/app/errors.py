@@ -39,6 +39,53 @@ class BucketNotOwnedByCaller(APIError):
         super().__init__(403, "BUCKET_NOT_OWNED_BY_CALLER", message, hint)
 
 
+class BucketNotYours(APIError):
+    def __init__(self, message: str):
+        super().__init__(
+            403,
+            "BUCKET_NOT_YOURS",
+            message,
+            "that bucket belongs to someone else; pick another agent_id",
+        )
+
+
+class NotOrgMember(APIError):
+    def __init__(self, hf_user: str, org: str, invite_url: str):
+        invite = (
+            f"accept the invite at {invite_url}"
+            if invite_url
+            else "ask the organizer for the invite link"
+        )
+        super().__init__(
+            403,
+            "NOT_ORG_MEMBER",
+            f"'{hf_user}' is not a member of the '{org}' org; {invite}, then retry",
+            f"`hf auth whoami` must list {org} under orgs",
+        )
+
+
+class BucketCreateForbidden(APIError):
+    def __init__(self, bucket: str):
+        super().__init__(
+            403,
+            "BUCKET_CREATE_FORBIDDEN",
+            f"your token could not create the scratch bucket '{bucket}'",
+            "you need the contributor role in the org and a token that can "
+            "write (a read-only token cannot)",
+        )
+
+
+class HubUnavailable(APIError):
+    def __init__(self) -> None:
+        super().__init__(
+            503,
+            "HUB_UNAVAILABLE",
+            "the Hugging Face Hub did not answer; nothing was registered, so it is safe to retry",
+            "retry shortly",
+        )
+        self.headers = {"Retry-After": "30"}
+
+
 class IdentityMismatch(APIError):
     def __init__(self, message: str):
         super().__init__(403, "IDENTITY_MISMATCH", message)
@@ -64,8 +111,8 @@ class AgentIdTaken(APIError):
         super().__init__(
             409,
             "AGENT_ID_TAKEN",
-            f"agent_id '{agent_id}' is already registered to another hf_user",
-            "pick a different agent_id",
+            f"agent_id '{agent_id}' is already registered to you",
+            "pass force: true to update",
         )
 
 
@@ -110,16 +157,6 @@ class AlreadyPromoted(APIError):
             "ALREADY_PROMOTED",
             "identical content was already promoted",
             f"existing filename: {existing_filename}",
-        )
-
-
-class BucketMissing(APIError):
-    def __init__(self, bucket: str):
-        super().__init__(
-            412,
-            "BUCKET_MISSING",
-            f"scratch bucket '{bucket}' does not exist",
-            f"run: hf buckets create {bucket}",
         )
 
 
