@@ -7,9 +7,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import httpx
 from huggingface_hub import (
     batch_bucket_files,
     bucket_info,
+    create_bucket,
     download_bucket_files,
     list_bucket_tree,
     whoami,
@@ -49,6 +51,31 @@ class OrgMemberRole:
     role: str
 
 
+class HubUnreachable(Exception):
+    """The Hub answered 5xx/429 or not at all: transient, safe to retry."""
+
+
+def _status(e: Exception) -> int | None:
+    resp = getattr(e, "response", None)
+    return getattr(resp, "status_code", None)
+
+
+def _transient(e: Exception) -> bool:
+    if isinstance(e, httpx.TransportError):
+        return True
+    status = _status(e)
+    return isinstance(e, HfHubHTTPError) and (status is None or status >= 500 or status == 429)
+
+
+def _raise_caller_write_error(e: Exception) -> None:
+    """A write refused for a caller's token raises PermissionError; an outage
+    raises HubUnreachable; anything else returns for the caller to re-raise."""
+    if _status(e) in (401, 403):
+        raise PermissionError(str(e)) from e
+    if _transient(e):
+        raise HubUnreachable(str(e)) from e
+
+
 class HubClient:
     def __init__(self, settings: Settings):
         self._settings = settings
@@ -60,12 +87,36 @@ class HubClient:
     # ───────────────────────── Bucket existence & identity ─────────────────────────
 
     def bucket_exists(self, bucket: str) -> bool:
+        """Only a 404 means "no such bucket"; a Hub outage raises
+        HubUnreachable instead of looking like a missing bucket."""
         try:
             bucket_info(bucket, token=self._token)
             return True
-        except (RepositoryNotFoundError, HfHubHTTPError) as e:
-            log.debug("bucket_exists(%s) -> False (%s)", bucket, e)
-            return False
+        except (HfHubHTTPError, httpx.TransportError) as e:
+            if isinstance(e, RepositoryNotFoundError) or _status(e) == 404:
+                return False
+            if _transient(e):
+                raise HubUnreachable(str(e)) from e
+            raise
+
+    def create_bucket_as(self, bucket: str, token: str) -> None:
+        """Create `bucket` with the caller's token so the caller owns it (only
+        its creator and org admins can then write there). Default visibility.
+        Raises PermissionError if the token may not create it."""
+        try:
+            create_bucket(bucket, exist_ok=True, token=token)
+        except (HfHubHTTPError, httpx.TransportError) as e:
+            _raise_caller_write_error(e)
+            raise
+
+    def write_text_as(self, bucket: str, path: str, text: str, token: str) -> None:
+        """Write one file with the caller's token. Raises PermissionError when
+        the Hub refuses (the bucket is not the caller's)."""
+        try:
+            batch_bucket_files(bucket_id=bucket, add=[(text.encode("utf-8"), path)], token=token)
+        except (HfHubHTTPError, httpx.TransportError) as e:
+            _raise_caller_write_error(e)
+            raise
 
     def bucket_author(self, bucket: str) -> str | None:
         """Return the `author` field from BucketInfo (the org name for org buckets).
@@ -93,7 +144,12 @@ class HubClient:
         OAuth app requests the email scope, the email lets the organizer gate
         perform a targeted org-member lookup instead of scanning the full org.
         """
-        info = whoami(token=token)
+        try:
+            info = whoami(token=token)
+        except (HfHubHTTPError, httpx.TransportError) as e:
+            if _transient(e):
+                raise HubUnreachable(str(e)) from e
+            raise
         if not isinstance(info, dict) or not info.get("name"):
             raise ValueError("whoami did not return a `name` field")
         orgs = {
