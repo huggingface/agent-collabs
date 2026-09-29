@@ -22,9 +22,10 @@ import share_trace as st  # noqa: E402
 
 
 CWD = "/work/proj"  # absolute; detect only uses it to compute slugs / cwd-match
+# Env the client reads; cleared so the host environment never leaks into tests.
 _MARKERS = (
     "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
-    "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+    "CODEX_HOME", "CLAUDE_CONFIG_DIR", "COLLAB_BACKEND", "API",
 )
 
 
@@ -491,3 +492,59 @@ def test_claude_code_usage_is_counted_once_per_message_id(tmp_path):
     }
     assert fields["extensions"]["api_requests"] == 3
     assert fields["activity"] == {"tool_calls": 2, "tool_calls_by_name": {"Bash": 1, "Read": 1}}
+
+
+def _run(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["share_trace.py", *argv])
+    return st.main()
+
+
+def test_unknown_harness_with_transcript_ships_minimal_manifest(home, monkeypatch, tmp_path, capsys):
+    transcript = tmp_path / "session-1.log"
+    transcript.write_text("anything\n")
+    assert _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "harness    : cursor" in out
+    assert "stats will be partial" in out
+
+
+def test_harness_must_be_a_slug(home, monkeypatch):
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "--harness", "Not A Slug", "--dry-run")
+    with pytest.raises(SystemExit, match="--transcript"):
+        _run(monkeypatch, "--harness", "cursor", "--dry-run")
+
+
+def test_backend_falls_back_to_api_env(home, monkeypatch, tmp_path):
+    monkeypatch.delenv("COLLAB_BACKEND", raising=False)
+    monkeypatch.setenv("API", "https://api.example")
+    seen = []
+    monkeypatch.setattr(st, "_fetch_v1", lambda backend: seen.append(backend))
+    transcript = tmp_path / "s.log"
+    transcript.write_text("x\n")
+    _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--dry-run")
+    assert seen == ["https://api.example"]
+
+
+def test_stats_share_never_needs_confirmation(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    kw = dict(log_path=Path("x.jsonl"), uncertain=True, yes=False, raw=False, privacy="balanced")
+    st._confirm_or_exit(share="stats", **kw)  # no exit, no prompt
+    with pytest.raises(SystemExit, match="--yes"):
+        st._confirm_or_exit(share="full", **kw)
+
+
+def test_promotion_failure_exits_non_zero(home, monkeypatch, tmp_path, capsys):
+    transcript = tmp_path / "s.log"
+    transcript.write_text("x\n")
+    monkeypatch.setattr(st, "_hf_cp", lambda local, dest: None)
+    monkeypatch.setattr(st.shutil, "which", lambda _: "/usr/bin/hf")
+
+    def fail(*a, **k):
+        raise st.urllib.error.URLError("down")
+
+    monkeypatch.setattr(st.urllib.request, "urlopen", fail)
+    rc = _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript),
+              "--agent-id", "a1", "--org", "o", "--slug", "c", "--backend", "https://b.example")
+    assert rc == 1
+    assert "backend promotion failed" in capsys.readouterr().out
