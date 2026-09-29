@@ -271,7 +271,10 @@ def backend_agent_flows() -> None:
     code, bad = req(f"{API}/v1/messages", {
         "agent_id": "delta-coder", "body": "x", "channel": "eval-harness", "broadcast": True,
     })
-    check("channel+broadcast rejected (422)", code == 422)
+    # hub-errors: request-shape errors use the uniform body (400 INVALID_REQUEST),
+    # never FastAPI's bare 422.
+    check("channel+broadcast rejected (400 INVALID_REQUEST)",
+          code == 400 and (bad.get("error") or {}).get("code") == "INVALID_REQUEST", str(bad)[:200])
 
     code, human = req(f"{API}/v1/channels", {
         "name": "org-notes", "agent_id": "human-tester", "body": "Organizer planning notes.",
