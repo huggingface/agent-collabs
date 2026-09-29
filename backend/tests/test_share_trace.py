@@ -459,3 +459,35 @@ def test_session_id_must_be_a_safe_bucket_component():
     assert st._safe_session_id("rollout-2026.06_29") == "rollout-2026.06_29"
     with pytest.raises(SystemExit, match="safe --session-id"):
         st._safe_session_id("../another-session")
+
+
+def test_claude_code_usage_is_counted_once_per_message_id(tmp_path):
+    # Claude Code writes one line per content block; lines of one API response
+    # repeat message.id and usage. Summing every line over-counted tokens.
+    usage = {"input_tokens": 10, "output_tokens": 5,
+             "cache_read_input_tokens": 100, "cache_creation_input_tokens": 1}
+
+    def line(mid, content):
+        msg = {"model": "m", "content": content, "usage": usage}
+        if mid:
+            msg["id"] = mid
+        return json.dumps({"type": "assistant", "sessionId": "s", "message": msg})
+
+    tool = {"type": "tool_use", "id": "tu1", "name": "Bash"}
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text("\n".join([
+        line("msg_1", [{"type": "thinking"}]),
+        line("msg_1", [{"type": "text"}]),
+        line("msg_1", [tool]),
+        line("msg_1", [tool]),  # same tool_use block written twice
+        line("msg_2", [{"type": "tool_use", "id": "tu2", "name": "Read"}]),
+        line(None, [{"type": "text"}]),  # no id: still counts once
+    ]) + "\n")
+
+    fields = st.adapter_claude_code(transcript)
+    assert fields["usage"] == {
+        "input_tokens": 30, "output_tokens": 15, "cache_read_tokens": 300,
+        "cache_creation_tokens": 3, "total_tokens": 348,
+    }
+    assert fields["extensions"]["api_requests"] == 3
+    assert fields["activity"] == {"tool_calls": 2, "tool_calls_by_name": {"Bash": 1, "Read": 1}}
