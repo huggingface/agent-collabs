@@ -14,7 +14,6 @@ from app.deps import (
     get_hub,
     get_read_model,
     get_settings_dep,
-    get_verification_status,
     get_verifier,
 )
 from app.errors import AlreadyPromoted, NotFound, RateLimited
@@ -34,7 +33,7 @@ from app.read_model import ReadModel
 from app.routes.messages import require_registered
 from app.trace_stats import agent_traces
 from app.validation import read_source_text, resolve_source, validate_agent_id
-from app.verification import PENDING, VerificationStatusStore
+from app.verification import PENDING
 from app.verifier import Verifier
 
 
@@ -57,7 +56,6 @@ def post_result(
     audit: AuditLogger = Depends(get_audit),
     dedup: PromotionLRU = Depends(get_dedup),
     bucket_limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
-    verification: VerificationStatusStore = Depends(get_verification_status),
     read_model: ReadModel = Depends(get_read_model),
     verifier: Verifier = Depends(get_verifier),
 ) -> ResultResponse:
@@ -92,9 +90,6 @@ def post_result(
     read_model.write_through(target, merged, source_body, len(content.encode("utf-8")))
     filename = target.rsplit("/", 1)[-1]
     dedup.record(content_hash(body_bytes), dest_folder, filename)
-    # Track the freshly promoted result as `pending` in the verification index.
-    # Best-effort: the result is already written, so a failure here must not 500.
-    verification.mark_pending(filename)
     # If this claims to beat the verified champion, re-run it on the private
     # set. Best-effort and async — the POST never fails or waits on it.
     verifier.maybe_trigger(filename, merged)

@@ -399,10 +399,6 @@ class HubClient:
     def write_text_to_bucket(self, bucket: str, target_path: str, text: str) -> None:
         self.write_bytes_to_bucket(bucket, target_path, text.encode("utf-8"))
 
-    def append_jsonl_audit(self, target_path: str, line: str) -> None:
-        """Append to the audit log in the private (out-of-org) audit bucket."""
-        self._append_jsonl(self._settings.audit_bucket, target_path, line)
-
     def read_audit_bytes(self, target_path: str) -> bytes | None:
         """Read a file from the private audit bucket.
 
@@ -428,19 +424,6 @@ class HubClient:
         batch_bucket_files(
             bucket_id=self._settings.audit_bucket,
             add=[(data, target_path)],
-            token=self._token,
-        )
-
-    def _append_jsonl(self, bucket: str, target_path: str, line: str) -> None:
-        try:
-            existing = self._download_one(bucket, target_path)
-        except FileNotFoundError:
-            existing = b""
-        if existing and not existing.endswith(b"\n"):
-            existing += b"\n"
-        batch_bucket_files(
-            bucket_id=bucket,
-            add=[(existing + line.encode("utf-8") + b"\n", target_path)],
             token=self._token,
         )
 

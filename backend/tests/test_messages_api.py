@@ -364,3 +364,72 @@ def test_raw_variant_needs_no_allowlist(env):
         json={"agent_id": "agent-1", "body": "hello", "type": "note"},
     )
     assert r.status_code == 201
+
+
+# ── retries (DESIGN.md §5 "Message retries") ─────────────────────────
+
+
+def _board_files(env) -> list[str]:
+    return [p for p in env.hub.buckets[env.settings.central_bucket] if p.startswith("message_board/")]
+
+
+def test_raw_retry_with_idempotency_key_returns_original_with_200(env):
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    post = {"agent_id": "agent-1", "body": "ping @agent-2", "idempotency_key": "k-1"}
+    first = env.client.post("/v1/messages", json=post)
+    assert first.status_code == 201
+    # Same key, even with a changed body: the key identifies the post.
+    again = env.client.post("/v1/messages", json={**post, "body": "ping again @agent-2"})
+    assert again.status_code == 200
+    assert again.json() == first.json()
+    assert len(_board_files(env)) == 1
+    assert len(env.hub.batch_writes) == 1  # no second post, no second fan-out
+    # A new key is a new message, even with the same body.
+    assert env.client.post("/v1/messages", json={**post, "idempotency_key": "k-2"}).status_code == 201
+    assert len(_board_files(env)) == 2
+
+
+def test_idempotency_key_is_scoped_per_agent_and_length_capped(env):
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    for agent in ("agent-1", "agent-2"):
+        r = env.client.post("/v1/messages", json={"agent_id": agent, "body": "hi", "idempotency_key": "k"})
+        assert r.status_code == 201
+    r = env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "x", "idempotency_key": "k" * 65})
+    assert r.json()["error"]["code"] == "TOO_LARGE"
+
+
+def test_bucket_retry_with_idempotency_key_returns_original_with_200(env):
+    seed_agent(env.hub, "agent-1")
+    uri = _seed_source(env, "agent-1", "drafts/m.md", "---\ntype: note\n---\nbody")
+    first = env.client.post("/v1/messages", json={"source": uri, "idempotency_key": "b-1"})
+    assert first.status_code == 201
+    again = env.client.post("/v1/messages", json={"source": uri, "idempotency_key": "b-1"})
+    assert again.status_code == 200
+    assert again.json()["filename"] == first.json()["filename"]
+    assert len(_board_files(env)) == 1
+
+
+def test_raw_repeat_body_without_key_is_a_duplicate_within_60s(make_env):
+    from app.dedup import RecentPosts
+    from app.deps import get_recent_posts
+    from app.main import app as fastapi_app
+
+    env = make_env()
+    now = [1000.0]
+    recent = RecentPosts(100, clock=lambda: now[0])
+    fastapi_app.dependency_overrides[get_recent_posts] = lambda: recent
+    seed_agent(env.hub, "agent-1")
+    post = {"agent_id": "agent-1", "body": "done with the sweep"}
+    first = env.client.post("/v1/messages", json=post)
+    assert first.status_code == 201
+    now[0] += 59
+    again = env.client.post("/v1/messages", json=post)
+    assert again.status_code == 200
+    assert again.json()["filename"] == first.json()["filename"]
+    assert len(_board_files(env)) == 1
+    # Past the window the same body is a new message.
+    now[0] += 2
+    assert env.client.post("/v1/messages", json=post).status_code == 201
+    assert len(_board_files(env)) == 2
