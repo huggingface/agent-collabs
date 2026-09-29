@@ -1,7 +1,10 @@
 import json
 
+import pytest
+
 from app.config import Settings
 from app.frontmatter import serialise
+from app.hub import DownloadFailed, ListingFailed
 from app.read_model import ReadModel
 from fakes import FakeHub, seed_message
 
@@ -70,13 +73,80 @@ def test_write_through_is_visible_without_a_new_listing():
     assert hub.list_calls == listed  # TTL untouched — served from the overlay
 
 
-def test_transient_empty_listing_keeps_cached_entries():
+def test_failed_listing_keeps_cached_entries():
     rm, hub, clock, s = make_rm()
     seed_message(hub, "20260601-120000-000", "agent-1", "hello")
     assert len(rm.records("message_board")) == 1
     hub.fail_listings = True
     clock.t += s.listing_ttl_s + 1
-    assert len(rm.records("message_board")) == 1  # nothing is ever deleted
+    assert len(rm.records("message_board")) == 1  # cached truth, not []
+    assert rm._folder("message_board").last_error is not None
+    hub.fail_listings = False
+    clock.t += s.listing_ttl_s + 1
+    rm.records("message_board")
+    assert rm._folder("message_board").last_error is None  # cleared on success
+
+
+def test_failed_listing_backs_off_one_ttl():
+    rm, hub, clock, s = make_rm()
+    rm.records("message_board")
+    hub.fail_listings = True
+    clock.t += s.listing_ttl_s + 1
+    rm.records("message_board")
+    listed = hub.list_calls
+    rm.records("message_board")
+    assert hub.list_calls == listed  # an outage is not one listing per read
+
+
+def test_failed_listing_on_a_cold_folder_raises():
+    rm, hub, _clock, _s = make_rm()
+    seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    hub.fail_next_listing("message_board")
+    with pytest.raises(ListingFailed):
+        rm.records("message_board")
+    assert len(rm.records("message_board")) == 1  # the next read retries
+
+
+def test_empty_listing_is_the_truth_once_failures_are_explicit():
+    rm, hub, clock, s = make_rm()
+    fn = seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    assert len(rm.records("message_board")) == 1
+    del hub.buckets[s.central_bucket][f"message_board/{fn}"]  # admin removal
+    clock.t += s.listing_ttl_s + 1
+    assert rm.records("message_board") == []
+
+
+def test_partial_listing_is_not_cached_and_a_cursor_does_not_skip():
+    """A listing interrupted mid-way must not replace the folder: here it
+    would have shown m3 without m2, a watcher would advance its after= cursor
+    to m3, and m2 would be lost to it for good once the full listing
+    returned."""
+    rm, hub, clock, s = make_rm()
+    m1 = seed_message(hub, "20260601-120000-000", "agent-1", "one")
+    assert [r.filename for r in rm.records("message_board")] == [m1]
+    cached = dict(rm._folder("message_board").files)
+
+    seed_message(hub, "20260603-120000-000", "agent-1", "three")
+    m2 = seed_message(hub, "20260602-120000-000", "agent-1", "two")  # listed last
+    hub.partial_listing("message_board", drop=1)  # the page holding m2 fails
+    clock.t += s.listing_ttl_s + 1
+
+    def after(cursor):
+        return [r.filename for r in rm.records("message_board") if r.filename > cursor]
+
+    assert after(m1) == []  # the cached truth, not "m3 but no m2"
+    assert rm._folder("message_board").files == cached
+    clock.t += s.listing_ttl_s + 1
+    assert after(m1)[0] == m2  # nothing skipped once the listing completes
+
+
+def test_failed_batch_download_raises_rather_than_dropping_records():
+    rm, hub, _clock, _s = make_rm()
+    fn = seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    hub.fail_next_read("message_board/")
+    with pytest.raises(DownloadFailed):
+        rm.record("message_board", fn)  # not None, which would be a false 404
+    assert rm.record("message_board", fn).body.strip() == "hello"
 
 
 def test_lru_eviction_bounds_memory_but_never_drops_results():

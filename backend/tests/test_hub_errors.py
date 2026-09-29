@@ -92,3 +92,20 @@ def test_raw_refs_accepts_a_list(env):
     assert r.json()["mentions_delivered"] == ["agent-2"]
     fm = env.client.get(f"/v1/messages/{r.json()['filename']}").json()["frontmatter"]
     assert fm["refs"] == refs
+
+
+def test_cold_listing_failure_is_503_not_an_empty_folder(env):
+    env.hub.seed("message_board/20260601-100000-000_agent-1.md", "---\nagent: agent-1\n---\nhi")
+    env.hub.fail_next_listing("message_board")
+    r = env.client.get("/v1/messages")
+    _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert r.headers["retry-after"] == "5"
+    assert env.client.get("/v1/messages").json()["count"] == 1
+
+
+def test_failed_batch_download_is_503_not_404(env):
+    fn = "20260601-100000-000_agent-1.md"
+    env.hub.seed(f"message_board/{fn}", "---\nagent: agent-1\n---\nhi")
+    env.hub.fail_next_read("message_board/")
+    _error(env.client.get(f"/v1/messages/{fn}"), 503, "STORAGE_UNAVAILABLE")
+    assert env.client.get(f"/v1/messages/{fn}").status_code == 200

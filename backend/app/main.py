@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.errors import APIError, InvalidRequest, StorageUnavailable, TooLarge
+from app.hub import DownloadFailed, ListingFailed
 from app.routes import (
     agents,
     channels,
@@ -77,6 +78,15 @@ async def _storage_error_handler(request: Request, exc: HubHTTPError) -> JSONRes
     logging.getLogger(__name__).warning("storage backend failed: %r", exc)
     response = getattr(exc, "response", None)
     return await _api_error_handler(request, StorageUnavailable(getattr(response, "status_code", None)))
+
+
+@app.exception_handler(ListingFailed)
+@app.exception_handler(DownloadFailed)
+async def _read_failed_handler(request: Request, exc: RuntimeError) -> JSONResponse:
+    """A cold-folder listing or a batch download failed: fail loudly with a
+    retryable 503 rather than serve a partial folder or a false 404."""
+    logging.getLogger(__name__).warning("storage read failed: %s", exc)
+    return await _api_error_handler(request, StorageUnavailable())
 
 
 @app.exception_handler(RequestValidationError)
