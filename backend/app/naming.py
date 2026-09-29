@@ -148,7 +148,7 @@ def agent_from_filename(filename: str) -> str | None:
 
 
 # Flat index mapping each promoted result's basename -> verification state
-# (`pending` | `valid` | `invalid`). Maintained by VerificationStatusStore.
+# (`pending` | `valid` | `invalid`); an absent entry reads as `pending`.
 VERIFICATION_STATUS_PATH = "results/verification_status.json"
 
 
