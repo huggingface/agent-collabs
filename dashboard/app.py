@@ -1060,7 +1060,10 @@ async def _proxy_backend_json(path: str) -> Any:
         )
     r = await app.state.plain_client.get(f"{BACKEND_API_URL}{path}")
     if not r.is_success:
-        raise HTTPException(r.status_code, f"backend {path}: {r.text[:200]}")
+        # 503 means "no backend configured" to the SPA (above), which hides
+        # the feature; a backend outage must read as an outage instead.
+        status = 502 if r.status_code >= 500 else r.status_code
+        raise HTTPException(status, f"backend {path}: {r.text[:200]}")
     return r.json()
 
 
