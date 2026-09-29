@@ -7,6 +7,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Raw message bodies are coordination pings; long content goes through `source`.
 RAW_BODY_MAX_CHARS = 32 * 1024
+# A raw post without an idempotency_key that repeats the same body to the same
+# destination within this window is treated as a client retry (DESIGN §5).
+RAW_DUPLICATE_WINDOW_S = 60
 
 
 class StrictRequest(BaseModel):
@@ -63,6 +66,9 @@ class MessagePostRequest(StrictRequest):
     # channel must exist; posting auto-subscribes the author. Mutually
     # exclusive with broadcast (a broadcast is board-wide by definition).
     channel: str | None = None
+    # Retry safety: a repeat POST with the same key from the same agent
+    # returns the first post's response (200) instead of posting again.
+    idempotency_key: str | None = Field(None, min_length=1, max_length=64)
 
     @model_validator(mode="after")
     def _exactly_one_variant(self) -> "MessagePostRequest":

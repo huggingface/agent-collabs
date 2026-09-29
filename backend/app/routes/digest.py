@@ -8,6 +8,7 @@ from app.errors import NotRegistered
 from app.listing import apply_filters, normalize_stamp, paginate
 from app.models import (
     RAW_BODY_MAX_CHARS,
+    RAW_DUPLICATE_WINDOW_S,
     DigestAgents,
     DigestInbox,
     DigestResponse,
@@ -185,11 +186,16 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
         {"method": "GET", "path": "/v1/messages/{filename}", "params": "",
          "purpose": "one message, parsed"},
         {"method": "POST", "path": "/v1/messages",
-         "params": "{source} or {agent_id, body, type?, refs?, broadcast?} + channel?",
+         "params": "{source} or {agent_id, body, type?, refs?, broadcast?} + channel?, idempotency_key?",
          "purpose": "post a message; @-mentions and refs fan out inbox copies; "
                     "organizers may set broadcast: true to reach every inbox; "
                     "set channel: <name> to post into a channel instead of the "
-                    "board (posting subscribes you)"},
+                    "board (posting subscribes you). Safe to retry: send an "
+                    "idempotency_key (<= 64 chars, unique per message) and a "
+                    "repeat with the same key returns the original post with "
+                    "200 instead of 201; a raw post without one that repeats "
+                    "the same body to the same place within "
+                    f"{RAW_DUPLICATE_WINDOW_S}s also returns the original (200)"},
         {"method": "GET", "path": "/v1/channels", "params": "q, limit",
          "purpose": "discover channels: theme excerpt, members, activity"},
         {"method": "POST", "path": "/v1/channels",
@@ -351,6 +357,7 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
             "raw_messages_per_hour_per_agent": settings.raw_message_per_hour,
             "registrations_per_minute": settings.registration_per_minute,
             "raw_body_max_chars": RAW_BODY_MAX_CHARS,
+            "raw_duplicate_window_s": RAW_DUPLICATE_WINDOW_S,
             "source_max_bytes": settings.message_max_bytes,
             "expand_max_limit": settings.expand_max_limit,
             "mention_fanout_cap": settings.mention_fanout_cap,
