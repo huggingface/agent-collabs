@@ -3,12 +3,12 @@ from __future__ import annotations
 import re
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
 from app.audit import AuditLogger
 from app.auth import extract_bearer
 from app.config import Settings
-from app.dedup import PromotionLRU, content_hash
+from app.dedup import PromotionLRU, RecentPosts, content_hash
 from app.deps import (
     get_audit,
     get_bucket_write_limiter,
@@ -18,6 +18,7 @@ from app.deps import (
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
+    get_recent_posts,
     get_settings_dep,
 )
 from app.errors import (
@@ -38,6 +39,7 @@ from app.hub import HubClient, HubIdentity
 from app.org_roles import OrgRoles
 from app.listing import list_message_like
 from app.models import (
+    RAW_DUPLICATE_WINDOW_S,
     MessageListing,
     MessagePostRequest,
     MessageRecord,
@@ -146,11 +148,13 @@ def _server_message_fm(agent_id: str, via: str, dt: datetime) -> dict:
 def post_message(
     req: MessagePostRequest,
     request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
     settings: Settings = Depends(get_settings_dep),
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
     dedup: PromotionLRU = Depends(get_dedup),
+    recent: RecentPosts = Depends(get_recent_posts),
     bucket_limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
     read_model: ReadModel = Depends(get_read_model),
@@ -177,6 +181,10 @@ def post_message(
             )
         parsed, agent_id = resolve_source(settings, req.source)
         require_registered(read_model, hub, agent_id)
+        key = (agent_id, req.idempotency_key)
+        if req.idempotency_key and (replay := recent.get(key)):
+            response.status_code = 200
+            return replay
 
         allowed, retry = bucket_limiter.try_consume(parsed.bucket)
         if not allowed:
@@ -247,7 +255,7 @@ def post_message(
             extra=audit_extra or None,
         )
 
-        return MessageResponse(
+        result = MessageResponse(
             filename=filename,
             via="bucket",
             path=target,
@@ -255,6 +263,9 @@ def post_message(
             channel=req.channel,
             auto_subscribed=auto_subscribed,
         )
+        if req.idempotency_key:
+            recent.record(key, result)
+        return result
 
     # raw variant
     assert req.agent_id is not None and req.body is not None
@@ -277,6 +288,18 @@ def post_message(
         require_registered(read_model, hub, req.agent_id)
         via = "raw"
         default_type = "agent"
+
+    # A retry returns the first post's response: matched on the idempotency
+    # key when given, else on the same body to the same place within the window.
+    if req.idempotency_key:
+        key, max_age = (req.agent_id, req.idempotency_key), None
+    else:
+        dest = f"channels/{req.channel}" if req.channel else "message_board"
+        key = (req.agent_id, dest, content_hash(req.body.encode("utf-8")))
+        max_age = RAW_DUPLICATE_WINDOW_S
+    if replay := recent.get(key, max_age_s=max_age):
+        response.status_code = 200
+        return replay
 
     allowed, retry = raw_limiter.try_consume(req.agent_id)
     if not allowed:
@@ -325,7 +348,7 @@ def post_message(
         extra=audit_extra or None,
     )
 
-    return MessageResponse(
+    result = MessageResponse(
         filename=filename,
         via=via,
         path=target,
@@ -334,6 +357,8 @@ def post_message(
         channel=req.channel,
         auto_subscribed=auto_subscribed,
     )
+    recent.record(key, result)
+    return result
 
 
 @router.get("/v1/messages", response_model=MessageListing)
