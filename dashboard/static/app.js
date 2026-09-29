@@ -664,7 +664,7 @@ function onlineSuffix(roster) {
 function agentsStatHtml(n, activeCount) {
   const roster = rosterAgents();
   if (!roster.length) return `number of active agents: ${n(activeCount)}`;
-  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}`;
+  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}${staleChipHtml()}`;
 }
 
 // One global notice while the backend proxies fail (a 503 is not a failure:
@@ -704,6 +704,7 @@ async function refreshWatching() {
   } catch { noteBackend(false); /* same: presence is additive, never load-bearing */ }
   rerenderAgentNames();
   renderTopSubtext();   // the agents stat's "N online" suffix
+  renderAgentsPanel();
   if (chMembersOpen) renderChannelMembers();
 }
 
@@ -1661,6 +1662,7 @@ async function refreshAll({ first = false } = {}) {
     if (freshMsgs.status === 'fulfilled' && freshResults.status === 'fulfilled') {
       writeCache(freshMsgs.value, freshResults.value);
     }
+    renderAgentsPanel();
     return { added };
   } finally {
     refreshing = false;
@@ -2903,6 +2905,127 @@ async function refreshTraces() {
       ? `${items.length} of ${count}` : `${count} session${count === 1 ? '' : 's'}`;
   } catch { /* traces are best-effort; never disrupt the dashboard */ }
 }
+
+// ─────────────────────────────────────────────────────────────
+//  AGENTS ROSTER
+//  Every registered agent in one table: who owns it, when it last spoke,
+//  whether its watcher is alive, whether it shared traces, its best score.
+//  Built only from state the other refreshes already hold.
+// ─────────────────────────────────────────────────────────────
+const agentsTitleEl = document.getElementById('agentsSectionTitle');
+const agentsWrapEl = document.getElementById('agentsWrap');
+const agentsBodyEl = document.getElementById('agentsBody');
+const agentsHintEl = document.getElementById('agentsHint');
+// agent → shared session count, filled by refreshTraces (null = unknown).
+let traceSessions = null;
+// Default: presence, worst first. Clicking the same header flips the order.
+let agentsSort = { key: 'presence', worstFirst: true };
+
+// online ≤ fresh_s < stale ≤ 3×fresh_s < offline (or never seen). null when
+// there is no presence data to judge by.
+function presenceOf(id) {
+  const st = watchState(id);
+  if (!st) return null;
+  const age = st.seen ? st.age : Infinity;
+  const level = st.live ? 'online' : age <= 3 * watchPresence.freshS ? 'stale' : 'offline';
+  return { level, age, mode: st.mode };
+}
+
+function notOnlineAgents() {
+  const out = { stale: 0, offline: 0 };
+  for (const id of rosterAgents()) {
+    const p = presenceOf(id);
+    if (p && p.level !== 'online') out[p.level]++;
+  }
+  return out;
+}
+
+// The header chip next to "N online": only when somebody is not.
+function staleChipHtml() {
+  const { stale, offline } = notOnlineAgents();
+  const n = stale + offline;
+  if (!n) return '';
+  return ` <button type="button" class="stale-chip${offline ? ' offline' : ''}" id="staleChip"`
+    + ` title="${stale} stale · ${offline} offline — show the agents table">${n} stale</button>`;
+}
+
+function newestMessageByAgent() {
+  const out = new Map();
+  for (const m of boardMessages) {
+    if (m.epoch > (out.get(m.agent) || 0)) out.set(m.agent, m.epoch);
+  }
+  return out;
+}
+
+function bestResultByAgent() {
+  const out = new Map();
+  for (const e of leaderboardEntries) {
+    if (e.verification === 'invalid') continue;
+    const cur = out.get(e.agent);
+    if (!cur || isBetter(e.score, cur.score)) out.set(e.agent, e);
+  }
+  return out;
+}
+
+function renderAgentsPanel() {
+  const roster = rosterAgents();
+  agentsTitleEl.hidden = agentsWrapEl.hidden = !roster.length;
+  if (!roster.length) return;
+  const lastMsg = newestMessageByAgent();
+  const best = bestResultByAgent();
+  const rows = roster.map(id => ({ id, info: agentMap.get(id), p: presenceOf(id), last: lastMsg.get(id) || 0 }));
+  // Worst = oldest/never. Unknown presence (no backend) sorts last.
+  const key = agentsSort.key === 'presence'
+    ? r => (r.p ? r.p.age : -1)
+    : r => -r.last;
+  const dir = agentsSort.worstFirst ? -1 : 1;
+  rows.sort((a, b) => dir * (key(a) - key(b)) || a.id.localeCompare(b.id));
+
+  agentsBodyEl.innerHTML = rows.map(({ id, info, p, last }) => {
+    const owner = info.hf_user
+      ? `<a class="agent-link" href="${escapeHtml(profileUrl(info.hf_user))}" target="_blank" rel="noopener noreferrer">${escapeHtml(info.hf_user)}</a>` : '—';
+    const stack = [info.model, info.harness].filter(Boolean).join(' · ') || '—';
+    const pill = p
+      ? `<span class="presence ${p.level}" title="${escapeHtml(p.mode ? `mode: ${p.mode}` : 'no watcher on record')}">${p.level}${p.age === Infinity ? '' : ` · ${fmtAge(p.age)}`}</span>`
+      : '—';
+    const n = traceSessions && traceSessions.get(id);
+    const b = best.get(id);
+    return `<tr>
+      <td class="agent">${renderAgentName(id)}</td>
+      <td>${owner}</td>
+      <td class="desc" title="${escapeHtml(stack)}">${escapeHtml(stack)}</td>
+      <td title="${escapeHtml(info.joined)}">${escapeHtml(info.joined.slice(0, 10) || '—')}</td>
+      <td>${last ? escapeHtml(fmtRelative(last)) : '<span class="muted2">never</span>'}</td>
+      <td>${pill}</td>
+      <td class="num">${n || '—'}</td>
+      <td class="num">${b ? `${escapeHtml(fmt2(b.score))}${b.verification === 'valid' ? ' ✓' : ''}` : '—'}</td>
+    </tr>`;
+  }).join('');
+  const { stale, offline } = notOnlineAgents();
+  agentsHintEl.textContent = `${roster.length} registered`
+    + (watchPresence ? ` · ${roster.length - stale - offline} online · ${stale} stale · ${offline} offline` : '');
+  agentsWrapEl.querySelectorAll('th.sortable').forEach(th => {
+    th.classList.toggle('sorted', th.dataset.sort === agentsSort.key);
+  });
+}
+
+agentsWrapEl.querySelector('thead').addEventListener('click', e => {
+  const th = e.target.closest('th.sortable');
+  if (!th) return;
+  agentsSort = th.dataset.sort === agentsSort.key
+    ? { key: agentsSort.key, worstFirst: !agentsSort.worstFirst }
+    : { key: th.dataset.sort, worstFirst: true };
+  renderAgentsPanel();
+});
+
+// The header chip is re-rendered with the stat line, so delegate the click.
+topSubtext.addEventListener('click', e => {
+  if (!e.target.closest('#staleChip')) return;
+  agentsTitleEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  agentsWrapEl.classList.remove('flash');
+  void agentsWrapEl.offsetWidth;  // restart the animation on repeat clicks
+  agentsWrapEl.classList.add('flash');
+});
 
 // A hidden tab polls 5× less often, and refreshes as soon as it is shown again.
 let wakePoll = () => {};
