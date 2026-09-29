@@ -143,8 +143,10 @@ def artifact_dest_dir(slug: str, agent_id: str) -> str:
     return f"artifacts/{slug}_{agent_id}/"
 
 
-def audit_log_path(dt: datetime) -> str:
-    return f"audit/{dt.strftime('%Y%m')}.jsonl"
+def audit_event_path(event: str, dt: datetime) -> str:
+    """One small object per audited event, grouped by month. Concatenating a
+    month's objects in filename order yields its JSONL log."""
+    return f"audit/{dt.strftime('%Y%m')}/{stamp_str(dt)}_{event}.json"
 
 
 # ── Trace & stats sharing (one record per session, see TRACES_DESIGN.md) ──

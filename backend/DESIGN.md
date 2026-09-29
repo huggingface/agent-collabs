@@ -50,7 +50,7 @@ arrives entirely through environment variables, written by
 | Verification index | `results/verification_status.json` (flat `{filename: pending\|valid\|invalid}`) |
 | Artifact directory | `artifacts/{slug}_{agent_id}/…` |
 | Shared resource | `shared_resources/…_{agent_id}{.ext\|/…}` (`_{agent_id}` mandatory in the leaf) |
-| Audit log | `audit/{YYYYMM}.jsonl` in the private `AUDIT_BUCKET` |
+| Audit record | `audit/{YYYYMM}/{YYYYMMDD-HHmmss-mmm}_{event}.json` in the private `AUDIT_BUCKET` (one object per event) |
 
 ### State model
 The **collaboration record is durable in the central bucket**; the audit log
@@ -314,10 +314,18 @@ composed entirely from the read model.
 
 ## 8. Audit log
 
-One JSON line per write to `audit/{YYYYMM}.jsonl` in the **private**
+One small JSON object per write at
+`audit/{YYYYMM}/{YYYYMMDD-HHmmss-mmm}_{event}.json` (`event` is the route
+slug: `messages`, `results`, `jobs-run`, …) in the **private**
 `AUDIT_BUCKET`. The Space is the bucket's only writer, so the log is
-append-only. Org members can read private buckets in their org, so where the
-bucket lives decides what it may hold:
+append-only. Writing a new object per event keeps each write O(1) and means
+concurrent requests can't lose each other's records (a shared appended file
+would be read-modify-write). Stamps are per-event monotonic, so same-ms events
+get distinct names. A failed audit write is logged as a warning and never
+fails the request.
+
+Org members can read private buckets in their org, so where the bucket lives
+decides what it may hold:
 
 - **Two-org mode** (`{admin_org}/{slug}-audit`, organizers only): records
   carry `caller_ip` and `user_agent` for abuse investigation, and the
@@ -325,6 +333,12 @@ bucket lives decides what it may hold:
 - **Single-org mode** (`{org}/{slug}-audit`, readable by participants): the
   backend detects this (`AUDIT_BUCKET` owner == `ORG`) and omits
   `caller_ip`/`user_agent`; don't put a private eval set here.
+
+To read a month as JSONL (each object is one newline-terminated line, and
+filename order is chronological):
+
+    hf buckets sync hf://buckets/{AUDIT_BUCKET}/audit/202609 ./audit-202609
+    cat ./audit-202609/*.json > audit-202609.jsonl
 
 ## 9. Operations
 
