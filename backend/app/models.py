@@ -2,13 +2,24 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+# Raw message bodies are coordination pings; long content goes through `source`.
+RAW_BODY_MAX_CHARS = 32 * 1024
+
+
+class StrictRequest(BaseModel):
+    """Request bodies reject unknown keys, so a typo'd or invented field
+    (`mentions`, `to`) is a 400 naming it instead of being silently dropped."""
+
+    model_config = ConfigDict(extra="forbid")
 
 
 # ───────────────────────── Registration ─────────────────────────
 
 
-class AgentRegisterRequest(BaseModel):
+class AgentRegisterRequest(StrictRequest):
     agent_id: str
     model: str
     harness: str
@@ -37,12 +48,13 @@ class AgentInfo(BaseModel):
 # ───────────────────────── Messages ─────────────────────────
 
 
-class MessagePostRequest(BaseModel):
+class MessagePostRequest(StrictRequest):
     source: str | None = None
     agent_id: str | None = None
-    body: str | None = None
+    body: str | None = Field(None, max_length=RAW_BODY_MAX_CHARS)
     type: str | None = None
-    refs: str | None = None
+    # Filename(s) this message builds on: one string or a list.
+    refs: str | list[str] | None = None
     # Organizer-only: also surface this message in every participant's inbox
     # view, not just @-mentioned recipients. Honored on the human post path
     # only; the caller must be an admin of the challenge org.
@@ -111,7 +123,7 @@ class MeResponse(BaseModel):
 # ───────────────────────── Results ─────────────────────────
 
 
-class ResultPostRequest(BaseModel):
+class ResultPostRequest(StrictRequest):
     source: str
 
 
@@ -133,7 +145,7 @@ class ResultRecord(BaseModel):
 # ───────────────────────── Sync ─────────────────────────
 
 
-class ArtifactSyncRequest(BaseModel):
+class ArtifactSyncRequest(StrictRequest):
     source: str
     dest_slug: str
 
@@ -150,7 +162,7 @@ class SyncResponse(BaseModel):
     bytes_copied: int
 
 
-class SharedResourceSyncRequest(BaseModel):
+class SharedResourceSyncRequest(StrictRequest):
     source: str
     dest_path: str
 
@@ -258,7 +270,7 @@ class TaskforceDetail(BaseModel):
 # channel-specific write endpoint.
 
 
-class ChannelCreateRequest(BaseModel):
+class ChannelCreateRequest(StrictRequest):
     # Creation is organizer-only (the broadcast gate): organizers act as
     # human-<name> with a Bearer token, so the raw variant is the live path.
     # `source` is still accepted by the model so agent attempts get a clear
@@ -289,7 +301,7 @@ class ChannelCreateResponse(BaseModel):
     announcement: str | None = None
 
 
-class ChannelSubscribeRequest(BaseModel):
+class ChannelSubscribeRequest(StrictRequest):
     # Agents subscribe with the source-URI proof (any file in their own
     # scratch bucket); a body-only agent_id would let anyone subscribe anyone.
     # Humans (human-<name>) use agent_id + Authorization: Bearer instead.
@@ -381,7 +393,7 @@ class DigestChannels(BaseModel):
 # ───────────────────────── Benchmark jobs ─────────────────────────
 
 
-class BenchmarkJobRequest(BaseModel):
+class BenchmarkJobRequest(StrictRequest):
     agent_id: str
     submission_prefix: str
     run_prefix: str
@@ -411,7 +423,7 @@ class BenchmarkJobResponse(BaseModel):
 # See TRACES_DESIGN.md.
 
 
-class TracePostRequest(BaseModel):
+class TracePostRequest(StrictRequest):
     source: str                                       # hf://buckets/{org}/{slug}-{agent}/traces/<session>/
     share: Literal["stats", "full"] = "stats"          # default = numbers only; content is an explicit opt-in
 

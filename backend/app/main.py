@@ -3,9 +3,10 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from app.errors import APIError, StorageUnavailable
+from app.errors import APIError, InvalidRequest, StorageUnavailable, TooLarge
 from app.routes import (
     agents,
     channels,
@@ -75,3 +76,15 @@ async def _storage_error_handler(request: Request, exc: HubHTTPError) -> JSONRes
     under it) means the storage write never landed: a retryable 503, not a 500."""
     logging.getLogger(__name__).warning("storage backend failed: %r", exc)
     return await _api_error_handler(request, StorageUnavailable())
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    """Request-shape errors in the standard error body, one line per problem."""
+    errors = exc.errors()
+    message = "\n".join(
+        f"{'.'.join(str(p) for p in e['loc'])}: {e['msg']}" for e in errors
+    )
+    too_long = all(e["type"] == "string_too_long" for e in errors)
+    err = TooLarge(message) if too_long else InvalidRequest(message)
+    return await _api_error_handler(request, err)

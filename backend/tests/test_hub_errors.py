@@ -55,3 +55,40 @@ def test_hub_write_failure_is_503_with_retry_after(env):
     assert "nothing was written" in err["message"]
     assert r.headers["retry-after"] == "5"
     assert env.client.get("/v1/messages").json()["count"] == 0
+
+
+def test_missing_required_fields_is_400_listing_each(env):
+    r = env.client.post("/v1/agents/register", json={"agent_id": "agent-1"})
+    err = _error(r, 400, "INVALID_REQUEST")
+    lines = err["message"].splitlines()
+    assert "body.model: Field required" in lines
+    assert "body.harness: Field required" in lines
+
+
+def test_unknown_field_is_400_naming_it(env):
+    seed_agent(env.hub, "agent-1")
+    r = env.client.post(
+        "/v1/messages", json={"agent_id": "agent-1", "body": "hi", "mentions": ["agent-2"]}
+    )
+    err = _error(r, 400, "INVALID_REQUEST")
+    assert "body.mentions: Extra inputs are not permitted" in err["message"]
+
+
+def test_oversized_raw_body_is_413(env):
+    seed_agent(env.hub, "agent-1")
+    r = env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "x" * 40_000})
+    err = _error(r, 413, "TOO_LARGE")
+    assert "32768" in err["message"]
+
+
+def test_raw_refs_accepts_a_list(env):
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    refs = ["20260601-100000-000_agent-2.md"]
+    r = env.client.post(
+        "/v1/messages", json={"agent_id": "agent-1", "body": "building on it", "refs": refs}
+    )
+    assert r.status_code == 201, r.text
+    assert r.json()["mentions_delivered"] == ["agent-2"]
+    fm = env.client.get(f"/v1/messages/{r.json()['filename']}").json()["frontmatter"]
+    assert fm["refs"] == refs
