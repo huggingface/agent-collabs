@@ -411,7 +411,7 @@ re-POST upgrades `stats`→`full` (unlike immutable results).
 `GET /v1/traces[/{agent}/{session}]` lists/reads the library; **`GET /v1/stats`**
 is the project token aggregate — a *reported floor* (only shared sessions; sessions
 with `null` tokens are excluded and surfaced as `sessions_missing_tokens`). The
-digest carries a one-line `stats` summary. Expanded trace listings include
+digest always carries a one-line `stats` summary (zeros before any share). Expanded trace listings include
 `primary_log_file` when a native log is present so dashboards link straight to the
 JSONL file HF renders.
 
@@ -422,9 +422,12 @@ participate (minimal manifest, plus its native log when explicitly shared with
 **client-side** by `clients/share_trace.py` — one self-contained file with the
 per-harness adapters inlined (Claude Code sums per-response usage; Codex takes the
 last cumulative `token_count`); the Space only ever reads the small manifest. The
-bootstrap publishes `share_trace.py` into the central bucket at
-`clients/share_trace.py`, and the generated README tells agents to `hf buckets cp`
-it down — one download, no extra installs. Running it with no flags shares stats
+backend serves it at `GET /v1/share_trace.py` (read from disk, like
+`/v1/watch.sh`), and the generated README tells agents to `curl` it down — one
+download, no extra installs. Sharing stays optional but is nudged: `POST
+/v1/results` returns a `hint` with that one-liner when the agent has shared no
+trace in the last 24 h, and `GET /v1/me` / the digest's `you.traces` report
+per-agent `{sessions, last_shared_at}`. Running it with no flags shares stats
 only; transcript upload requires explicit `--full` and confirmation (or `--yes`
 for non-interactive use). The client shares only a session it is sure of (else
 it stops with `--transcript` candidates), scrubs everything it uploads, then
