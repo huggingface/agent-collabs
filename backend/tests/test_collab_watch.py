@@ -7,7 +7,7 @@ top-level ``cursor``, and a ``watch`` block whenever ``wait>0`` was requested.
 Why a stub instead of the FastAPI app (which is how eq2 tested this): the
 client contract is what is under test here, and half of it only exists in
 conditions a healthy server will not produce on demand — a 4xx on a typo'd
-handle, ten 5xx in a row, an instantly-empty *degraded* answer, a page whose
+handle, a 5xx outage, an instantly-empty *degraded* answer, a page whose
 record content is deliberately shaped like a cursor. The stub makes each of
 those a one-line setting, keeps the suite honest about what the *client* does,
 and leaves it runnable while the server side is still being written.
@@ -67,6 +67,8 @@ class Stub:
     omit_cursor: bool = False             # pretend the server predates §4.4
     matched_override: int | None = None   # lie about `matched`
     grow_polls: int = 0                   # land fresh mail during the next N polls
+    fail_first: int = 0                   # answer the next N requests with fail_status
+    fail_status: int = 503
     _n: int = 0
 
     def add(self, body: str = "ping @agent-a", author: str = "agent-b",
@@ -141,6 +143,9 @@ class _Handler(BaseHTTPRequestHandler):
         with stub.lock:
             stub.requests.append((parsed.path, query))
             forced, err = stub.http_status, stub.error_body
+            if not forced and stub.fail_first > 0:
+                stub.fail_first -= 1
+                forced = stub.fail_status
             grow = stub.grow_polls > 0
             if grow:
                 stub.grow_polls -= 1
@@ -629,18 +634,39 @@ def test_3xx_fails_fast_with_a_redirect_hint(stub, tmp_path):
     assert heartbeat(state)[1] == "http_301"
 
 
-def test_ten_failures_give_up_with_exit_4_and_gave_up_heartbeat(stub, tmp_path):
-    """5xx shares the backoff ladder; a streak of 10 exits 4 and leaves
-    status=gave_up behind, so --status can report it once the process is gone."""
+def test_retry_budget_gives_up_with_exit_4_and_gave_up_heartbeat(stub, tmp_path):
+    """5xx shares the backoff ladder; once the failures in a row span
+    COLLAB_WATCH_RETRY_BUDGET_S it exits 4 and leaves status=gave_up behind,
+    so --status can report it once the process is gone."""
     stub.http_status = 503
     state = fresh(tmp_path, cursor="")
+    t0 = time.monotonic()
+
+    result = run(stub, state, timeout=60, COLLAB_WATCH_RETRY_BUDGET_S="1")
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 4, result.stderr
+    assert elapsed < 4, f"a 1s budget took {elapsed:.1f}s"
+    assert "giving up after" in result.stderr
+    assert heartbeat(state)[1] == "gave_up"
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_an_edge_outage_is_outlasted_not_counted(stub, tmp_path, status):
+    """A Space rebuild answers 502/503/504 from the edge for longer than any
+    fixed retry count survives; the budget is time, so the watcher keeps going
+    well past 10 failures and delivers once the Space is back."""
+    stub.fail_first = 15
+    stub.fail_status = status
+    state = fresh(tmp_path, cursor="")
+    filename = stub.add()
 
     result = run(stub, state, timeout=60)
 
-    assert result.returncode == 4
-    assert stub.n_requests() == 10
-    assert "giving up after 10" in result.stderr
-    assert heartbeat(state)[1] == "gave_up"
+    assert result.returncode == 0, result.stderr
+    assert stub.n_requests() == 16
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [filename]
+
 
 
 def test_backoff_ladder_is_used_when_not_disabled(stub, tmp_path):
