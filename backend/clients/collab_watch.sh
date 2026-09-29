@@ -181,6 +181,8 @@ BACKOFF_BASE="${COLLAB_WATCH_BACKOFF:-2}"
 RETRY_BUDGET="${COLLAB_WATCH_RETRY_BUDGET_S:-1200}"
 
 BODY=""
+CODE=""
+CHILD=""
 LOCK_HELD=""
 HTTP=000
 CURL_RC=0
@@ -374,11 +376,14 @@ case "$STREAM" in
 esac
 
 BODY=$(mktemp "$DIR/.body.XXXXXX") || fatal "could not create a temp file in '$DIR'"
+CODE=$(mktemp "$DIR/.code.XXXXXX") || fatal "could not create a temp file in '$DIR'"
 
 cleanup() {
-    if [ -n "$BODY" ]; then
-        rm -f "$BODY" 2>/dev/null || :
+    # A parked curl (or a backoff sleep) must not outlive us.
+    if [ -n "$CHILD" ]; then
+        kill "$CHILD" 2>/dev/null || :
     fi
+    rm -f "$BODY" "$CODE" 2>/dev/null || :
     # Release the lock only while it is still OURS: if the pid inside is no
     # longer $$, another watcher owns the directory (it reclaimed ours as stale)
     # and removing it would hand a third one the same cursor file.
@@ -389,11 +394,29 @@ cleanup() {
     :
 }
 # The signal traps exit explicitly so the EXIT trap runs and the lock is
-# released: a watcher killed by its harness must not leave a lock behind.
+# released: a watcher killed by its harness must not leave a lock behind. They
+# fire at once: curl and every sleep run through reap (below); only an --exec
+# handler still runs in the foreground.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# reap <pid>: wait for a background child and return its status. A shell runs
+# a trap only once its FOREGROUND child exits — up to a whole parked request —
+# but a trapped signal interrupts `wait` immediately, and cleanup kills $CHILD.
+reap() {
+    CHILD="$1"
+    reap_rc=0
+    wait "$CHILD" || reap_rc=$?
+    CHILD=""
+    return "$reap_rc"
+}
+
+nap() {
+    sleep "$1" &
+    reap "$!" || :
+}
 
 # ── state helpers ─────────────────────────────────────────────────────
 
@@ -455,7 +478,7 @@ lock_acquire() {
     # pid by then, while a crash mid-acquire leaves the file empty forever and
     # is still reclaimed on the second read.
     if [ -z "$lk_pid" ]; then
-        sleep 1
+        nap 1
         lk_pid=$(lock_pid)
     fi
     if lock_alive "$lk_pid"; then
@@ -532,7 +555,9 @@ watch_status() {
 # minutes and died with an opaque `curl rc=22`.
 do_request() {
     CURL_RC=0
-    HTTP=$(curl -sS -o "$BODY" -w '%{http_code}' --max-time "$2" "$1") || CURL_RC=$?
+    curl -sS -o "$BODY" -w '%{http_code}' --max-time "$2" "$1" >"$CODE" &
+    reap "$!" || CURL_RC=$?
+    HTTP=$(cat "$CODE")
     [ -n "$HTTP" ] || HTTP=000
 }
 
@@ -596,7 +621,7 @@ on_retryable() {
     log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK in ${BACKOFF}s (failing for ${or_failing}s of ${RETRY_BUDGET}s)"
 
     if [ "$BACKOFF" -gt 0 ]; then
-        sleep "$BACKOFF"
+        nap "$BACKOFF"
     fi
     BACKOFF=$((BACKOFF * 2))
     if [ "$BACKOFF" -gt 60 ]; then
@@ -794,7 +819,7 @@ idle_pace() {
             ;;
     esac
     if [ "$ip_elapsed" -lt "$IDLE_FLOOR_S" ]; then
-        sleep "$IDLE_FLOOR_S"
+        nap "$IDLE_FLOOR_S"
     fi
 }
 
@@ -895,8 +920,9 @@ run_exec() {
         hb exec_failed
         log "handler exited $re_rc on the page after '${re_page#start:}'; NOT advancing the cursor, re-delivering in ${re_backoff}s (failure $re_fails/$EXEC_RETRIES)"
         if [ "$re_backoff" -gt 0 ]; then
-            sleep "$re_backoff"
+            nap "$re_backoff"
         fi
+
         re_backoff=$((re_backoff * 2))
         if [ "$re_backoff" -gt 60 ]; then
             re_backoff=60

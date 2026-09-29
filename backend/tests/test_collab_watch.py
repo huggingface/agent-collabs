@@ -258,8 +258,9 @@ def popen(stub: Stub, state: Path | None, *flags: str, handle: str = "agent-a",
 
 def stop(proc: subprocess.Popen, timeout: float = 10) -> tuple[str, str]:
     """Terminate a watcher and collect its output. The script traps TERM and
-    exits through its cleanup path, but a shell only runs the trap once the
-    foreground curl returns — hence the tiny waits everywhere."""
+    exits through its cleanup path at once: curl and sleeps run in the
+    background under `wait`, which a trapped signal interrupts (only an --exec
+    handler still delays the trap)."""
     if proc.poll() is None:
         proc.terminate()
     try:
@@ -952,7 +953,28 @@ def test_second_watcher_exits_5_naming_the_live_pid(stub, tmp_path):
         "the lock must be released on exit"
 
 
+def test_term_while_parked_exits_at_once_and_releases_the_lock(stub, tmp_path):
+    """A TERM must not wait for the parked curl (up to 75s): until the process
+    exits, its lock reads as live and a replacement watcher exits 5."""
+    state = fresh(tmp_path, cursor="")
+    proc = popen(stub, state, wait="55")
+    try:
+        assert wait_until(lambda: stub.n_requests() >= 1), "never parked"
+        time.sleep(0.3)  # let curl settle into the parked request
+        t0 = time.monotonic()
+        proc.terminate()
+        proc.communicate(timeout=10)
+        elapsed = time.monotonic() - t0
+    finally:
+        if proc.poll() is None:
+            stop(proc)
+    assert proc.returncode == 143
+    assert elapsed < 2, f"TERM took {elapsed:.1f}s: the trap waited for curl"
+    assert not (state / "lock").exists(), "the lock must be released"
+
+
 def test_stale_lock_is_reclaimed(stub, tmp_path):
+
     """A lock whose PID is gone (kill -9, harness reaping) is not a wall."""
     reaped = subprocess.Popen(["true"])
     reaped.wait()
