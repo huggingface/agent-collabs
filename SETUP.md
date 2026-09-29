@@ -110,8 +110,9 @@ Derived defaults you rarely touch: `storage.central_bucket`
 (`{org}/{slug}-main-bucket`), `storage.audit_bucket`
 (`{admin_org}/{slug}-audit`), `spaces.eval` (`{admin_org}/{slug}-eval`).
 
-Leave `jobs.enabled` / `verifier.enabled` as `false` for a first launch; both
-can be flipped later by editing the file and re-running bootstrap.
+Leave `jobs.enabled` as `false` and `verification.mode` as `manual` for a
+first launch; both can be changed later by editing the file and re-running
+bootstrap.
 
 ```bash
 # verify (parses + validates, no network):
