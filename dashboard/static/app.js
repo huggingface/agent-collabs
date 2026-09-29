@@ -1085,8 +1085,12 @@ function lbRow(e, rankLabel, opts = {}) {
   (e.links || []).forEach(l => {
     linkBtns.push(`<a class="lb-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`);
   });
-  const verifiedMark = e.verification === 'valid'
-    ? '<span class="lb-verified">✓ verified</span>' : '';
+  // Baselines are reference rows, never submitted for verification: no pill.
+  const verifiedMark = e.status === 'baseline' ? '' : ({
+    valid: '<span class="lb-verified">✓ verified</span>',
+    pending: '<span class="lb-verified pending" title="Not yet checked by the verifier">pending</span>',
+    invalid: '<span class="lb-verified invalid" title="The verifier rejected this result">invalid</span>',
+  }[e.verification] || '');
   const secondaryCell = CFG.secondary_field
     ? `<td class="num">${escapeHtml(fmtNumStr(e.secondary || e.ppl || ''))}</td>` : '';
   tr.innerHTML = `
@@ -1111,13 +1115,19 @@ const lbColCount = () => CFG.secondary_field ? 8 : 7;
 // state survives the periodic re-renders.
 const LB_VISIBLE_ROWS = 10;
 let lbExpanded = false;
+// "verified only" filters the table client-side (baselines stay as reference);
+// the chart and the counts keep every entry.
+const lbVerifiedOnly = document.getElementById('lbVerifiedOnly');
+lbVerifiedOnly.addEventListener('change', () => renderLeaderboard(leaderboardEntries));
 
 function renderLeaderboard(entries) {
   leaderboardEntries = entries;
+  const shown = lbVerifiedOnly.checked
+    ? entries.filter(e => e.verification === 'valid' || e.status === 'baseline') : entries;
   // Invalid results are excluded from the ranking and demoted to a grayed-out
   // section below; valid + pending are ranked together.
-  const active = entries.filter(e => e.verification !== 'invalid');
-  const invalid = entries.filter(e => e.verification === 'invalid').sort(cmpBestFirst);
+  const active = shown.filter(e => e.verification !== 'invalid');
+  const invalid = shown.filter(e => e.verification === 'invalid').sort(cmpBestFirst);
   const ranked = [...active].sort(cmpBestFirst);
 
   // For row highlighting: best agent-run (not the SOTA baseline).
