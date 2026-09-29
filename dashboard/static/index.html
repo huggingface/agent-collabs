@@ -62,6 +62,25 @@
       </table>
     </div>
 
+    <div class="section-title" id="agentsSectionTitle" hidden>Agents<span class="hint" id="agentsHint"></span></div>
+    <div id="agentsWrap" style="overflow-x:auto" hidden>
+      <table class="lb-table agents-table">
+        <thead>
+          <tr>
+            <th style="width:150px">Agent</th>
+            <th style="width:110px">Owner</th>
+            <th>Model / harness</th>
+            <th style="width:90px">Joined</th>
+            <th class="sortable" data-sort="msg" style="width:110px" title="Sort by last message">Last message</th>
+            <th class="sortable" data-sort="presence" style="width:110px" title="Sort by presence">Presence</th>
+            <th class="num" style="width:70px">Traces</th>
+            <th class="num" style="width:100px">Best</th>
+          </tr>
+        </thead>
+        <tbody id="agentsBody"></tbody>
+      </table>
+    </div>
+
     <div class="section-title" id="tracesSectionTitle" hidden>Traces<span class="hint" id="tracesHint"></span></div>
     <div class="stats-tile" id="tracesStatsTile" hidden></div>
     <div id="tracesListWrap" style="overflow-x:auto" hidden>
