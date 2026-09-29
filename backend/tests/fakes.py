@@ -2,11 +2,22 @@
 from __future__ import annotations
 
 import hashlib
+import time
+
+import httpx
+from huggingface_hub.errors import HfHubHTTPError
 
 from app.config import Settings
 from app.frontmatter import serialise
 from app.hub import HubIdentity, HubUnreachable, ListedFile, OrgMemberRole
 from app.naming import SourceURI, parse_source_uri
+
+
+def _http_error(message: str = "simulated hub write failure") -> HfHubHTTPError:
+    """An HfHubHTTPError shaped like the one HubClient lets propagate from a
+    failed batch_bucket_files call (writes aren't caught in hub.py)."""
+    request = httpx.Request("PUT", "https://fake-hub.test/batch")
+    return HfHubHTTPError(message, response=httpx.Response(500, request=request))
 
 
 class FakeHub:
@@ -24,6 +35,13 @@ class FakeHub:
         self.batch_writes: list[list[str]] = []
         self.deletes: list[str] = []
         self.fail_listings = False
+        # Chaos toggles (see fail_next_write/fail_next_read/partial_listing/
+        # fail_next_listing below): each is one-shot and resets after firing.
+        self.latency_s: float = 0.0
+        self._fail_write: Exception | None = None
+        self._fail_read: tuple[str | None, Exception | None] | None = None
+        self._fail_listing_folder: str | None = None
+        self._partial_listing: tuple[str, int] | None = None
         # Scripted whoami identity for token-authenticated paths
         # (registration handshake, human message posts).
         self.whoami_user = "test-user"
@@ -58,33 +76,81 @@ class FakeHub:
         b = bucket or self._settings.central_bucket
         self.buckets.setdefault(b, {})[path] = text.encode("utf-8")
 
+    # ── chaos toggles ────────────────────────────────────────────────
+    def fail_next_write(self, exc: Exception | None = None) -> None:
+        """The next write/batch call raises `exc` (default: an HfHubHTTPError,
+        matching what a real batch_bucket_files failure surfaces as)."""
+        self._fail_write = exc or _http_error()
+
+    def fail_next_read(self, path_substring: str | None = None, exc: Exception | None = None) -> None:
+        """The next read whose path contains `path_substring` (any path, if
+        omitted) raises `exc` (default: FileNotFoundError)."""
+        self._fail_read = (path_substring, exc)
+
+    def partial_listing(self, folder: str, drop: int = 1) -> None:
+        """The next listing of `folder` omits its last `drop` entries, as if
+        a list_bucket_tree generator was interrupted mid-page."""
+        self._partial_listing = (folder, drop)
+
+    def fail_next_listing(self, folder: str) -> None:
+        """The next listing of `folder` returns [] — mirrors how HubClient._list
+        swallows a list_bucket_tree failure into an empty page."""
+        self._fail_listing_folder = folder
+
+    def _maybe_sleep(self) -> None:
+        if self.latency_s:
+            time.sleep(self.latency_s)
+
+    def _maybe_fail_write(self) -> None:
+        self._maybe_sleep()
+        if self._fail_write is not None:
+            exc, self._fail_write = self._fail_write, None
+            raise exc
+
+    def _maybe_fail_read(self, path: str) -> None:
+        self._maybe_sleep()
+        if self._fail_read is None:
+            return
+        substring, exc = self._fail_read
+        if substring is not None and substring not in path:
+            return
+        self._fail_read = None
+        raise exc or FileNotFoundError(path)
+
+    def _apply_listing_toggles(self, prefix: str, files: list[ListedFile]) -> list[ListedFile]:
+        self._maybe_sleep()
+        if self._fail_listing_folder == prefix:
+            self._fail_listing_folder = None
+            return []
+        if self._partial_listing is not None and self._partial_listing[0] == prefix:
+            _, drop = self._partial_listing
+            self._partial_listing = None
+            return files[: len(files) - drop] if drop else files
+        return files
+
     # ── HubClient surface used by the app ────────────────────────────
+    @staticmethod
+    def _listed(files: dict[str, bytes], prefix: str) -> list[ListedFile]:
+        p = prefix.rstrip("/") + "/" if prefix else ""
+        return [
+            ListedFile(
+                rel_path=path,
+                size=len(data),
+                xet_hash=hashlib.sha256(data).hexdigest(),
+            )
+            for path, data in files.items()
+            if path.startswith(p)
+        ]
+
     def list_central_dir(self, prefix: str) -> list[ListedFile]:
         self.list_calls += 1
         if self.fail_listings:
             return []  # the real hub flattens listing errors to []
-        p = prefix.rstrip("/") + "/" if prefix else ""
-        return [
-            ListedFile(
-                rel_path=path,
-                size=len(data),
-                xet_hash=hashlib.sha256(data).hexdigest(),
-            )
-            for path, data in self._central().items()
-            if path.startswith(p)
-        ]
+        return self._apply_listing_toggles(prefix, self._listed(self._central(), prefix))
 
     def list_bucket_dir(self, bucket: str, prefix: str) -> list[ListedFile]:
-        p = prefix.rstrip("/") + "/" if prefix else ""
-        return [
-            ListedFile(
-                rel_path=path,
-                size=len(data),
-                xet_hash=hashlib.sha256(data).hexdigest(),
-            )
-            for path, data in self.buckets.get(bucket, {}).items()
-            if path.startswith(p)
-        ]
+        files = self._listed(self.buckets.get(bucket, {}), prefix)
+        return self._apply_listing_toggles(prefix, files)
 
     def download_many(self, bucket: str, remote_paths: list[str]) -> dict[str, bytes]:
         self.download_calls += 1
@@ -92,6 +158,7 @@ class FakeHub:
         return {p: files[p] for p in remote_paths if p in files}
 
     def read_central_text(self, path: str) -> str:
+        self._maybe_fail_read(path)
         files = self._central()
         # Like HubClient._download_one, a failed read surfaces as missing.
         if path not in files or path in self.failing_reads:
@@ -114,17 +181,20 @@ class FakeHub:
         return None if data is None else data.decode("utf-8")
 
     def write_text_central(self, path: str, text: str) -> None:
-        self._central()[path] = text.encode("utf-8")
+        self.write_bytes_central(path, text.encode("utf-8"))
 
     def write_bytes_central(self, path: str, data: bytes) -> None:
+        self._maybe_fail_write()
         self._central()[path] = data
 
     def write_many_central(self, items: list[tuple[bytes, str]]) -> None:
+        self._maybe_fail_write()
         self.batch_writes.append([p for _, p in items])
         for data, p in items:
             self._central()[p] = data
 
     def delete_central(self, path: str) -> None:
+        self._maybe_fail_write()
         self.deletes.append(path)
         self._central().pop(path, None)
 
@@ -132,6 +202,7 @@ class FakeHub:
         parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
         if parsed is None:
             raise ValueError(f"invalid source URI: {uri}")
+        self._maybe_fail_read(str(uri))
         bucket = f"{parsed.org}/{parsed.bucket}"
         files = self.buckets.get(bucket, {})
         # Like HubClient._download_one, a failed read surfaces as missing.
@@ -143,6 +214,7 @@ class FakeHub:
         return self.read_bytes(uri).decode("utf-8")
 
     def append_jsonl_audit(self, path: str, line: str) -> None:
+        self._maybe_fail_write()
         b = self.buckets[self._settings.audit_bucket]
         existing = b.get(path, b"")
         if existing and not existing.endswith(b"\n"):
@@ -153,9 +225,11 @@ class FakeHub:
         return self.buckets[self._settings.audit_bucket].get(path)
 
     def write_bytes_audit(self, path: str, data: bytes) -> None:
+        self._maybe_fail_write()
         self.buckets[self._settings.audit_bucket][path] = data
 
     def write_bytes_to_bucket(self, bucket: str, path: str, data: bytes) -> None:
+        self._maybe_fail_write()
         self.buckets.setdefault(bucket, {})[path] = data
 
     def write_text_to_bucket(self, bucket: str, path: str, text: str) -> None:
@@ -164,6 +238,7 @@ class FakeHub:
     def copy_tree_to_central(self, src_bucket: str, src_prefix: str, dest_prefix: str):
         """Mirror of HubClient.copy_tree_to_central: hash-copy a prefix into the
         central bucket, yielding (src_rel_path, dest_path, size)."""
+        self._maybe_fail_write()
         prefix = src_prefix.rstrip("/")
         central = self._central()
         out = []
@@ -179,6 +254,7 @@ class FakeHub:
     def copy_file_to_central(self, src_bucket: str, src_xet_hash: str, dest_path: str) -> None:
         """Mirror of HubClient.copy_file_to_central: copy by xet hash (our fake
         xet_hash is sha256), no listing."""
+        self._maybe_fail_write()
         for data in self.buckets.get(src_bucket, {}).values():
             if hashlib.sha256(data).hexdigest() == src_xet_hash:
                 self._central()[dest_path] = data
