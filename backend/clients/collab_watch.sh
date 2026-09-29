@@ -92,8 +92,10 @@
 #                      loop pass — including empty timeouts and the give-up —
 #                      so a stale heartbeat means exactly "no watcher process
 #                      has run recently", nothing else
-#   lock/              mkdir-based lock, lock/pid inside; a lock whose pid
-#                      fails `kill -0` is stale and is reclaimed
+#   lock/              mkdir-based lock; lock/pid holds the pid and its start
+#                      time. A lock whose pid fails `kill -0`, or now belongs
+#                      to a process started at another time (PID reuse,
+#                      another PID namespace), is stale and is reclaimed
 #   delivered.jsonl    every delivered page, appended BEFORE it is printed
 #   dead-letter.jsonl  pages a --exec handler kept refusing (see --exec below)
 # The cursor is per-STREAM; the lock and heartbeat are per-HANDLE, because one
@@ -452,11 +454,38 @@ lock_pid() {
     fi
 }
 
+lock_start() {
+    sed -n 2p "$LOCKDIR/pid" 2>/dev/null || :
+}
+
+# proc_start <pid>: an opaque start-time stamp, empty when unavailable. Linux
+# /proc field 22 (after the parenthesised comm, which may contain spaces), else
+# `ps -o lstart=` (macOS, procps). Busybox ps has neither -p nor lstart, but
+# busybox systems have /proc.
+proc_start() {
+    if [ -r "/proc/$1/stat" ]; then
+        sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20
+    else
+        ps -o lstart= -p "$1" 2>/dev/null || :
+    fi
+}
+
+# lock_alive <pid> [start]: `kill -0` alone is fooled by PID reuse and by a pid
+# from another PID namespace, so a recorded start time must match too. A lock
+# without one (an older watcher) or a host where neither probe works falls back
+# to the pid alone.
 lock_alive() {
     la_pid="${1:-}"
     is_num "$la_pid" || return 1
     kill -0 "$la_pid" 2>/dev/null || return 1
-    return 0
+    [ -n "${2:-}" ] || return 0
+    la_start=$(proc_start "$la_pid")
+    [ -z "$la_start" ] || [ "$la_start" = "$2" ]
+}
+
+lock_write() {
+    LOCK_HELD=1
+    printf '%s\n%s\n' "$$" "$(proc_start "$$")" >"$LOCKDIR/pid"
 }
 
 # One watcher per HANDLE — not per handle+stream: two watchers under one handle
@@ -466,8 +495,7 @@ lock_alive() {
 # stream is for.
 lock_acquire() {
     if mkdir "$LOCKDIR" 2>/dev/null; then
-        LOCK_HELD=1
-        printf '%s\n' "$$" >"$LOCKDIR/pid"
+        lock_write
         return 0
     fi
     lk_pid=$(lock_pid)
@@ -481,16 +509,15 @@ lock_acquire() {
         nap 1
         lk_pid=$(lock_pid)
     fi
-    if lock_alive "$lk_pid"; then
+    if lock_alive "$lk_pid" "$(lock_start)"; then
         log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
         exit 5
     fi
-    log "reclaiming stale lock $LOCKDIR (pid ${lk_pid:-unknown} is gone)"
+    log "reclaiming stale lock $LOCKDIR (pid ${lk_pid:-unknown} is gone or was reused)"
     rm -f "$LOCKDIR/pid" 2>/dev/null || :
     rmdir "$LOCKDIR" 2>/dev/null || :
     if mkdir "$LOCKDIR" 2>/dev/null; then
-        LOCK_HELD=1
-        printf '%s\n' "$$" >"$LOCKDIR/pid"
+        lock_write
         return 0
     fi
     lk_pid=$(lock_pid)
@@ -974,7 +1001,8 @@ run_peek() {
 run_status() {
     rs_pid=$(lock_pid)
     rs_alive=0
-    if lock_alive "$rs_pid"; then
+    if lock_alive "$rs_pid" "$(lock_start)"; then
+
         rs_alive=1
     else
         rs_pid="-"
