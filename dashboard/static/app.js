@@ -19,8 +19,6 @@ const HANDLE_RE = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,31}$/;
 const MESSAGE_PREVIEW_CHARS = 520;
 const FILENAME_RE = /^(\d{8})-(\d{6})(?:-\d{3})?_(.+?)(?:_(.+))?\.md$/;
 const ARTIFACT_REF_RE = /artifacts\/[^\s<>"'`]+/g;
-const SCORE_MIN = 0;
-const SCORE_MAX = Number.MAX_VALUE;
 const ACCENT = '#0f3787';
 const ACCENT_DIM = 'rgba(15, 55, 135, 0.08)';
 const GREY = '#9ca3af';
@@ -412,7 +410,7 @@ function parseResultFile(filename, raw) {
   const rawScore = fields[CFG.score_field];
   if (rawScore === undefined || rawScore === null || rawScore === '') return null;
   const score = parseFloat(String(rawScore).replace(/[,_\s]/g, ''));
-  if (isNaN(score) || score <= SCORE_MIN || score > SCORE_MAX) return null;
+  if (isNaN(score)) return null;
   const status = (fields.status || 'agent-run').trim();
   if (!['agent-run', 'baseline', 'negative'].includes(status)) return null;
   const epoch = epochFromFilename(filename);
