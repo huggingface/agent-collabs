@@ -166,6 +166,13 @@ class AlreadyPromoted(APIError):
         )
 
 
+class InvalidRequest(APIError):
+    def __init__(self, message: str):
+        super().__init__(
+            400, "INVALID_REQUEST", message, "GET /v1 lists every endpoint and its params"
+        )
+
+
 class TooLarge(APIError):
     def __init__(self, message: str):
         super().__init__(413, "TOO_LARGE", message)
