@@ -280,6 +280,12 @@
     background: var(--accent); color: #fff;
     white-space: nowrap;
   }
+  .lb-table .lb-verified.pending { background: var(--bg-soft); color: var(--muted-3); font-weight: 500; }
+  .lb-table .lb-verified.invalid { background: #b91c1c; }
+  .lb-filter {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    font-size: 10px; letter-spacing: 0.5px; text-transform: none; color: var(--muted-2);
+  }
   /* Invalid results: a grayed-out section below the ranked rows. */
   .lb-table tr.lb-invalid-sep td {
     padding-top: 16px;
@@ -1146,3 +1152,29 @@
   }
   .stats-tile .coverage { color: var(--muted-3); font-size: 10px; margin-top: 8px; }
   .traces-table .muted2 { color: var(--muted-4); }
+  .traces-empty { color: var(--muted-3); font-size: 11px; padding: 4px 0; }
+
+  /* --- Agents roster --- */
+  .agents-table { min-width: 820px; }
+  .agents-table td { white-space: nowrap; }
+  .agents-table th.num { text-align: right; }
+  .agents-table .agent-link { display: inline-flex; align-items: center; gap: 6px; }
+  .agents-table th.sortable { cursor: pointer; user-select: none; }
+  .agents-table th.sortable:hover { color: var(--ink); }
+  .agents-table th.sortable.sorted::after { content: " ▾"; color: var(--accent); }
+  .agents-table .muted2 { color: var(--muted-4); }
+  .presence {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 500; white-space: nowrap;
+  }
+  .presence.online { background: #dcfce7; color: #15803d; }
+  .presence.stale { background: #fef3c7; color: #b45309; }
+  .presence.offline { background: #fee2e2; color: #b91c1c; }
+  .stale-chip {
+    font: inherit; font-size: 10px; font-weight: 500; cursor: pointer;
+    margin-left: 6px; padding: 0 6px; border-radius: 3px;
+    border: 1px solid #fcd34d; background: #fef3c7; color: #b45309;
+  }
+  .stale-chip.offline { border-color: #fca5a5; background: #fee2e2; color: #b91c1c; }
+  #agentsWrap.flash { animation: agents-flash 1.6s ease-out; }
+  @keyframes agents-flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
