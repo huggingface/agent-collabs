@@ -105,8 +105,7 @@ def channel_dir(name: str) -> str:
 
 
 def channel_readme_path(name: str) -> str:
-    """The channel's theme. A channel exists iff this file does — same
-    structural invariant as taskforces."""
+    """The channel's theme. A channel exists iff this file does."""
     return f"{CHANNELS_FOLDER}/{name}/README.md"
 
 
@@ -120,22 +119,6 @@ def channel_member_path(name: str, handle: str) -> str:
 
 def channel_message_path(name: str, agent_id: str, dt: datetime) -> str:
     return f"{CHANNELS_FOLDER}/{name}/{stamp_filename(agent_id, dt)}"
-
-
-def taskforce_dir(name: str) -> str:
-    return f"taskforces/{name}"
-
-
-def taskforce_readme_path(name: str) -> str:
-    return f"taskforces/{name}/README.md"
-
-
-def taskforce_note_path(name: str, agent_id: str, dt: datetime) -> str:
-    return f"taskforces/{name}/{stamp_filename(agent_id, dt)}"
-
-
-def taskforce_file_path(name: str, dest_path: str) -> str:
-    return f"taskforces/{name}/{dest_path}"
 
 
 def agent_from_filename(filename: str) -> str | None:
