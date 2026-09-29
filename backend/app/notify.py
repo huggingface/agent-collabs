@@ -40,7 +40,7 @@ import logging
 import random
 import threading
 import time
-from typing import Callable, Iterable
+from typing import Callable, Iterable, NamedTuple
 
 
 log = logging.getLogger(__name__)
@@ -50,6 +50,14 @@ log = logging.getLogger(__name__)
 # pacing floor, and the only value that matters is that it is >> the ~2s a
 # hot-looping client would use and << the wait ceiling.
 _DEGRADED_HOLD_S = (5.0, 15.0)
+
+
+class Presence(NamedTuple):
+    """A handle's most recent read, as the digest's `watching` block reports it."""
+    age_s: float
+    mode: str  # parked (a wait>0 poll) | poll (a wait=0 read or a digest)
+    stream: str  # updates | inbox | feed | digest
+    last_after: str | None  # the newest `after=` cursor this handle sent
 
 
 class Subscription:
@@ -174,11 +182,14 @@ class Notifier:
         self._wake_spread_s = wake_spread_s
         self._wake_spread_threshold = wake_spread_threshold
         self._clock = clock
-        # owner -> (monotonic stamp, mode) of its most recent wait>0 poll. A
+        # owner -> (monotonic stamp, mode, stream) of its most recent read. A
         # hint for the digest's `watching` block, not an audit log: it is lost
         # on restart, and a restart reads as "nobody is watching" — the
         # truthful answer, since every parked connection died with it.
-        self._last_poll: dict[str, tuple[float, str]] = {}
+        self._last_poll: dict[str, tuple[float, str, str]] = {}
+        # owner -> the newest `after=` cursor it sent, so an agent whose local
+        # state was wiped can resume from the server's record. Same lifetime.
+        self._last_after: dict[str, str] = {}
         # Cheap operational counters for /v1/healthz. eq2 shipped this feature
         # with zero observability, so an operator could not tell a quiet board
         # from a registry that had been degrading every request for hours.
@@ -274,27 +285,35 @@ class Notifier:
 
     # ── liveness & observability ──
 
-    def note_poll(self, owner: str, mode: str) -> None:
-        """Record that ``owner`` just opened a ``wait>0`` poll in ``mode``
-        (updates|inbox|feed). The server side of "is anyone watching this
+    def note_poll(
+        self, owner: str, stream: str, *, parked: bool, after: str | None = None
+    ) -> None:
+        """Record that ``owner`` just read ``stream`` (updates|inbox|feed|digest),
+        parked (``wait>0``) or not. The server side of "is anyone watching this
         handle?" — the one liveness signal that survives total client amnesia
-        (WATCH_DESIGN.md §4.5/§6)."""
+        (WATCH_DESIGN.md §4.5/§6). A synchronous poller that calls every ~100s
+        counts as present too, so any read stamps it, not only a parked one."""
         with self._lock:
-            self._last_poll[owner] = (self._clock(), mode)
+            self._last_poll[owner] = (self._clock(), "parked" if parked else "poll", stream)
+            if after:
+                self._last_after[owner] = after
 
-    def last_poll(self, owner: str) -> tuple[float, str] | None:
-        """(age in seconds, mode) of ``owner``'s most recent ``wait>0`` poll, or
-        ``None`` if this process has never seen one."""
+    def _presence_locked(self, owner: str, now: float) -> Presence:
+        stamp, mode, stream = self._last_poll[owner]
+        return Presence(max(0.0, now - stamp), mode, stream, self._last_after.get(owner))
+
+    def last_poll(self, owner: str) -> Presence | None:
+        """``owner``'s most recent read, or ``None`` if this process has never
+        seen one."""
         with self._lock:
-            seen = self._last_poll.get(owner)
-            if seen is None:
+            if owner not in self._last_poll:
                 return None
-            return max(0.0, self._clock() - seen[0]), seen[1]
+            return self._presence_locked(owner, self._clock())
 
-    def all_last_poll(self) -> dict[str, tuple[float, str]]:
-        """``{owner: (age in seconds, mode)}`` for every handle this process has
-        ever served a ``wait>0`` poll for — the whole presence map in ONE lock
-        acquisition, for ``GET /v1/watching``.
+    def all_last_poll(self) -> dict[str, Presence]:
+        """``{owner: Presence}`` for every handle this process has ever seen
+        read — the whole presence map in ONE lock acquisition, for
+        ``GET /v1/watching``.
 
         The aggregate exists because the per-handle answer is the wrong shape for
         the only consumer that wants all of them: a dashboard drawing a dot per
@@ -305,10 +324,7 @@ class Notifier:
         """
         with self._lock:
             now = self._clock()
-            return {
-                owner: (max(0.0, now - stamp), mode)
-                for owner, (stamp, mode) in self._last_poll.items()
-            }
+            return {owner: self._presence_locked(owner, now) for owner in self._last_poll}
 
     def stats(self) -> dict[str, int]:
         """Counters + the live waiter gauge, for /v1/healthz."""

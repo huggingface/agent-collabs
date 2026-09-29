@@ -669,24 +669,61 @@ def test_non_numeric_wait_is_rejected_at_startup(stub, tmp_path):
 
 def test_max_wait_exits_3_on_a_clean_no_mail_timeout(stub, tmp_path):
     """Exit 3 exists so a bounded wait that found nothing is distinguishable
-    from a watcher that was killed.
-
-    The elapsed assertion is the contract, not a tolerance: N is a FLOOR, so
-    exit 3 must never fire before it. `date +%s` truncates to whole seconds, so
-    a deadline computed naively from it lands up to a second early — which this
-    assertion caught intermittently before the script padded for it."""
+    from a watcher that was killed."""
     state = fresh(tmp_path, cursor="")
-    t0 = time.monotonic()
-
     result = run(stub, state, "--max-wait", "2", timeout=60)
-    elapsed = time.monotonic() - t0
 
     assert result.returncode == 3
     assert result.stdout.strip() == ""
-    assert elapsed >= 2.0, f"gave up after {elapsed:.2f}s of a 2s floor"
-    assert elapsed < 12, f"overshot the bound by too much ({elapsed:.2f}s)"
     assert "clean timeout" in result.stderr
     assert heartbeat(state)[1] == "no_mail"
+
+
+def test_max_wait_is_a_ceiling_not_a_floor(stub, tmp_path):
+    """N is sized to fit a shell tool's timeout, so the run must end within N
+    even when the per-request wait window (55s here) is longer than N: each
+    request is clamped to the time left instead of overshooting by a window."""
+    state = fresh(tmp_path, cursor="")
+    t0 = time.monotonic()
+
+    result = run(stub, state, "--max-wait", "3", wait="55", timeout=60)
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 3, result.stderr
+    assert elapsed < 3 + 1.5, f"overshot a 3s ceiling ({elapsed:.2f}s)"
+    assert elapsed >= 1.5, f"gave up far too early ({elapsed:.2f}s)"
+    assert all(float(q["wait"]) <= 3 for _p, q in stub.requests)
+
+
+def test_max_wait_ceiling_holds_while_the_server_is_down(tmp_path):
+    """Retry backoff must not carry a bounded run past N either; running out
+    of time mid-retry is exit 4 (unreachable), never a false "no mail"."""
+    state = tmp_path / "state"
+    t0 = time.monotonic()
+    result = subprocess.run(
+        ["sh", SCRIPT, "http://127.0.0.1:1", "agent-a", "--max-wait", "3"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=script_env(state, backoff="2"), timeout=60,
+    )
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 4, result.stderr
+    assert elapsed < 3 + 1.5, f"overshot a 3s ceiling ({elapsed:.2f}s)"
+    assert "--max-wait 3s is up" in result.stderr
+
+
+def test_after_overrides_the_saved_cursor(stub, tmp_path):
+    """--after resumes from a cursor the agent got elsewhere (the digest's
+    watching.last_after) — e.g. after its state directory was wiped."""
+    state = fresh(tmp_path)  # no cursor file: would otherwise baseline
+    first = stub.add()
+    second = stub.add()
+
+    result = run(stub, state, "--after", first, "--max-wait", "5")
+
+    assert result.returncode == 0, result.stderr
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [second]
+    assert (state / "cursor.updates").read_text().strip() == second
 
 
 def test_max_wait_still_delivers_when_mail_arrives(stub, tmp_path):
@@ -1223,6 +1260,9 @@ def test_behaviour_is_locale_independent(stub, tmp_path):
         (["http://127.0.0.1:1", "agent-a", "--max-wait"], "--max-wait needs"),
         (["http://127.0.0.1:1", "agent-a", "--exec"], "--exec needs"),
         (["http://127.0.0.1:1", "agent-a", "--peek", "--max-wait", "5"], "wait mode only"),
+        (["http://127.0.0.1:1", "agent-a", "--after", "latest"], "--after must be"),
+        (["http://127.0.0.1:1", "agent-a", "--status", "--after",
+          "20260728-120000-000_agent-b.md"], "wait and --exec modes only"),
         (["http://127.0.0.1:1", "agent-a", "extra", "updates", "x"], "unexpected argument"),
         (["ftp://nope", "agent-a"], "must start with http"),
         (["http://127.0.0.1:1", "../etc/passwd"], "characters outside"),
@@ -1247,7 +1287,7 @@ def test_help_exits_0_on_stdout():
                             stderr=subprocess.PIPE, text=True, timeout=20)
     assert result.returncode == 0
     assert "exit codes:" in result.stdout
-    for flag in ("--max-wait", "--exec", "--peek", "--status"):
+    for flag in ("--max-wait", "--after", "--exec", "--peek", "--status"):
         assert flag in result.stdout
     for warning in ("do NOT wrap", "do NOT detach", "AT-LEAST-ONCE"):
         assert warning in result.stdout, f"the header must keep documenting: {warning}"

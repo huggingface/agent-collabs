@@ -529,8 +529,9 @@ def watch_flows() -> None:
           and (dg_caught.get("updates") or {}).get("unread") == 0,
           f"{up} vs stream cursor {newest.get('cursor')} / after= {dg_caught.get('updates')}")
     watching = dg.get("watching") or {}
-    check("digest watching block is live right after a parked poll",
-          watching.get("mode") == "updates" and 0 <= watching.get("last_poll_age_s", -1) < 120,
+    check("digest watching block is live right after an updates read",
+          watching.get("stream") == "updates" and watching.get("mode") == "poll"
+          and 0 <= watching.get("last_poll_age_s", -1) < 120,
           str(dg.get("watching")))
     levels = {c["name"]: c.get("notify") for c in (dg["channels"].get("subscribed") or [])}
     check("digest reports each membership's notify level",
