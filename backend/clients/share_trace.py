@@ -100,7 +100,7 @@ def _int(v) -> int | None:
 
 
 def adapter_claude_code(log_path: Path) -> dict:
-    """~/.claude/projects/<slug>/<session_id>.jsonl — per-response usage is SUMMED."""
+    """$CLAUDE_CONFIG_DIR (default ~/.claude)/projects/<slug>/<session_id>.jsonl — per-response usage is SUMMED."""
     usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
     saw_usage = False
     tools: dict[str, int] = {}
@@ -153,7 +153,7 @@ _CODEX_TOOL_TYPES = ("function_call", "custom_tool_call", "local_shell_call", "w
 
 
 def adapter_codex(log_path: Path) -> dict:
-    """~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl — token_count is CUMULATIVE
+    """$CODEX_HOME (default ~/.codex)/sessions/YYYY/MM/DD/rollout-*.jsonl — token_count is CUMULATIVE
     (take the last); dedupe tool calls by call_id (MCP appears twice)."""
     last_usage = None
     tools: dict[str, int] = {}
@@ -241,9 +241,17 @@ def build_fields(harness: str, log_path: Path) -> dict:
     return fn(log_path) if fn else adapter_minimal(log_path, harness)
 
 
+def _claude_dir() -> Path:
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or Path.home() / ".claude").expanduser()
+
+
+def _codex_home() -> Path:
+    return Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+
+
 def _cc_project_dir(cwd: str) -> Path:
     slug = re.sub(r"[/._]", "-", os.path.abspath(cwd))
-    return Path.home() / ".claude" / "projects" / slug
+    return _claude_dir() / "projects" / slug
 
 
 def _latest(paths: list[Path]) -> Path | None:
@@ -257,7 +265,7 @@ def _detect_claude_code(cwd: str) -> Path | None:
 
 
 def _codex_logs() -> list[Path]:
-    codex_root = Path.home() / ".codex" / "sessions"
+    codex_root = _codex_home() / "sessions"
     return sorted(
         [Path(p) for p in glob.glob(str(codex_root / "**" / "rollout-*.jsonl"), recursive=True)],
         key=lambda p: p.stat().st_mtime if p.is_file() else 0,
@@ -268,7 +276,8 @@ def _codex_logs() -> list[Path]:
 def _mentions_cwd(value, cwd: str) -> bool:
     cwd_abs = os.path.abspath(cwd)
     if isinstance(value, str):
-        if cwd_abs in value:
+        # Path boundary: /work/proj must not match /work/proj2 or /work/proj-x.
+        if re.search(re.escape(cwd_abs) + r"(?![\w.-])", value):
             return True
         try:
             return os.path.abspath(os.path.expanduser(value)) == cwd_abs
@@ -299,10 +308,12 @@ def _detect_codex(cwd: str) -> tuple[Path | None, bool]:
 
 
 def _infer_harness(log_path: Path) -> str | None:
-    s = str(log_path)
-    if "/.codex/sessions/" in s or log_path.name.startswith("rollout-"):
+    s = str(log_path.expanduser().resolve())
+    codex_root = str(_codex_home().resolve() / "sessions") + os.sep
+    claude_root = str(_claude_dir().resolve() / "projects") + os.sep
+    if "/.codex/sessions/" in s or s.startswith(codex_root) or log_path.name.startswith("rollout-"):
         return "codex"
-    if "/.claude/projects/" in s:
+    if "/.claude/projects/" in s or s.startswith(claude_root):
         return "claude-code"
     return None
 
@@ -314,13 +325,14 @@ def _running_harness() -> tuple[str | None, str | None]:
     This is what keeps multiple agents in one directory from being cross-
     attributed (e.g. a Codex agent uploading a co-located Claude Code log):
     - Claude Code sets CLAUDE_CODE_SESSION_ID (the exact session) + CLAUDECODE=1.
-    - Codex sets CODEX_SANDBOX* in its (default) sandboxed exec but exposes NO
-      session id — so we know it's Codex, but still locate the rollout by cwd.
+    - Codex sets CODEX_SANDBOX* in its (default) sandboxed exec (and a set
+      CODEX_HOME is taken as a Codex marker too) but exposes NO session id — so
+      we know it's Codex, but still locate the rollout by cwd.
     """
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if sid or os.environ.get("CLAUDECODE"):
         return "claude-code", (sid or None)
-    if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED"):
+    if any(os.environ.get(v) for v in ("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_HOME")):
         return "codex", None
     return None, None
 
