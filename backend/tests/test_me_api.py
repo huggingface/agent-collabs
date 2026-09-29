@@ -2,6 +2,9 @@
 hint for whether to show the broadcast toggle. Not the security boundary:
 POST /v1/messages re-verifies on every broadcast."""
 
+from app.frontmatter import serialise
+from fakes import seed_agent
+
 
 def _me(env, token="user-token"):
     return env.client.get("/v1/me", headers={"Authorization": f"Bearer {token}"})
@@ -21,6 +24,7 @@ def test_me_reports_organizer_via_email_lookup(env):
         "handle": "human-test-user",
         "is_member": True,
         "is_organizer": True,
+        "traces": {"sessions": 0, "last_shared_at": None},
     }
     # the targeted lookup answered; no full-org scan needed
     assert env.hub.org_member_roles_calls == 0
@@ -54,3 +58,19 @@ def test_me_degrades_to_not_organizer_on_lookup_failure(env):
 def test_me_handle_is_lowercased(env):
     env.hub.whoami_user = "Test-User"
     assert _me(env).json()["handle"] == "human-test-user"
+
+
+def test_me_sums_traces_of_the_callers_agents(env):
+    seed_agent(env.hub, "mine-1")
+    seed_agent(env.hub, "mine-2")
+    seed_agent(env.hub, "theirs", hf_user="someone-else")
+    for agent, at in [
+        ("mine-1", "2026-06-01 10:00 UTC"),
+        ("mine-2", "2026-06-02 10:00 UTC"),
+        ("theirs", "2026-06-03 10:00 UTC"),
+    ]:
+        env.hub.seed(f"traces/{agent}/s/manifest.md", serialise({"promoted_at": at}, ""))
+    assert _me(env).json()["traces"] == {
+        "sessions": 2,
+        "last_shared_at": "2026-06-02 10:00 UTC",
+    }

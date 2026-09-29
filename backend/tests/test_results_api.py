@@ -1,5 +1,7 @@
 import json
 
+from app.frontmatter import serialise
+from app.naming import stamp_yaml, utc_now
 from fakes import seed_agent, seed_result
 
 
@@ -73,3 +75,35 @@ def test_post_result_visible_immediately(env):
         env.hub.buckets[env.settings.central_bucket]["results/verification_status.json"]
     )
     assert index[filename] == "pending"
+
+
+# ───────────────────────── share-trace hint ─────────────────────────
+
+def _post_run(env):
+    seed_agent(env.hub, "agent-1")
+    env.hub.seed(
+        "results/run1.md",
+        "---\nscore: 1\nmethod: m\nstatus: agent-run\ndescription: x\n---\n",
+        bucket="test-org/test-agent-1",
+    )
+    r = env.client.post(
+        "/v1/results", json={"source": "hf://buckets/test-org/test-agent-1/results/run1.md"}
+    )
+    assert r.status_code == 201
+    return r.json()
+
+
+def _seed_trace(env, promoted_at, agent="agent-1"):
+    env.hub.seed(f"traces/{agent}/s1/manifest.md", serialise({"promoted_at": promoted_at}, ""))
+
+
+def test_post_result_hints_share_trace_when_none_shared_recently(env):
+    _seed_trace(env, "2020-01-01 00:00 UTC")  # stale: older than 24 h
+    _seed_trace(env, stamp_yaml(utc_now()), agent="agent-2")  # someone else's
+    hint = _post_run(env)["hint"]
+    assert "curl -fsS $API/v1/share_trace.py" in hint and "python share_trace.py" in hint
+
+
+def test_post_result_no_hint_after_recent_trace(env):
+    _seed_trace(env, stamp_yaml(utc_now()))
+    assert _post_run(env)["hint"] is None

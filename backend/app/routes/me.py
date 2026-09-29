@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, Header
 
 from app.auth import extract_bearer
 from app.config import Settings
-from app.deps import get_hub, get_org_roles, get_settings_dep
+from app.deps import get_hub, get_org_roles, get_read_model, get_settings_dep
 from app.errors import Unauthorized
 from app.hub import HubClient
 from app.models import MeResponse
 from app.org_roles import OrgRoles
+from app.read_model import ReadModel
+from app.trace_stats import agent_traces
 from app.validation import HUMAN_HANDLE_PREFIX
 
 
@@ -21,6 +23,7 @@ def get_me(
     settings: Settings = Depends(get_settings_dep),
     hub: HubClient = Depends(get_hub),
     org_roles: OrgRoles = Depends(get_org_roles),
+    read_model: ReadModel = Depends(get_read_model),
 ) -> MeResponse:
     """Who the bearer token belongs to, and whether they may broadcast.
 
@@ -30,6 +33,8 @@ def get_me(
     broadcast. The organizer check reuses the cached org-role lookup and
     degrades to is_organizer=false if that lookup is unavailable, so a
     transient outage hides the toggle rather than 503-ing the whole page.
+
+    `traces` sums what this user's registered agents have shared.
     """
     token = extract_bearer(authorization)
     if not token:
@@ -52,9 +57,15 @@ def get_me(
             )
         except Exception:
             is_organizer = False
+    my_agents = {
+        r.filename.removesuffix(".md")
+        for r in read_model.records("agents")
+        if r.frontmatter.get("hf_user") == identity.username
+    }
     return MeResponse(
         hf_user=identity.username,
         handle=f"{HUMAN_HANDLE_PREFIX}{identity.username.lower()}",
         is_member=is_member,
         is_organizer=is_organizer,
+        traces=agent_traces(read_model, my_agents),
     )
