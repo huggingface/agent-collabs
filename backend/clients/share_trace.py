@@ -69,7 +69,7 @@ import urllib.request
 from pathlib import Path
 
 
-ADAPTER_VERSION = 1
+ADAPTER_VERSION = 2  # v2: Claude Code usage deduped per message.id (v1 over-counted)
 REDACTOR_VERSION = 2
 KNOWN_HARNESSES = ("claude-code", "codex")
 PRIVACY_LEVELS = ("secrets", "balanced", "strict")
@@ -100,11 +100,14 @@ def _int(v) -> int | None:
 
 
 def adapter_claude_code(log_path: Path) -> dict:
-    """$CLAUDE_CONFIG_DIR (default ~/.claude)/projects/<slug>/<session_id>.jsonl — per-response usage is SUMMED."""
-    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
-    saw_usage = False
+    """$CLAUDE_CONFIG_DIR (default ~/.claude)/projects/<slug>/<session_id>.jsonl.
+
+    Claude Code writes one `assistant` line per content block, repeating the
+    API response's message.id and usage — so usage is kept per message.id
+    (last write wins) and summed once; tool calls are deduped by tool_use id."""
+    responses: dict = {}  # message.id (or a per-line key if absent) -> usage
     tools: dict[str, int] = {}
-    api_requests = 0
+    seen_tools: set = set()
     model = None
     session_id = log_path.stem
     first_ts = last_ts = None
@@ -118,21 +121,29 @@ def adapter_claude_code(log_path: Path) -> dict:
             session_id = rec["sessionId"]
         if rec.get("type") != "assistant":
             continue
-        api_requests += 1
         msg = rec.get("message") or {}
         if msg.get("model"):
             model = msg["model"]
-        u = msg.get("usage") or {}
+        key = msg.get("id") or ("line", len(responses))
+        responses[key] = msg.get("usage") or responses.get(key) or {}
+        for block in msg.get("content") or []:
+            if isinstance(block, dict) and block.get("type") == "tool_use":
+                if block.get("id"):
+                    if block["id"] in seen_tools:
+                        continue
+                    seen_tools.add(block["id"])
+                name = block.get("name") or "?"
+                tools[name] = tools.get(name, 0) + 1
+
+    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
+    saw_usage = False
+    for u in responses.values():
         if u:
             saw_usage = True
             usage["input_tokens"] += _int(u.get("input_tokens")) or 0
             usage["output_tokens"] += _int(u.get("output_tokens")) or 0
             usage["cache_read_tokens"] += _int(u.get("cache_read_input_tokens")) or 0
             usage["cache_creation_tokens"] += _int(u.get("cache_creation_input_tokens")) or 0
-        for block in msg.get("content") or []:
-            if isinstance(block, dict) and block.get("type") == "tool_use":
-                name = block.get("name") or "?"
-                tools[name] = tools.get(name, 0) + 1
 
     fields: dict = {
         "harness": "claude-code",
@@ -141,7 +152,7 @@ def adapter_claude_code(log_path: Path) -> dict:
         "started_at": first_ts,
         "ended_at": last_ts,
         "activity": {"tool_calls": sum(tools.values()), "tool_calls_by_name": tools},
-        "extensions": {"api_requests": api_requests},
+        "extensions": {"api_requests": len(responses)},
     }
     if saw_usage:
         usage["total_tokens"] = sum(usage.values())
