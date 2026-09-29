@@ -65,6 +65,9 @@ class Settings(BaseSettings):
     # Org invite link, quoted back to callers whose token is not an org member.
     invite_url: str = Field("", alias="INVITE_URL")
 
+    # Byte cap on a promoted source file (messages and results alike).
+    message_max_bytes: int = Field(65536, alias="MESSAGE_MAX_BYTES")
+
     dedup_lru_size: int = Field(10_000, alias="DEDUP_LRU_SIZE")
 
     # Read model & discovery endpoints. The listing TTL bounds staleness for
