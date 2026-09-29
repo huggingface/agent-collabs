@@ -337,14 +337,15 @@ def _running_harness() -> tuple[str | None, str | None]:
     This is what keeps multiple agents in one directory from being cross-
     attributed (e.g. a Codex agent uploading a co-located Claude Code log):
     - Claude Code sets CLAUDE_CODE_SESSION_ID (the exact session) + CLAUDECODE=1.
-    - Codex sets CODEX_SANDBOX* in its (default) sandboxed exec (and a set
-      CODEX_HOME is taken as a Codex marker too) but exposes NO session id — so
-      we know it's Codex, but still locate the rollout by cwd.
+    - Codex sets CODEX_SANDBOX* in its (default) sandboxed exec but exposes NO
+      session id — so we know it's Codex, but still locate the rollout by cwd.
+      (CODEX_HOME only relocates the logs; it is often exported globally, so
+      it is NOT a marker.)
     """
     sid = os.environ.get("CLAUDE_CODE_SESSION_ID")
     if sid or os.environ.get("CLAUDECODE"):
         return "claude-code", (sid or None)
-    if any(os.environ.get(v) for v in ("CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED", "CODEX_HOME")):
+    if os.environ.get("CODEX_SANDBOX") or os.environ.get("CODEX_SANDBOX_NETWORK_DISABLED"):
         return "codex", None
     return None, None
 
