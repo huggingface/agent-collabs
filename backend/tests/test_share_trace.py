@@ -22,7 +22,10 @@ import share_trace as st  # noqa: E402
 
 
 CWD = "/work/proj"  # absolute; detect only uses it to compute slugs / cwd-match
-_MARKERS = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
+_MARKERS = (
+    "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_HOME", "CLAUDE_CONFIG_DIR",
+)
 
 
 def _slug(cwd: str) -> str:
@@ -75,6 +78,42 @@ def test_codex_marker_never_grabs_a_claude_log(home, monkeypatch):
     harness, path, _ = st.detect(CWD, "auto")
     assert harness == "codex"
     assert path == rollout               # never the CC log
+
+
+def test_config_dir_env_vars_are_honoured(home, monkeypatch, tmp_path):
+    # CLAUDE_CONFIG_DIR / CODEX_HOME relocate the logs; ~/.claude and ~/.codex
+    # are only the fallbacks.
+    assert st._cc_project_dir(CWD) == home / ".claude" / "projects" / _slug(CWD)
+    assert st._codex_home() == home / ".codex"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "cx" / ".codex"))
+    assert st._cc_project_dir(CWD) == tmp_path / "cc" / "projects" / _slug(CWD)
+    rollout = _codex(tmp_path / "cx")  # writes under <root>/.codex/sessions
+    assert st._codex_logs() == [rollout]
+    assert st._infer_harness(rollout) == "codex"
+
+
+def test_claude_config_dir_detects_pinned_session(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    d = tmp_path / "cc" / "projects" / _slug(CWD)
+    d.mkdir(parents=True)
+    mine = d / "sid-1.jsonl"
+    mine.write_text("{}\n")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-1")
+    assert st.detect(CWD, "auto") == ("claude-code", mine, False)
+    assert st._infer_harness(mine) == "claude-code"
+
+
+def test_codex_home_is_a_codex_marker(home, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    assert st._running_harness() == ("codex", None)
+
+
+def test_codex_cwd_match_respects_path_boundary(home):
+    assert _codex(home, cwd="/work/proj") and st._codex_matches_cwd(st._codex_logs()[0], CWD)
+    assert st._mentions_cwd("cd /work/proj/src && ls", CWD)
+    assert not st._mentions_cwd("/work/proj2", CWD)
+    assert not st._mentions_cwd("cd /work/proj-old", CWD)
 
 
 def test_ambiguous_without_markers_refuses(home):
