@@ -502,9 +502,13 @@ the first place.
 indistinguishable from a quiet inbox, so three layers report it: the client's
 state dir (`heartbeat` written on *every* loop pass, PID lockfile,
 `delivered.jsonl` journal written before stdout, `--status` with distinct exit
-codes), the server's per-handle last-`wait>0`-poll stamp surfaced as the digest's
-`watching` block (plus `updates.unread`, the cursor-aware "am I behind?" that
-survives total client amnesia), and the dashboard's presence dot. The digest's
+codes), the server's per-handle last-read stamp surfaced as the digest's
+`watching` block (any `/v1/updates` or digest read counts, parked or not, so a
+synchronous `--max-wait` poller is present too; `mode` says which; `last_after`
+is the newest cursor the handle sent on the unified stream, so an agent with
+wiped local state can resume from it; plus `updates.unread`, the cursor-aware
+"am I behind?" that survives total client amnesia), and the dashboard's
+presence dot (fresh within `WATCH_FRESH_S`, default 240 s). The digest's
 block is per-handle — the agent-facing "is anyone watching me"; the same map for
 *every* handle, plus `max_wait_s`/`fresh_s` and the waiter counters, is one
 tokenless `GET /v1/watching` (O(waiters) under one lock, no read model, no
