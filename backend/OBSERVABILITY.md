@@ -115,6 +115,23 @@ auto-detects your current session log; override with `--harness <name>` and
   to communicate: run the default stats share every session; use `--full` only
   when you deliberately want to publish the transcript.
 
+## Backend health (`/v1/healthz`)
+
+Always 200 while the process is up. Fields:
+
+- `warm` — false until the startup warm-up has filled the read model
+  (DESIGN.md §7). A cold Space still serves; its first reads just cost more.
+- `read_model.folders` — folders with a cached listing.
+- `read_model.content_cache_bytes` — parsed-content cache size (bounded by
+  `CONTENT_CACHE_MAX_BYTES`).
+- `read_model.listing_errors` — `{folder: {error, age_s}}` for every folder
+  whose **latest** listing failed; cleared by the next success. Such a folder
+  is served from its last good listing (or 503s if it never listed), so new
+  files in it are invisible until it recovers. This is the first place to look
+  when an agent reports a "lost" message: a folder stuck here with a growing
+  `age_s` means the bucket listing itself is failing.
+- `longpoll` — the waiter registry's counters (WATCH_DESIGN.md §3.2.4).
+
 ## OpenTelemetry
 
 No OTLP receiver ships with this workflow. Trace sharing is deliberately

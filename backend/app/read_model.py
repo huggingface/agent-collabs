@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from app.config import Settings
 from app.frontmatter import parse
-from app.hub import HubClient, ListedFile
+from app.hub import HubClient, ListedFile, ListingFailed
 from app.naming import (
     BROADCASTS_FOLDER,
     CHANNELS_FOLDER,
@@ -85,6 +85,15 @@ class _Folder:
     fetched_at: float = float("-inf")
     overlay: dict[str, tuple[ListedFile, float]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # Single-flight for content resolution: concurrent cold readers of one
+    # folder wait for the first batch download, then hit the cache.
+    resolve_lock: threading.Lock = field(default_factory=threading.Lock)
+    # True once one listing has completed: until then there is no cached truth
+    # to fall back on, so a failed listing must fail the request.
+    listed: bool = False
+    # The most recent listing failure, (short error, clock time); cleared by
+    # the next successful listing. Surfaced on /v1/healthz.
+    last_error: tuple[str, float] | None = None
 
 
 def _safe_parse(raw: bytes) -> tuple[dict[str, Any], str, bool]:
@@ -120,6 +129,50 @@ class ReadModel:
         self._local: dict[str, tuple[dict, str, int, float]] = {}
         self._verification: tuple[str, dict[str, str]] | None = None
         self._content_lock = threading.Lock()
+        # Set once ``warm_up`` has filled every startup folder (/v1/healthz).
+        self.warm = False
+
+    # ───────────────────────── warm-up & gauges ─────────────────────────
+
+    def warm_up(self, folders: list[str], retry_s: float = 5.0) -> None:
+        """Fill listing + content caches for ``folders`` so the reconnect
+        storm after a restart hits a warm cache. A folder that fails is
+        retried every ``retry_s`` until it fills; ``warm`` flips only then."""
+        pending = list(folders)
+        while True:
+            pending = [f for f in pending if not self._fill(f)]
+            if not pending:
+                break
+            time.sleep(retry_s)
+        self.warm = True
+        log.info("read model warm: %s", ", ".join(folders))
+
+    def _fill(self, folder: str) -> bool:
+        try:
+            self.records(folder)
+            return True
+        except Exception as e:
+            log.warning("warm-up of %s failed; will retry: %s", folder, e)
+            return False
+
+    def stats(self) -> dict[str, Any]:
+        """Gauges for /v1/healthz. ``listing_errors`` names every folder whose
+        latest listing failed (it is being served from cache, or 503s if it
+        never listed), so a "lost message" report can be traced to a stuck
+        folder."""
+        now = self._clock()
+        with self._folders_lock:
+            folders = dict(self._folders)
+        errors = {
+            name: {"error": f.last_error[0], "age_s": round(now - f.last_error[1], 1)}
+            for name, f in sorted(folders.items())
+            if f.last_error is not None
+        }
+        return {
+            "folders": len(folders),
+            "content_cache_bytes": self._content_bytes,
+            "listing_errors": errors,
+        }
 
     # ───────────────────────── listings ─────────────────────────
 
@@ -134,17 +187,25 @@ class ReadModel:
         with f.lock:
             now = self._clock()
             if now - f.fetched_at >= self._settings.listing_ttl_s:
-                fresh = self._hub.list_central_dir(folder)
-                if not fresh and f.files:
-                    # The hub flattens listing errors to []; nothing is ever
-                    # deleted from these folders, so an empty result for a
-                    # previously non-empty folder is a transient failure.
+                try:
+                    fresh = self._hub.list_central_dir(folder)
+                except ListingFailed as e:
+                    # Never install a failed (possibly partial) listing: a
+                    # missing entry would vanish for a TTL, and a watcher's
+                    # after= cursor could step past it for good.
+                    f.last_error = (str(e)[:200], now)
+                    if not f.listed:
+                        raise  # cold: no cached truth to serve
                     log.warning(
-                        "listing(%s) came back empty; keeping %d cached entries",
-                        folder, len(f.files),
+                        "listing(%s) failed; serving %d cached entries: %s",
+                        folder, len(f.files), e,
                     )
                 else:
                     f.files = {e.rel_path: e for e in fresh}
+                    f.listed = True
+                    f.last_error = None
+                # Retry after a TTL either way: a hub outage must not turn
+                # every read into another failing listing call.
                 f.fetched_at = now
                 f.overlay = {
                     p: (e, ts)
@@ -168,7 +229,7 @@ class ReadModel:
     def records(self, folder: str) -> list[Record]:
         """Parsed records for every .md file under ``folder`` (READMEs
         excluded), ascending by filename. Cold misses are batch-fetched."""
-        out = self._resolve_many(self._md_entries(folder))
+        out = self._resolve_folder(folder, self._md_entries(folder))
         return [out[p] for p in sorted(out)]
 
     def records_for(self, folder: str, paths: list[str]) -> dict[str, Record]:
@@ -177,7 +238,14 @@ class ReadModel:
         (READMEs) or selective reads over a tree listing (channels).
         Unlisted paths are silently absent from the result."""
         by_path = {e.rel_path: e for e in self.listing(folder)}
-        return self._resolve_many([by_path[p] for p in paths if p in by_path])
+        return self._resolve_folder(folder, [by_path[p] for p in paths if p in by_path])
+
+    def _resolve_folder(self, folder: str, entries: list[ListedFile]) -> dict[str, Record]:
+        """``_resolve_many`` single-flighted per folder: after a restart every
+        watcher reconnects at once, and N cold readers must cost one batch
+        download, not N. Warm resolves are cache hits, so the lock is cheap."""
+        with self._folder(folder).resolve_lock:
+            return self._resolve_many(entries)
 
     def _resolve_many(self, entries: list[ListedFile]) -> dict[str, Record]:
         out: dict[str, Record] = {}
@@ -197,7 +265,7 @@ class ReadModel:
                 for e in misses:
                     raw = fetched.get(e.rel_path)
                     if raw is None:
-                        continue  # transient download failure; heals next pass
+                        continue  # deleted since the listing (failures raise)
                     out[e.rel_path] = self._insert(e, raw)
         return out
 

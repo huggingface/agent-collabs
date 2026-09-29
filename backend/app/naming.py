@@ -68,6 +68,11 @@ def stamp_iso(dt: datetime) -> str:
     return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
 
 
+AGENTS_FOLDER = "agents"
+MESSAGE_BOARD_FOLDER = "message_board"
+RESULTS_FOLDER = "results"
+
+
 def message_path(agent_id: str, dt: datetime) -> str:
     return f"message_board/{stamp_filename(agent_id, dt)}"
 
