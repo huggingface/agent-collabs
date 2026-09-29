@@ -174,7 +174,7 @@ class ReadModel:
     def records_for(self, folder: str, paths: list[str]) -> dict[str, Record]:
         """Resolve specific files from ``folder``'s listing through the content
         cache, keyed by rel_path. For files ``records`` excludes by convention
-        (READMEs) or selective reads over a tree listing (taskforces, §18).
+        (READMEs) or selective reads over a tree listing (channels).
         Unlisted paths are silently absent from the result."""
         by_path = {e.rel_path: e for e in self.listing(folder)}
         return self._resolve_many([by_path[p] for p in paths if p in by_path])
@@ -257,8 +257,8 @@ class ReadModel:
         exact regardless of listing TTL. Call right after the bucket write.
 
         ``folder`` pins which folder cache gets the listing overlay when it is
-        not the file's immediate parent — taskforce files live under one shared
-        ``taskforces`` tree listing whatever their subdirectory (§18.4)."""
+        not the file's immediate parent — channel files live under one shared
+        ``channels`` tree listing whatever their subdirectory."""
         if folder is None:
             folder, _, _filename = path.rpartition("/")
         f = self._folder(folder)
@@ -297,13 +297,12 @@ class ReadModel:
         return [by_name[f] for f in sorted(by_name)]
 
     # ───────────────────────── channels ─────────────────────────
-    # All channel reads run over the ONE recursive channels/ listing (the
-    # taskforce FOLDER pattern): summaries, rosters, subscriptions, and the
-    # cross-channel feed each cost at most one bucket listing per TTL window.
+    # All channel reads run over the ONE recursive channels/ listing:
+    # summaries, rosters, subscriptions, and the cross-channel feed each cost
+    # at most one bucket listing per TTL window.
 
     def channel_exists(self, name: str) -> bool:
-        """A channel exists iff its README (the theme) is listed — the same
-        structural invariant as taskforces. Shared by the channels router and
+        """A channel exists iff its README (the theme) is listed. Shared by the channels router and
         the POST /v1/messages channel gate (import-cycle-free)."""
         readme = channel_readme_path(name)
         return any(e.rel_path == readme for e in self.listing(CHANNELS_FOLDER))

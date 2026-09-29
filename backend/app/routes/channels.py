@@ -1,16 +1,15 @@
 """Channels (CHANNELS_DESIGN.md): topic rooms for depth over breadth.
 
 A channel is ``channels/{name}/`` in the central bucket: a README (the theme —
-the channel exists iff it does, the taskforce invariant), ``members/`` marker
+the channel exists iff it does), ``members/`` marker
 files (one per subscription: write to join, delete to leave — no roster file
 to read-modify-write), and stamped messages. Messages are POSTed through
 ``/v1/messages`` with ``channel`` set, never through a channel-local write
 endpoint; this module owns creation, subscription, and the read surfaces.
 
-Everything reads the ONE recursive ``channels/`` listing (the taskforce
-``FOLDER`` pattern): summaries, rosters, subscriptions, and the cross-channel
-feed cost at most one bucket listing per TTL window. Fixing the taskforce
-adoption failure is a design goal here: creation auto-announces on the board,
+Everything reads the ONE recursive ``channels/`` listing: summaries, rosters,
+subscriptions, and the cross-channel feed cost at most one bucket listing per
+TTL window. Adoption is a design goal: creation auto-announces on the board,
 in-channel mentions fan out to inboxes (via ``promote_message``), and
 subscribed-channel activity rides the digest.
 """
@@ -107,7 +106,7 @@ def _is_readme(path: str) -> bool:
 
 def _grouped(read_model: ReadModel) -> dict[str, list[ListedFile]]:
     """All listed channel files grouped by channel name; groups without a
-    README are not channels and are dropped (mirrors taskforces)."""
+    README are not channels and are dropped."""
     groups: dict[str, list[ListedFile]] = {}
     for e in read_model.listing(FOLDER):
         rel = e.rel_path.removeprefix(f"{FOLDER}/")
@@ -157,7 +156,7 @@ def _member_entries(name: str, entries: list[ListedFile]) -> list[ListedFile]:
 
 def _excerpt(body: str, limit: int = 160) -> str:
     """First prose line (headings are usually just the name); falls back to
-    the first heading. Same rule as taskforce READMEs."""
+    the first heading."""
     heading = ""
     for line in body.splitlines():
         s = line.strip()
@@ -284,8 +283,7 @@ def channels_digest(
 
 def _announcement_body(name: str, theme: str) -> str:
     """The server-composed board message announcing a new channel — discovery
-    is deterministic, never a favor the creator remembers to do (the taskforce
-    lesson)."""
+    is deterministic, never a favor the creator remembers to do."""
     return (
         f"New channel #{name} — {_excerpt(theme)}\n\n"
         f"Read: `GET /v1/channels/{name}` · "
