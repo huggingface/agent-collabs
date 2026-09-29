@@ -1,4 +1,5 @@
 import json
+import threading
 
 import pytest
 
@@ -147,6 +148,26 @@ def test_failed_batch_download_raises_rather_than_dropping_records():
     with pytest.raises(DownloadFailed):
         rm.record("message_board", fn)  # not None, which would be a false 404
     assert rm.record("message_board", fn).body.strip() == "hello"
+
+
+def test_concurrent_cold_reads_share_one_batch_download():
+    """After a restart every watcher reconnects at once; N cold readers of a
+    folder must cost one batch download, not N."""
+    rm, hub, _clock, _s = make_rm()
+    for i in range(3):
+        seed_message(hub, f"2026060{i + 1}-120000-000", "agent-1", f"msg {i}")
+    hub.latency_s = 0.2
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(rm.records("message_board")))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert [len(r) for r in results] == [3, 3]
+    assert hub.list_calls == 1 and hub.download_calls == 1
 
 
 def test_lru_eviction_bounds_memory_but_never_drops_results():
