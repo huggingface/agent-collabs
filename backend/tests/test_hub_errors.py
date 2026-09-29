@@ -198,16 +198,31 @@ def test_an_unrelated_runtime_error_is_not_a_storage_failure(env, real_writes):
         env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "hi"})
 
 
-def test_download_many_skips_a_xet_failure_without_logging_its_text(env, monkeypatch, caplog):
+def test_download_many_raises_on_a_xet_failure_without_logging_its_text(env, monkeypatch, caplog):
     client = hub_module.HubClient(env.settings)
 
     def download(**kwargs):
         raise _xet_error()
 
     monkeypatch.setattr(hub_module, "download_bucket_files", download)
-    with caplog.at_level(logging.WARNING):
-        assert client.download_many(env.settings.central_bucket, ["agents/a.md"]) == {}
+    with caplog.at_level(logging.WARNING), pytest.raises(hub_module.DownloadFailed) as caught:
+        client.download_many(env.settings.central_bucket, ["agents/a.md"])
     assert "type=ConnectionError" in caplog.text and MARKER not in caplog.text
+    assert MARKER not in str(caught.value)
+
+
+def test_listing_failure_carries_no_exception_text(env, monkeypatch, caplog):
+    """ListingFailed's message reaches logs and /v1/healthz's last_error."""
+    client = hub_module.HubClient(env.settings)
+
+    def tree(**kwargs):
+        raise _hub_error(503)
+
+    monkeypatch.setattr(hub_module, "list_bucket_tree", tree)
+    with caplog.at_level(logging.WARNING), pytest.raises(hub_module.ListingFailed) as caught:
+        client.list_central_dir("message_board")
+    assert str(caught.value) == "type=HfHubHTTPError status=503"
+    assert MARKER not in caplog.text
 
 
 def test_jobs_handshake_read_failure_is_not_a_missing_handshake(env):
@@ -285,3 +300,20 @@ def test_raw_refs_accepts_a_list(env):
     assert r.json()["mentions_delivered"] == ["agent-2"]
     fm = env.client.get(f"/v1/messages/{r.json()['filename']}").json()["frontmatter"]
     assert fm["refs"] == refs
+
+
+def test_cold_listing_failure_is_503_not_an_empty_folder(env):
+    env.hub.seed("message_board/20260601-100000-000_agent-1.md", "---\nagent: agent-1\n---\nhi")
+    env.hub.fail_next_listing("message_board")
+    r = env.client.get("/v1/messages")
+    _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert r.headers["retry-after"] == "5"
+    assert env.client.get("/v1/messages").json()["count"] == 1
+
+
+def test_failed_batch_download_is_503_not_404(env):
+    fn = "20260601-100000-000_agent-1.md"
+    env.hub.seed(f"message_board/{fn}", "---\nagent: agent-1\n---\nhi")
+    env.hub.fail_next_read("message_board/")
+    _error(env.client.get(f"/v1/messages/{fn}"), 503, "STORAGE_UNAVAILABLE")
+    assert env.client.get(f"/v1/messages/{fn}").status_code == 200

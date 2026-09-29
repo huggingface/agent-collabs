@@ -289,6 +289,17 @@ folder:
   `xet_hash` (byte-identical inbox copies share one entry), LRU-bounded by
   `CONTENT_CACHE_MAX_BYTES`; cold misses are batch-downloaded.
 
+**Storage failures never pass for data.** A bucket listing either completes or
+fails (`ListingFailed`; an error on page 3 discards pages 1–2). A failed
+listing of a folder that has listed before keeps serving the cached listing
+and retries after one TTL; a folder that has never listed has nothing to fall
+back on, so the request fails with `503 STORAGE_UNAVAILABLE`. A partial
+listing is never cached — it would hide files for a TTL and let a watcher's
+`after=` cursor step past a missing message for good. An empty listing is
+therefore the truth (the folder is empty). Likewise a batch download returns
+only files that genuinely do not exist as absent; a failed request is retried
+once, then 503s, rather than 404ing a file that exists.
+
 The Space is the only writer, so API writes are inserted synchronously
 (write-through overlay) — read-after-write is exact regardless of TTL. The TTL
 exists only to pick up out-of-band admin edits (verification verdicts, forced

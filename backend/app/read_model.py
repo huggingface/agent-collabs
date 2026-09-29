@@ -35,7 +35,7 @@ from typing import Any, Callable
 
 from app.config import Settings
 from app.frontmatter import parse
-from app.hub import HubClient, ListedFile
+from app.hub import HubClient, ListedFile, ListingFailed
 from app.naming import (
     BROADCASTS_FOLDER,
     CHANNELS_FOLDER,
@@ -85,6 +85,12 @@ class _Folder:
     fetched_at: float = float("-inf")
     overlay: dict[str, tuple[ListedFile, float]] = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
+    # True once one listing has completed: until then there is no cached truth
+    # to fall back on, so a failed listing must fail the request.
+    listed: bool = False
+    # The most recent listing failure, (short error, clock time); cleared by
+    # the next successful listing. Surfaced on /v1/healthz.
+    last_error: tuple[str, float] | None = None
 
 
 def _safe_parse(raw: bytes) -> tuple[dict[str, Any], str, bool]:
@@ -134,17 +140,25 @@ class ReadModel:
         with f.lock:
             now = self._clock()
             if now - f.fetched_at >= self._settings.listing_ttl_s:
-                fresh = self._hub.list_central_dir(folder)
-                if not fresh and f.files:
-                    # The hub flattens listing errors to []; nothing is ever
-                    # deleted from these folders, so an empty result for a
-                    # previously non-empty folder is a transient failure.
+                try:
+                    fresh = self._hub.list_central_dir(folder)
+                except ListingFailed as e:
+                    # Never install a failed (possibly partial) listing: a
+                    # missing entry would vanish for a TTL, and a watcher's
+                    # after= cursor could step past it for good.
+                    f.last_error = (str(e)[:200], now)
+                    if not f.listed:
+                        raise  # cold: no cached truth to serve
                     log.warning(
-                        "listing(%s) came back empty; keeping %d cached entries",
-                        folder, len(f.files),
+                        "listing(%s) failed; serving %d cached entries: %s",
+                        folder, len(f.files), e,
                     )
                 else:
                     f.files = {e.rel_path: e for e in fresh}
+                    f.listed = True
+                    f.last_error = None
+                # Retry after a TTL either way: a hub outage must not turn
+                # every read into another failing listing call.
                 f.fetched_at = now
                 f.overlay = {
                     p: (e, ts)
@@ -197,7 +211,7 @@ class ReadModel:
                 for e in misses:
                     raw = fetched.get(e.rel_path)
                     if raw is None:
-                        continue  # transient download failure; heals next pass
+                        continue  # deleted since the listing (failures raise)
                     out[e.rel_path] = self._insert(e, raw)
         return out
 

@@ -7,7 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.errors import APIError, InvalidRequest, StorageUnavailable, TooLarge
-from app.hub import StorageFailed
+from app.hub import DownloadFailed, ListingFailed, StorageFailed
 from app.routes import (
     agents,
     channels,
@@ -72,11 +72,14 @@ async def _api_error_handler(_: Request, exc: APIError) -> JSONResponse:
 
 @app.exception_handler(HubHTTPError)
 @app.exception_handler(StorageFailed)
+@app.exception_handler(ListingFailed)
+@app.exception_handler(DownloadFailed)
 async def _storage_error_handler(request: Request, exc: Exception) -> JSONResponse:
     """An uncaught storage failure (HfHubHTTPError, the connection/timeout
-    error under it, or a Xet failure) is a retryable 503, not a 500. Logs the
-    type and status only: exception text can carry signed URLs or Xet
-    credentials."""
+    error under it, a Xet failure, or a cold-folder listing or batch download
+    that failed) is a retryable 503, not a 500 — never a partial folder or a
+    false 404. Logs the type and status only: exception text can carry signed
+    URLs or Xet credentials."""
     status = getattr(exc, "status", None) or getattr(getattr(exc, "response", None), "status_code", None)
     log.warning(
         "storage backend failed: %s %s (type=%s status=%s)",

@@ -42,6 +42,18 @@ from app.naming import SourceURI, parse_source_uri
 log = logging.getLogger(__name__)
 
 
+class ListingFailed(RuntimeError):
+    """A bucket listing did not complete. Never carries partial results: a
+    page-3 failure after pages 1-2 must not pass for the whole folder. Its
+    message is the cause's type and status only (see _failure)."""
+
+
+class DownloadFailed(RuntimeError):
+    """A batch download failed (after one retry). Files that are genuinely
+    absent are not a failure — they are just missing from the result. Its
+    message is the cause's type and status only (see _failure)."""
+
+
 @dataclass
 class ListedFile:
     rel_path: str
@@ -81,6 +93,14 @@ class StorageFailed(Exception):
         self.type_name = type(cause).__name__
         self.status = _status(cause) or xet_refusal_status(cause)
         super().__init__(f"storage call failed ({self.type_name}, status={self.status})")
+
+
+def _failure(e: BaseException) -> str:
+    """A failure as "type=... status=...", for logs and the messages of
+    ListingFailed/DownloadFailed (which reach /v1/healthz): exception text can
+    carry signed URLs or Xet credentials, so it is never included."""
+    status = getattr(e, "status", None) or _status(e)
+    return f"type={getattr(e, 'type_name', type(e).__name__)} status={status}"
 
 
 # What a poisoned Xet session raises for every later call (see app/caller_write.py).
@@ -451,44 +471,61 @@ class HubClient:
     def download_many(self, bucket: str, remote_paths: list[str]) -> dict[str, bytes]:
         """Batch-download files, returning {remote_path: bytes}.
 
-        Missing or failed entries are simply absent from the result — callers
-        (the read model, the backfill script) treat absence as transient and
-        retry on a later pass. Chunked so a multi-thousand-file cold fill
+        A path is absent from the result only when the file genuinely does not
+        exist (``raise_on_missing_files=False`` skips exactly those; every
+        request failure raises). A failed chunk is retried once, then raises
+        ``DownloadFailed`` — never a silent subset, which callers would read as
+        "this file is gone". Chunked so a multi-thousand-file cold fill
         doesn't ride on a single oversized call.
         """
         out: dict[str, bytes] = {}
         chunk_size = 500
         for start in range(0, len(remote_paths), chunk_size):
             chunk = remote_paths[start : start + chunk_size]
-            with tempfile.TemporaryDirectory() as td:
-                pairs = [(remote, str(Path(td) / str(i))) for i, remote in enumerate(chunk)]
+            for attempt in (1, 2):
                 try:
-                    _download(
-                        bucket_id=bucket,
-                        files=pairs,
-                        raise_on_missing_files=False,
-                        token=self._token,
-                    )
-                except (EntryNotFoundError, HfHubHTTPError, StorageFailed) as e:
+                    out.update(self._download_chunk(bucket, chunk))
+                    break
+                except Exception as e:
                     # Type and status only: the text can carry signed URLs.
                     log.warning(
-                        "download_many(%s, %d files) failed (type=%s status=%s)",
-                        bucket, len(chunk), getattr(e, "type_name", type(e).__name__), _status(e),
+                        "download_many(%s, %d files) attempt %d failed (%s)",
+                        bucket, len(chunk), attempt, _failure(e),
                     )
-                    continue
-                for remote, local in pairs:
-                    p = Path(local)
-                    if p.exists():
-                        out[remote] = p.read_bytes()
+                    if attempt == 2:
+                        raise DownloadFailed(_failure(e)) from e
         return out
 
+    def _download_chunk(self, bucket: str, chunk: list[str]) -> dict[str, bytes]:
+        with tempfile.TemporaryDirectory() as td:
+            pairs = [(remote, str(Path(td) / str(i))) for i, remote in enumerate(chunk)]
+            _download(
+                bucket_id=bucket,
+                files=pairs,
+                raise_on_missing_files=False,
+                token=self._token,
+            )
+            return {
+                remote: Path(local).read_bytes()
+                for remote, local in pairs
+                if Path(local).exists()
+            }
+
     def list_central_dir(self, prefix: str) -> list[ListedFile]:
+        """The complete listing of a central-bucket folder, or ``ListingFailed``."""
         return self._list(self._settings.central_bucket, prefix)
 
     def list_bucket_dir(self, bucket: str, prefix: str) -> list[ListedFile]:
-        return self._list(bucket, prefix)
+        """Listing of an agent scratch bucket; [] if it cannot be listed (a
+        missing bucket reads as empty to the callers), never a partial list."""
+        try:
+            return self._list(bucket, prefix)
+        except ListingFailed:
+            return []
 
     def _list(self, bucket: str, prefix: str) -> list[ListedFile]:
+        """All files under ``prefix``, or ``ListingFailed``. The tree is
+        paginated; an error mid-iteration discards the pages already read."""
         out: list[ListedFile] = []
         try:
             for entry in list_bucket_tree(
@@ -505,8 +542,11 @@ class HubClient:
                             xet_hash=getattr(entry, "xet_hash", None),
                         )
                     )
-        except (RepositoryNotFoundError, HfHubHTTPError) as e:
-            log.debug("list(%s, %s) failed: %s", bucket, prefix, e)
+        except Exception as e:
+            log.warning(
+                "list(%s, %s) failed after %d entries (%s)", bucket, prefix, len(out), _failure(e)
+            )
+            raise ListingFailed(_failure(e)) from e
         return out
 
     # ───────────────────────── Writes (central bucket) ─────────────────────────
