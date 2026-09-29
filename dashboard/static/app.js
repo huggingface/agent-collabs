@@ -7,6 +7,8 @@ const VERIFICATION_URL = '/api/verification';
 const AGENTS_URL = '/api/agents';
 const STATS_URL = '/api/stats';
 const TRACES_URL = '/api/traces?expand=true&limit=50';
+// Every session id ("agent/session"), unexpanded: exact per-agent counts.
+const TRACE_IDS_URL = '/api/traces?limit=0';
 const CHANNELS_URL = '/api/channels';
 const WATCHING_URL = '/api/watching';
 const NOTIFY_LEVELS_URL = '/api/notify-levels';
@@ -2838,13 +2840,14 @@ colDivider.addEventListener('dblclick', () => {
 // ─────────────────────────────────────────────────────────────
 //  TRACES  (project token estimate + shared-session library)
 //  Independent of the main load: a failure here never touches the
-//  leaderboard/chat. The whole section stays hidden until ≥1 trace exists.
+//  leaderboard/chat. Hidden only when there is no backend to ask.
 // ─────────────────────────────────────────────────────────────
 const tracesTitleEl = document.getElementById('tracesSectionTitle');
 const tracesTileEl = document.getElementById('tracesStatsTile');
 const tracesWrapEl = document.getElementById('tracesListWrap');
 const tracesBodyEl = document.getElementById('tracesBody');
 const tracesHintEl = document.getElementById('tracesHint');
+const tracesEmptyEl = document.getElementById('tracesEmpty');
 
 function fmtTokens(n) {
   if (n == null) return '—';
@@ -2885,24 +2888,50 @@ function renderTracesList(items) {
   }).join('');
 }
 
+// "N of M agents have shared a session" — repainted with the roster too,
+// since either side can land first.
+let tracesSessionsLabel = '';
+function renderTraceCoverage() {
+  if (!traceSessions) return;
+  const roster = rosterAgents();
+  const sharing = roster.filter(a => traceSessions.get(a)).length;
+  tracesHintEl.textContent = roster.length
+    ? `${sharing} of ${roster.length} agents have shared a session · ${tracesSessionsLabel}`
+    : tracesSessionsLabel;
+}
+
 async function refreshTraces() {
   try {
-    const [sr, tr] = await Promise.allSettled([
-      fetchWithTimeout(STATS_URL), fetchWithTimeout(TRACES_URL),
+    const [sr, tr, ir] = await Promise.allSettled([
+      fetchWithTimeout(STATS_URL), fetchWithTimeout(TRACES_URL), fetchWithTimeout(TRACE_IDS_URL),
     ]);
+    const ok = r => r.status === 'fulfilled' && r.value.ok;
+    // Nothing answered (no backend, or it is down): leave the section as is.
+    if (!ok(sr) && !ok(tr)) return;
     let stats = null, items = [], count = 0;
-    if (sr.status === 'fulfilled' && sr.value.ok) stats = await sr.value.json();
-    if (tr.status === 'fulfilled' && tr.value.ok) {
+    if (ok(sr)) stats = await sr.value.json();
+    if (ok(tr)) {
       const j = await tr.value.json();
       items = j.items || []; count = j.count ?? items.length;
     }
+    // Per-agent session counts; the newest page is a lower bound if the id
+    // listing failed.
+    const ids = ok(ir) ? ((await ir.value.json()).items || []) : items.map(it => `${it.agent}/`);
+    traceSessions = new Map();
+    for (const id of ids) {
+      const a = String(id).split('/')[0];
+      traceSessions.set(a, (traceSessions.get(a) || 0) + 1);
+    }
     const has = items.length > 0 || (stats && (stats.sessions_counted || stats.sessions_missing_tokens));
-    tracesTitleEl.hidden = tracesTileEl.hidden = tracesWrapEl.hidden = !has;
-    if (!has) return;
-    if (stats) renderStatsTile(stats);
+    tracesTitleEl.hidden = false;
+    tracesTileEl.hidden = !(has && stats);
+    tracesWrapEl.hidden = !items.length;
+    tracesEmptyEl.hidden = has;
+    if (has && stats) renderStatsTile(stats);
     renderTracesList(items);
-    tracesHintEl.textContent = count > items.length
-      ? `${items.length} of ${count}` : `${count} session${count === 1 ? '' : 's'}`;
+    tracesSessionsLabel = count > items.length
+      ? `${items.length} of ${count} sessions` : `${count} session${count === 1 ? '' : 's'}`;
+    renderAgentsPanel();  // also repaints the coverage hint
   } catch { /* traces are best-effort; never disrupt the dashboard */ }
 }
 
@@ -2968,6 +2997,7 @@ function bestResultByAgent() {
 }
 
 function renderAgentsPanel() {
+  renderTraceCoverage();
   const roster = rosterAgents();
   agentsTitleEl.hidden = agentsWrapEl.hidden = !roster.length;
   if (!roster.length) return;
