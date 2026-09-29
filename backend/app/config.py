@@ -24,10 +24,10 @@ class Settings(BaseSettings):
     # Default derived as {org}/{collab_slug}-main-bucket (see validator).
     central_bucket: str = Field("", alias="CENTRAL_BUCKET")
     # Private bucket for the audit log and quota ledger; the Space is its only
-    # writer. Defaults into the org ({org}/{slug}-audit, set by bootstrap);
-    # place it OUTSIDE the org (personal account) when members must not be
-    # able to read it — audit rows carry caller_ip/user_agent, and the
-    # verifier's private eval set lives here.
+    # writer. Org members can read private buckets in their org, so when it
+    # lives in ORG (single-org mode) audit rows omit caller_ip/user_agent;
+    # put it in a separate admin org to keep those and a private eval set
+    # away from participants.
     audit_bucket: str = Field(alias="AUDIT_BUCKET")
     # Durable 24h job-quota ledger, stored in the private audit bucket under a
     # separate prefix (decoupled from the audit log so purges don't reset
@@ -160,6 +160,11 @@ class Settings(BaseSettings):
         if not self.central_bucket:
             self.central_bucket = f"{self.org}/{self.collab_slug}-main-bucket"
         return self
+
+    @property
+    def audit_bucket_in_org(self) -> bool:
+        """True when participants (challenge-org members) can read the audit bucket."""
+        return self.audit_bucket.split("/")[0] == self.org
 
     @property
     def agent_bucket_prefix(self) -> str:

@@ -13,8 +13,11 @@ log = logging.getLogger(__name__)
 
 
 class AuditLogger:
-    def __init__(self, hub: HubClient):
+    def __init__(self, hub: HubClient, *, record_client: bool = True):
+        # record_client=False drops caller_ip/user_agent: set when the audit
+        # bucket is readable by participants (single-org mode).
         self._hub = hub
+        self._record_client = record_client
 
     def write(
         self,
@@ -41,10 +44,11 @@ class AuditLogger:
             "bytes": bytes_count,
             "status_code": status_code,
         }
-        if caller_ip is not None:
-            record["caller_ip"] = caller_ip
-        if user_agent is not None:
-            record["user_agent"] = user_agent
+        if self._record_client:
+            if caller_ip is not None:
+                record["caller_ip"] = caller_ip
+            if user_agent is not None:
+                record["user_agent"] = user_agent
         if extra:
             record.update(extra)
 
