@@ -2,17 +2,27 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+import re
 from typing import Any
 
+from app.announce import unique_stamp_time
 from app.hub import HubClient
-from app.naming import audit_log_path, stamp_iso, utc_now
+from app.naming import audit_event_path, stamp_iso, utc_now
 
 
 log = logging.getLogger(__name__)
 
 
+def event_name(route: str) -> str:
+    """Filename-safe event name from a route: /v1/jobs:run -> jobs-run."""
+    return re.sub(r"[^a-z0-9]+", "-", route.removeprefix("/v1/").lower()).strip("-")
+
+
 class AuditLogger:
+    """Writes one object per event (``audit/YYYYMM/{stamp}_{event}.json``), so
+    a write is O(1) and concurrent writes can't lose each other's records.
+    Fire-and-forget: a failed write is logged, never raised into the request."""
+
     def __init__(self, hub: HubClient):
         self._hub = hub
 
@@ -30,7 +40,10 @@ class AuditLogger:
         user_agent: str | None = None,
         extra: dict[str, Any] | None = None,
     ) -> None:
-        now = utc_now()
+        event = event_name(route)
+        # Same per-key monotonic guard as board filenames: two same-ms events
+        # on one route still get distinct object names.
+        now = unique_stamp_time(f"audit/{event}", utc_now())
         record: dict[str, Any] = {
             "ts": stamp_iso(now),
             "agent_id": agent_id,
@@ -48,9 +61,8 @@ class AuditLogger:
         if extra:
             record.update(extra)
 
-        line = json.dumps(record, separators=(",", ":"), ensure_ascii=False)
-        path = audit_log_path(now)
+        line = json.dumps(record, separators=(",", ":"), ensure_ascii=False) + "\n"
         try:
-            self._hub.append_jsonl_audit(path, line)
-        except Exception:
-            log.exception("audit append failed; record=%s", record)
+            self._hub.write_bytes_audit(audit_event_path(event, now), line.encode("utf-8"))
+        except Exception as exc:
+            log.warning("audit write failed for %s (%s); record=%s", event, exc, record)

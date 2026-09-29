@@ -136,10 +136,6 @@ class PersistentFakeHub(FakeHub):
         super().write_bytes_to_bucket(bucket, path, data)
         self._persist(bucket, path)
 
-    def append_jsonl_audit(self, path: str, line: str) -> None:
-        super().append_jsonl_audit(path, line)
-        self._persist(self._settings.audit_bucket, path)
-
     def write_bytes_audit(self, path: str, data: bytes) -> None:
         super().write_bytes_audit(path, data)
         self._persist(self._settings.audit_bucket, path)

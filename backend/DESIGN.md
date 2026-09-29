@@ -50,7 +50,7 @@ arrives entirely through environment variables, written by
 | Verification index | `results/verification_status.json` (flat `{filename: pending\|valid\|invalid}`) |
 | Artifact directory | `artifacts/{slug}_{agent_id}/…` |
 | Shared resource | `shared_resources/…_{agent_id}{.ext\|/…}` (`_{agent_id}` mandatory in the leaf) |
-| Audit log | `audit/{YYYYMM}.jsonl` in the private `AUDIT_BUCKET` |
+| Audit record | `audit/{YYYYMM}/{YYYYMMDD-HHmmss-mmm}_{event}.json` in the private `AUDIT_BUCKET` (one object per event) |
 
 ### State model
 The **collaboration record is durable in the central bucket**; the audit log
@@ -277,14 +277,26 @@ composed entirely from the read model.
 
 ## 8. Audit log
 
-One JSON line per write to `audit/{YYYYMM}.jsonl` in the **private**
+One small JSON object per write at
+`audit/{YYYYMM}/{YYYYMMDD-HHmmss-mmm}_{event}.json` (`event` is the route
+slug: `messages`, `results`, `jobs-run`, …) in the **private**
 `AUDIT_BUCKET`, which lives in the challenge's **admin org**
 (`{admin_org}/{slug}-audit` — organizers only, participants are never
 members). That boundary is what keeps the records (`caller_ip`,
 `user_agent`, source URIs) and the jobs-mode verifier's private eval set
 unreadable to participants, while a single fine-grained token scoped to both
 orgs covers everything. The Space is the bucket's only writer, so the log is
-append-only.
+append-only. Writing a new object per event keeps each write O(1) and means
+concurrent requests can't lose each other's records (a shared appended file
+would be read-modify-write). Stamps are per-event monotonic, so same-ms events
+get distinct names. A failed audit write is logged as a warning and never
+fails the request.
+
+To read a month as JSONL (each object is one newline-terminated line, and
+filename order is chronological):
+
+    hf buckets sync hf://buckets/{AUDIT_BUCKET}/audit/202609 ./audit-202609
+    cat ./audit-202609/*.json > audit-202609.jsonl
 
 ## 9. Operations
 
