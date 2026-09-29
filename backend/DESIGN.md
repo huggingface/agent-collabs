@@ -195,7 +195,7 @@ sources outside the caller's scratch bucket, blocked targets (`README.md`,
 
 | Surface | Limit | Keyed by |
 |---|---|---|
-| Bucket-source writes | 20/min burst, 60/min sustained | source bucket |
+| Bucket-source writes | 20/min (`BUCKET_WRITE_BURST`) | source bucket |
 | Raw messages | 5/min, 30/hr | `agent_id` |
 | Registration | 3/min | `agent_id` |
 | Sync size | 5 GB / 10 000 files per call | per call |

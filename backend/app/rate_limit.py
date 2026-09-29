@@ -20,7 +20,7 @@ class TokenBucket:
     when the Space restarts (acceptable per the design's in-memory state model).
     """
 
-    def __init__(self, capacity: int, refill_per_minute: int):
+    def __init__(self, capacity: int, refill_per_minute: float):
         if capacity <= 0 or refill_per_minute <= 0:
             raise ValueError("capacity and refill_per_minute must be positive")
         self._capacity = float(capacity)
