@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from app.config import Settings
-from app.errors import InvalidFrontmatter, InvalidPath
+from app.errors import InvalidFrontmatter, InvalidPath, SourceNotFound, TooLarge
+from app.hub import HubClient
 from app.naming import (
     AGENT_ID_RE,
     RESERVED_CHANNEL_NAMES,
@@ -137,6 +138,23 @@ def resolve_source(settings: Settings, source: str) -> tuple[SourceURI, str]:
     if parsed.path:
         validate_path_components(parsed.path)
     return parsed, agent_id
+
+
+def read_source_text(hub: HubClient, settings: Settings, parsed: SourceURI) -> str:
+    """Read a promoted source file as UTF-8 text, mapping every way it can be
+    unusable to an agent-facing error instead of a bare 500."""
+    try:
+        data = hub.read_bytes(parsed)
+    except FileNotFoundError:
+        raise SourceNotFound(str(parsed))
+    if len(data) > settings.message_max_bytes:
+        raise TooLarge(
+            f"source is {len(data)} bytes; the limit is {settings.message_max_bytes}"
+        )
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        raise InvalidFrontmatter("source must be UTF-8 text")
 
 
 def _validate_agent_marker(dest_path: str, agent_id: str, what: str) -> None:

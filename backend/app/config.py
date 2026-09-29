@@ -63,6 +63,9 @@ class Settings(BaseSettings):
     raw_message_per_hour: int = Field(30, alias="RAW_MESSAGE_PER_HOUR")
     registration_per_minute: int = Field(3, alias="REGISTRATION_PER_MINUTE")
 
+    # Byte cap on a promoted source file (messages and results alike).
+    message_max_bytes: int = Field(65536, alias="MESSAGE_MAX_BYTES")
+
     dedup_lru_size: int = Field(10_000, alias="DEDUP_LRU_SIZE")
 
     # Read model & discovery endpoints. The listing TTL bounds staleness for

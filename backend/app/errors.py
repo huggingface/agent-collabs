@@ -56,7 +56,12 @@ class NotRegistered(APIError):
 
 class SourceNotFound(APIError):
     def __init__(self, uri: str):
-        super().__init__(404, "SOURCE_NOT_FOUND", f"source not found: {uri}")
+        super().__init__(
+            404,
+            "SOURCE_NOT_FOUND",
+            f"source not found: {uri}",
+            f"upload the file to your bucket first: hf buckets cp <local> {uri}",
+        )
 
 
 class AgentIdTaken(APIError):
@@ -144,6 +149,11 @@ class BucketMissing(APIError):
             f"scratch bucket '{bucket}' does not exist",
             f"run: hf buckets create {bucket}",
         )
+
+
+class TooLarge(APIError):
+    def __init__(self, message: str):
+        super().__init__(413, "TOO_LARGE", message)
 
 
 class SyncTooLarge(APIError):

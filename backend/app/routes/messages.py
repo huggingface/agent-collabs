@@ -49,6 +49,7 @@ from app.read_model import ReadModel
 from app.validation import (
     HUMAN_HANDLE_PREFIX,
     is_human_handle,
+    read_source_text,
     resolve_source,
     validate_agent_id,
     validate_channel_name,
@@ -173,8 +174,8 @@ def post_message(
         if not allowed:
             raise RateLimited(retry)
 
-        body_bytes = hub.read_bytes(parsed)
-        body_text = body_bytes.decode("utf-8")
+        body_text = read_source_text(hub, settings, parsed)
+        body_bytes = body_text.encode("utf-8")
         client_fm, source_body = parse(body_text)
         if "broadcast" in client_fm:
             raise NotOrganizer(
