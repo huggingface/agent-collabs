@@ -71,9 +71,9 @@
 #   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death; also a
 #       --max-wait run that found a live watcher parked for this handle on a
 #       stream that covers this one (see --max-wait above)
-#   4   gave up after 10 consecutive request failures, or --max-wait ran out
-#       mid-retry (also: --status could not reach the server); the heartbeat
-#       records status=gave_up
+#   4   gave up after COLLAB_WATCH_RETRY_BUDGET_S (20 min) of consecutive
+#       request failures, or --max-wait ran out mid-retry (also: --status could
+#       not reach the server); the heartbeat records status=gave_up
 #   5   another watcher already holds the lock for this handle. A --max-wait
 #       run exits 3 instead when that watcher covers this stream and is
 #       looping; it still exits 5 when it is on a stream that does not cover
@@ -100,6 +100,8 @@
 #   COLLAB_WATCH_BACKOFF  initial retry backoff seconds (2; doubles to 60). 0
 #                         makes retries instant — a test hook, not a production
 #                         setting. It does NOT shorten the idle pacing floor.
+#   COLLAB_WATCH_RETRY_BUDGET_S  seconds of consecutive request failures before
+#                         giving up with exit 4 (1200: outlasts a Space rebuild)
 #
 # state directory (one per host+handle, so running from another working
 # directory can never silently re-baseline and skip mail):
@@ -168,12 +170,15 @@
 #   filtered. The number of items in the page IS the unread count. A wrapper
 #   that reads `matched` will happily report "up to date" with mail pending.
 #
-# NOTE (backoff tradeoff): HTTP 5xx, refused/unresolved connections, and the
-#   expected parked-connection drops when the Space restarts all share ONE
-#   small exponential backoff (2,4,8,...,60s) plus a 10-in-a-row streak that
-#   exits 4. Folding the normal drops in keeps this simple; the cost is that a
-#   Space restart reconnects after ~2s instead of instantly. 3xx and 4xx do NOT
-#   back off — they fail immediately (a 4xx with the server's error body),
+# NOTE (backoff tradeoff): HTTP 5xx (including the edge's 502/503/504 while a
+#   Space rebuilds), refused/unresolved connections, and the expected
+#   parked-connection drops when the Space restarts all share ONE small
+#   exponential backoff (2,4,8,...,60s, then every 60s) and ONE time budget:
+#   after COLLAB_WATCH_RETRY_BUDGET_S (20 min) of failures in a row it exits 4.
+#   The budget is time, not a count, so a watcher outlives a redeploy; under
+#   --max-wait the ceiling still wins. Folding the normal drops in keeps this
+#   simple; the cost is that a Space restart reconnects after ~2s instead of
+#   instantly. 3xx and 4xx (a 404 too, even mid-rebuild) do NOT back off — they fail immediately (a 4xx with the server's error body),
 #   because neither a typo'd handle nor a redirecting base URL is a transient
 #   condition. The routine idle path is not a failure at all: when the wait
 #   elapses the server answers 200 with an empty page, so an idle watcher never
@@ -189,7 +194,6 @@ export LC_ALL
 SELF=collab_watch
 LIMIT=10           # records per delivered page
 STATUS_LIMIT=100   # --status unread count saturates here
-FAIL_STREAK_MAX=10 # consecutive request failures before exit 4
 IDLE_FLOOR_S=2     # minimum seconds between two empty answers
 
 # Server-issued filename shape: <YYYYMMDD>-<HHMMSS>-<mmm>_<agent-id>.md, where
@@ -200,12 +204,14 @@ STAMP_RE='[0-9]{8}-[0-9]{6}(-[0-9]{3})?'
 WAIT="${COLLAB_WATCH_WAIT:-55}"
 EXEC_RETRIES="${COLLAB_WATCH_EXEC_RETRIES:-3}"
 BACKOFF_BASE="${COLLAB_WATCH_BACKOFF:-2}"
+RETRY_BUDGET="${COLLAB_WATCH_RETRY_BUDGET_S:-1200}"
 
 BODY=""
 LOCK_HELD=""
 HTTP=000
 CURL_RC=0
 STREAK=0
+FAIL_SINCE=0
 BACKOFF=2
 CURSOR=""
 PAGE_CURSOR=""
@@ -362,6 +368,7 @@ esac
 is_num "$WAIT" || fatal "COLLAB_WATCH_WAIT must be a whole number of seconds, got '$WAIT'"
 is_num "$EXEC_RETRIES" || fatal "COLLAB_WATCH_EXEC_RETRIES must be a whole number, got '$EXEC_RETRIES'"
 is_num "$BACKOFF_BASE" || fatal "COLLAB_WATCH_BACKOFF must be a whole number of seconds, got '$BACKOFF_BASE'"
+is_num "$RETRY_BUDGET" || fatal "COLLAB_WATCH_RETRY_BUDGET_S must be a whole number of seconds, got '$RETRY_BUDGET'"
 BACKOFF="$BACKOFF_BASE"
 
 BASE="${BASE%/}"
@@ -658,7 +665,7 @@ do_request() {
 # blindly would let the server move a watcher to another host, scheme or handle —
 # so a redirecting base URL can never succeed, no matter how long we retry:
 # `http://<org>.hf.space` (which redirects to https) would otherwise walk the
-# whole backoff ladder for ~5 minutes and then exit 4, reporting an outage
+# whole backoff ladder for 20 minutes and then exit 4, reporting an outage
 # instead of the one-word fix.
 classify() {
     [ "$CURL_RC" -eq 0 ] || return 1
@@ -687,14 +694,20 @@ fail_http() {
     exit 1
 }
 
-# One shared exponential backoff for every retryable failure. Bumps the streak
-# and gives up (exit 4) at FAIL_STREAK_MAX, stamping the heartbeat first so
-# --status can report the give-up after this process is gone.
+# One shared exponential backoff for every retryable failure. Gives up (exit
+# 4) once the failures in a row span RETRY_BUDGET seconds — a time budget, not
+# a count, because the outage it must outlast (a Space rebuild) is measured in
+# minutes — stamping the heartbeat first so --status can report the give-up
+# after this process is gone.
 on_retryable() {
+    if [ "$STREAK" -eq 0 ]; then
+        FAIL_SINCE=$(now)
+    fi
     STREAK=$((STREAK + 1))
-    if [ "$STREAK" -ge "$FAIL_STREAK_MAX" ]; then
+    or_failing=$(($(now) - FAIL_SINCE))
+    if [ "$or_failing" -ge "$RETRY_BUDGET" ]; then
         hb gave_up
-        log "giving up after $STREAK consecutive request failures (last: HTTP $HTTP, curl rc=$CURL_RC)"
+        log "giving up after $STREAK consecutive request failures over ${or_failing}s (last: HTTP $HTTP, curl rc=$CURL_RC)"
         exit 4
     fi
     if [ -n "$DEADLINE" ] && [ $((DEADLINE - $(now))) -le "$BACKOFF" ]; then
@@ -703,7 +716,8 @@ on_retryable() {
         exit 4
     fi
     hb retrying
-    log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK/$FAIL_STREAK_MAX in ${BACKOFF}s"
+    log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK in ${BACKOFF}s (failing for ${or_failing}s of ${RETRY_BUDGET}s)"
+
     if [ "$BACKOFF" -gt 0 ]; then
         sleep "$BACKOFF"
     fi
