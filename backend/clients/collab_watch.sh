@@ -45,7 +45,9 @@
 #                  one you asked about; a watcher on another stream is
 #                  NO_WATCHER for this one (exit 11, naming the live stream on
 #                  stderr). LAST is the last loop status the watcher recorded.
-#                  BEHIND outranks every liveness verdict — act on it first.
+#                  BEHIND outranks every liveness verdict — act on it first;
+#                  stderr then names the command that reads the page now.
+
 #   --help         this text
 #
 # exit codes:
@@ -1076,6 +1078,11 @@ run_status() {
         rs_rc=0
     fi
 
+    if [ "$rs_rc" -eq 10 ]; then
+        rs_arg=""
+        [ "$STREAM" = updates ] || rs_arg=" $STREAM"
+        log "read it now: sh $0 $BASE $HANDLE$rs_arg --max-wait 5"
+    fi
     if [ "$rs_wrong_stream" -eq 1 ]; then
         log "a watcher IS alive for this handle (pid $rs_pid) but it is watching '$rs_stream', not '$STREAM': nothing is advancing cursor.$STREAM"
     fi

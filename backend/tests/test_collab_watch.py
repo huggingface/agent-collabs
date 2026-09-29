@@ -1085,6 +1085,8 @@ def test_status_10_outranks_a_watcher_on_another_stream(stub, tmp_path):
         fields = _status_line(result)
         assert fields["STATUS"] == "BEHIND" and fields["UNREAD"] == "1"
         assert fields["STREAM"] == "updates"
+        assert "agent-a feed --max-wait 5" in result.stderr
+
     finally:
         alive.terminate()
         alive.wait()
@@ -1233,6 +1235,12 @@ def test_status_10_when_behind_outranks_liveness(stub, tmp_path):
     assert fields["PID"] == "-"
     assert fields["LAST"] == "gave_up", "the give-up must survive the process"
     assert int(fields["HEARTBEAT_AGE"].rstrip("s")) >= 412
+    command = f"sh {SCRIPT} {stub.base_url} agent-a --max-wait 5"
+    assert command in result.stderr, "BEHIND must name the command that reads it"
+    t0 = time.monotonic()
+    read = run(stub, state, "--max-wait", "5")
+    assert read.returncode == 0 and len(json.loads(read.stdout)["items"]) == 3
+    assert time.monotonic() - t0 < 3, "pending mail must come back at once"
 
 
 def test_status_12_when_the_lock_is_live_but_the_heartbeat_is_stale(stub, tmp_path):
