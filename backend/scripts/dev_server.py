@@ -35,6 +35,7 @@ from app.audit import AuditLogger                      # noqa: E402
 from app.config import Settings                        # noqa: E402
 from app.dedup import PromotionLRU                     # noqa: E402
 from app.deps import (                                 # noqa: E402
+    bucket_write_limiter,
     get_audit,
     get_bucket_write_limiter,
     get_dedup,
@@ -47,11 +48,12 @@ from app.deps import (                                 # noqa: E402
     get_settings_dep,
     get_verification_status,
     get_verifier,
+    raw_message_limiter,
 )
 from app.main import app as fastapi_app                # noqa: E402
 from app.notify import Notifier                        # noqa: E402
 from app.org_roles import OrgRoles                     # noqa: E402
-from app.rate_limit import CompoundLimiter, TokenBucket  # noqa: E402
+from app.rate_limit import TokenBucket                 # noqa: E402
 from app.read_model import ReadModel                   # noqa: E402
 from app.verification import VerificationStatusStore   # noqa: E402
 from app.verifier import Verifier                      # noqa: E402
@@ -250,12 +252,6 @@ def main() -> None:
     verifier = Verifier(settings, hub, read_model, verification, FakeJobRunner(),
                         spawn=lambda _name, fn: fn(), notifier=notifier)
 
-    def compound(burst: int, sustained: int) -> CompoundLimiter:
-        return CompoundLimiter(
-            TokenBucket(capacity=burst, refill_per_minute=burst),
-            TokenBucket(capacity=sustained, refill_per_minute=sustained),
-        )
-
     fastapi_app.dependency_overrides.update({
         get_settings_dep: lambda: settings,
         get_hub: lambda: hub,
@@ -268,10 +264,8 @@ def main() -> None:
         get_verifier: lambda: verifier,
         # Real (env-tunable) production limiter shapes — the point of the
         # test environment is realism, just with dev-friendly defaults.
-        get_bucket_write_limiter: lambda: compound(
-            settings.bucket_write_burst, settings.bucket_write_per_minute),
-        get_raw_message_limiter: lambda: compound(
-            settings.raw_message_per_minute, settings.raw_message_per_hour),
+        get_bucket_write_limiter: lambda: bucket_write_limiter(settings),
+        get_raw_message_limiter: lambda: raw_message_limiter(settings),
         get_registration_limiter: lambda: TokenBucket(
             capacity=settings.registration_per_minute,
             refill_per_minute=settings.registration_per_minute),

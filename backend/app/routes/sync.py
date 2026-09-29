@@ -8,9 +8,10 @@ from app.deps import (
     get_audit,
     get_bucket_write_limiter,
     get_hub,
+    get_read_model,
     get_settings_dep,
 )
-from app.errors import NotRegistered, RateLimited, SyncTooLarge
+from app.errors import RateLimited, SyncTooLarge
 from app.hub import HubClient
 from app.models import (
     ArtifactSyncRequest,
@@ -18,8 +19,10 @@ from app.models import (
     SyncFile,
     SyncResponse,
 )
-from app.naming import artifact_dest_dir, registration_path
+from app.naming import artifact_dest_dir
 from app.rate_limit import CompoundLimiter
+from app.read_model import ReadModel
+from app.routes.messages import require_registered
 from app.validation import (
     check_dest_not_blocked,
     resolve_source,
@@ -29,13 +32,6 @@ from app.validation import (
 
 
 router = APIRouter()
-
-
-def _require_registered(hub: HubClient, agent_id: str) -> None:
-    try:
-        hub.read_central_text(registration_path(agent_id))
-    except Exception:
-        raise NotRegistered(agent_id)
 
 
 def _check_sync_caps(settings: Settings, files: list) -> int:
@@ -69,10 +65,11 @@ def artifacts_sync(
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
     limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
+    read_model: ReadModel = Depends(get_read_model),
 ) -> SyncResponse:
     validate_slug(req.dest_slug)
     parsed, agent_id = resolve_source(settings, req.source)
-    _require_registered(hub, agent_id)
+    require_registered(read_model, hub, agent_id)
 
     allowed, retry = limiter.try_consume(parsed.bucket)
     if not allowed:
@@ -114,10 +111,11 @@ def shared_resources_sync(
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
     limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
+    read_model: ReadModel = Depends(get_read_model),
 ) -> SyncResponse:
     parsed, agent_id = resolve_source(settings, req.source)
     validate_shared_dest_path(req.dest_path, agent_id)
-    _require_registered(hub, agent_id)
+    require_registered(read_model, hub, agent_id)
 
     allowed, retry = limiter.try_consume(parsed.bucket)
     if not allowed:

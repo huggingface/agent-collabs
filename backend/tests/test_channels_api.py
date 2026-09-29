@@ -284,7 +284,9 @@ def test_channel_and_broadcast_mutually_exclusive(env):
         "/v1/messages",
         json={"agent_id": "bb", "body": "x", "channel": "evals", "broadcast": True},
     )
-    assert r.status_code == 422
+    assert r.status_code == 400
+    assert r.json()["error"]["code"] == "INVALID_REQUEST"
+    assert "mutually exclusive" in r.json()["error"]["message"]
 
 
 def test_source_channel_frontmatter_rejected(env):

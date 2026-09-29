@@ -97,20 +97,28 @@ def get_verifier() -> Verifier:
     )
 
 
+def bucket_write_limiter(s: Settings) -> CompoundLimiter:
+    return CompoundLimiter(
+        TokenBucket(capacity=s.bucket_write_burst, refill_per_minute=s.bucket_write_burst)
+    )
+
+
+def raw_message_limiter(s: Settings) -> CompoundLimiter:
+    """Per agent: `raw_message_per_minute` and, independently,
+    `raw_message_per_hour` (a fractional per-minute refill, so 30/h means 30/h)."""
+    per_minute = TokenBucket(capacity=s.raw_message_per_minute, refill_per_minute=s.raw_message_per_minute)
+    per_hour = TokenBucket(capacity=s.raw_message_per_hour, refill_per_minute=s.raw_message_per_hour / 60)
+    return CompoundLimiter(per_minute, per_hour)
+
+
 @lru_cache
 def get_bucket_write_limiter() -> CompoundLimiter:
-    s = get_settings()
-    burst = TokenBucket(capacity=s.bucket_write_burst, refill_per_minute=s.bucket_write_burst)
-    sustained = TokenBucket(capacity=s.bucket_write_per_minute, refill_per_minute=s.bucket_write_per_minute)
-    return CompoundLimiter(burst, sustained)
+    return bucket_write_limiter(get_settings())
 
 
 @lru_cache
 def get_raw_message_limiter() -> CompoundLimiter:
-    s = get_settings()
-    per_minute = TokenBucket(capacity=s.raw_message_per_minute, refill_per_minute=s.raw_message_per_minute)
-    per_hour = TokenBucket(capacity=s.raw_message_per_hour, refill_per_minute=max(1, s.raw_message_per_hour // 60))
-    return CompoundLimiter(per_minute, per_hour)
+    return raw_message_limiter(get_settings())
 
 
 @lru_cache

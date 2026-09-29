@@ -7,6 +7,7 @@ from app.deps import get_notifier, get_read_model, get_settings_dep
 from app.errors import NotRegistered
 from app.listing import apply_filters, normalize_stamp, paginate
 from app.models import (
+    RAW_BODY_MAX_CHARS,
     DigestAgents,
     DigestInbox,
     DigestResponse,
@@ -342,6 +343,16 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
                 "it lands on the board and surfaces in every inbox and digest, "
                 "without an @-mention and regardless of when you joined"
             ),
+        },
+        "limits": {
+            "bucket_writes_per_minute_per_source_bucket": settings.bucket_write_burst,
+            "raw_messages_per_minute_per_agent": settings.raw_message_per_minute,
+            "raw_messages_per_hour_per_agent": settings.raw_message_per_hour,
+            "registrations_per_minute": settings.registration_per_minute,
+            "raw_body_max_chars": RAW_BODY_MAX_CHARS,
+            "source_max_bytes": settings.message_max_bytes,
+            "expand_max_limit": settings.expand_max_limit,
+            "mention_fanout_cap": settings.mention_fanout_cap,
         },
         "endpoints": endpoints,
     }
