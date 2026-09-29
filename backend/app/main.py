@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import logging
+import threading
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
+from app.deps import get_read_model
 from app.errors import APIError, InvalidRequest, StorageUnavailable, TooLarge
 from app.hub import DownloadFailed, ListingFailed
+from app.naming import (
+    AGENTS_FOLDER,
+    BROADCASTS_FOLDER,
+    CHANNELS_FOLDER,
+    MESSAGE_BOARD_FOLDER,
+    RESULTS_FOLDER,
+)
 from app.routes import (
     agents,
     channels,
@@ -46,7 +56,29 @@ logging.getLogger(__name__).info(
     "that served the write and every other wait= degrades to a full timeout"
 )
 
-app = FastAPI(title="bucket-sync", version="1.5.0")
+# Filled at startup so the reconnect storm after a restart hits a warm cache.
+WARM_FOLDERS = [
+    AGENTS_FOLDER,
+    MESSAGE_BOARD_FOLDER,
+    RESULTS_FOLDER,
+    BROADCASTS_FOLDER,
+    CHANNELS_FOLDER,
+]
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Background thread: serving starts immediately; /v1/healthz reports
+    # `warm: false` until the fill completes. Honours dependency overrides so
+    # tests warm their fake, not a real hub.
+    read_model = app.dependency_overrides.get(get_read_model, get_read_model)()
+    threading.Thread(
+        target=read_model.warm_up, args=(WARM_FOLDERS,), name="warm-up", daemon=True
+    ).start()
+    yield
+
+
+app = FastAPI(title="bucket-sync", version="1.5.0", lifespan=lifespan)
 
 app.include_router(health.router)
 app.include_router(digest.router)

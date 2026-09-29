@@ -274,7 +274,7 @@ def wait_healthy(url: str, path: str, *, token: str | None = None, timeout_s: in
     while time.time() < deadline:
         try:
             r = httpx.get(f"{url}{path}", timeout=10, follow_redirects=True, headers=headers)
-            if r.status_code == 200:
+            if r.status_code == 200 and (path != "/v1/healthz" or r.json().get("warm")):
                 return True
         except Exception:
             pass
