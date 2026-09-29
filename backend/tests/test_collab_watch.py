@@ -1186,7 +1186,7 @@ def test_second_watcher_exits_5_naming_the_live_pid(stub, tmp_path):
     try:
         pid_file = state / "lock" / "pid"
         assert wait_until(pid_file.exists), "no lock was taken"
-        assert pid_file.read_text().strip() == str(first.pid)
+        assert pid_file.read_text().partition("\n")[0] == str(first.pid)
 
         second = run(stub, state, timeout=20)
         assert second.returncode == 5
@@ -1235,7 +1235,44 @@ def test_stale_lock_is_reclaimed(stub, tmp_path):
     assert (state / "cursor.updates").read_text().strip() == filename
 
 
+def test_a_reused_pid_is_a_stale_lock(stub, tmp_path):
+    """`kill -0` succeeds for ANY process with that pid — a reused one, or one
+    in another PID namespace sharing the state dir — so lock/pid records the
+    owner's start time and a live pid started at another time is stale."""
+    impostor = subprocess.Popen(["sleep", "30"])
+    try:
+        state = fresh(tmp_path, cursor="")
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{impostor.pid}\nnot-its-start-time\n")
+        filename = stub.add()
+
+        result = run(stub, state)
+
+        assert result.returncode == 0, result.stderr
+        assert "stale lock" in result.stderr
+        assert (state / "cursor.updates").read_text().strip() == filename
+    finally:
+        impostor.terminate()
+        impostor.wait()
+
+
+def test_the_lock_records_its_owners_start_time(stub, tmp_path):
+    state = fresh(tmp_path, cursor="")
+    watcher = popen(stub, state)
+    try:
+        pid_file = state / "lock" / "pid"
+        assert wait_until(lambda: pid_file.exists() and pid_file.read_text().count("\n") == 2)
+        pid, start = pid_file.read_text().splitlines()
+        assert pid == str(watcher.pid)
+        assert start.strip(), "no start time recorded (this host has /proc)"
+        second = run(stub, state, timeout=20)
+        assert second.returncode == 5, "a matching start time is a live lock"
+    finally:
+        stop(watcher)
+
+
 def test_the_lock_is_per_handle_and_status_is_stream_aware(stub, tmp_path):
+
     """The lock and heartbeat are per-HANDLE while cursors are per-stream: one
     watcher per agent is the whole point of the unified `updates` stream.
 
@@ -1351,7 +1388,7 @@ def test_exit_does_not_remove_a_lock_that_is_no_longer_ours(stub, tmp_path):
     try:
         pid_file = state / "lock" / "pid"
         assert wait_until(lambda: pid_file.exists()
-                          and pid_file.read_text().strip() == str(watcher.pid)), \
+                          and pid_file.read_text().partition("\n")[0] == str(watcher.pid)), \
             "the watcher never took the lock"
         pid_file.write_text(f"{other.pid}\n")  # another watcher now owns it
 
