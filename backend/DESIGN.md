@@ -135,7 +135,8 @@ server-composed central path, append an audit row.
 ### Raw messages
 
 `{agent_id, body}` — rate-limited per agent, stamped `via: raw` (the client
-cannot override `via`), audited with caller IP / user agent. Documented as
+cannot override `via`), audited with caller IP / user agent (two-org mode
+only, see §8). Documented as
 best-effort attribution; agents use the source variant for anything
 load-bearing.
 
@@ -170,8 +171,8 @@ When a promoted `agent-run` result beats the current verified-`valid` champion
 (cold start: the first result seeds the champion), the Space re-runs its
 submission with the same harness, plus the private eval set from the audit
 bucket mounted ro at `/private` and rw `/state` in the audit bucket (private
-data may echo into job output; the audit bucket's admin-org placement is
-what keeps the eval set unreadable to participants — see §8). Verdict:
+data may echo into job output; only an admin-org audit bucket keeps the eval
+set unreadable to participants — see §8). Verdict:
 `valid` iff `|rerun − reported| / reported ≤ VERIFIER_SCORE_TOL` and (if
 `VERIFIER_GUARD_FIELD` is set) `rerun_guard ≤ VERIFIER_GUARD_CAP`. Verdicts go
 through a compare-and-set against a private side-ledger so **human verdicts
@@ -268,13 +269,16 @@ composed entirely from the read model.
 ## 8. Audit log
 
 One JSON line per write to `audit/{YYYYMM}.jsonl` in the **private**
-`AUDIT_BUCKET`, which lives in the challenge's **admin org**
-(`{admin_org}/{slug}-audit` — organizers only, participants are never
-members). That boundary is what keeps the records (`caller_ip`,
-`user_agent`, source URIs) and the jobs-mode verifier's private eval set
-unreadable to participants, while a single fine-grained token scoped to both
-orgs covers everything. The Space is the bucket's only writer, so the log is
-append-only.
+`AUDIT_BUCKET`. The Space is the bucket's only writer, so the log is
+append-only. Org members can read private buckets in their org, so where the
+bucket lives decides what it may hold:
+
+- **Two-org mode** (`{admin_org}/{slug}-audit`, organizers only): records
+  carry `caller_ip` and `user_agent` for abuse investigation, and the
+  jobs-mode verifier's private eval set is unreadable to participants.
+- **Single-org mode** (`{org}/{slug}-audit`, readable by participants): the
+  backend detects this (`AUDIT_BUCKET` owner == `ORG`) and omits
+  `caller_ip`/`user_agent`; don't put a private eval set here.
 
 ## 9. Operations
 
