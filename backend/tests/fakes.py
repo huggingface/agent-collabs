@@ -9,7 +9,7 @@ from huggingface_hub.errors import HfHubHTTPError
 
 from app.config import Settings
 from app.frontmatter import serialise
-from app.hub import HubIdentity, ListedFile, OrgMemberRole
+from app.hub import DownloadFailed, HubIdentity, ListedFile, ListingFailed, OrgMemberRole
 from app.naming import SourceURI, parse_source_uri
 
 
@@ -72,17 +72,20 @@ class FakeHub:
 
     def fail_next_read(self, path_substring: str | None = None, exc: Exception | None = None) -> None:
         """The next read whose path contains `path_substring` (any path, if
-        omitted) raises `exc` (default: FileNotFoundError)."""
+        omitted) raises `exc` (default: FileNotFoundError; DownloadFailed for
+        download_many, as HubClient raises once its retry is spent)."""
         self._fail_read = (path_substring, exc)
 
     def partial_listing(self, folder: str, drop: int = 1) -> None:
-        """The next listing of `folder` omits its last `drop` entries, as if
-        a list_bucket_tree generator was interrupted mid-page."""
+        """The next listing of `folder` is interrupted after all but its last
+        `drop` entries, as if a list_bucket_tree page failed mid-way. Like
+        HubClient._list, the pages already read are discarded and the call
+        raises ListingFailed — a partial listing is never returned."""
         self._partial_listing = (folder, drop)
 
     def fail_next_listing(self, folder: str) -> None:
-        """The next listing of `folder` returns [] — mirrors how HubClient._list
-        swallows a list_bucket_tree failure into an empty page."""
+        """The next listing of `folder` raises ListingFailed, as HubClient._list
+        does for any list_bucket_tree failure."""
         self._fail_listing_folder = folder
 
     def _maybe_sleep(self) -> None:
@@ -109,11 +112,14 @@ class FakeHub:
         self._maybe_sleep()
         if self._fail_listing_folder == prefix:
             self._fail_listing_folder = None
-            return []
+            raise ListingFailed(f"simulated listing failure: {prefix}")
         if self._partial_listing is not None and self._partial_listing[0] == prefix:
             _, drop = self._partial_listing
             self._partial_listing = None
-            return files[: len(files) - drop] if drop else files
+            if drop:
+                raise ListingFailed(
+                    f"simulated failure after {len(files) - drop} entries: {prefix}"
+                )
         return files
 
     # ── HubClient surface used by the app ────────────────────────────
@@ -133,15 +139,24 @@ class FakeHub:
     def list_central_dir(self, prefix: str) -> list[ListedFile]:
         self.list_calls += 1
         if self.fail_listings:
-            return []  # the real hub flattens listing errors to []
+            raise ListingFailed(f"simulated listing outage: {prefix}")
         return self._apply_listing_toggles(prefix, self._listed(self._central(), prefix))
 
     def list_bucket_dir(self, bucket: str, prefix: str) -> list[ListedFile]:
         files = self._listed(self.buckets.get(bucket, {}), prefix)
-        return self._apply_listing_toggles(prefix, files)
+        try:
+            return self._apply_listing_toggles(prefix, files)
+        except ListingFailed:
+            return []  # as HubClient.list_bucket_dir
 
     def download_many(self, bucket: str, remote_paths: list[str]) -> dict[str, bytes]:
         self.download_calls += 1
+        self._maybe_sleep()
+        if self._fail_read is not None:
+            substring, exc = self._fail_read
+            if substring is None or any(substring in p for p in remote_paths):
+                self._fail_read = None
+                raise exc or DownloadFailed(f"simulated batch download failure: {bucket}")
         files = self.buckets.get(bucket, {})
         return {p: files[p] for p in remote_paths if p in files}
 
