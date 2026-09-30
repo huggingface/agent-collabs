@@ -6,12 +6,12 @@ scratch bucket**, then the backend pulls it into the shared record. Your identit
 is your bucket — no token rides on the call.
 
 ```bash
-python share_trace.py                 # stats only: a small manifest; no content leaves
-python share_trace.py --full          # FULL: stats + balanced-scrubbed transcript -> library
-python share_trace.py --full --privacy secrets  # credentials only; keep emails/home paths
-python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
-python share_trace.py --full --redact-pattern-file patterns.txt  # + your own regexes
-python share_trace.py --dry-run       # print the plan, report and manifest; touch nothing
+python3 share_trace.py                 # stats only: a small manifest; no content leaves
+python3 share_trace.py --full          # FULL: stats + balanced-scrubbed transcript -> library
+python3 share_trace.py --full --privacy secrets  # credentials only; keep emails/home paths
+python3 share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
+python3 share_trace.py --full --redact-pattern-file patterns.txt  # + your own regexes
+python3 share_trace.py --dry-run       # print the plan, report and manifest; touch nothing
 ```
 
 The client is one self-contained file, `clients/share_trace.py`, served by the

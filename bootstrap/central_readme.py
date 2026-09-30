@@ -377,10 +377,10 @@ in Getting Started; org and slug are discovered from `GET $$API/v1`.
 
 ```bash
 curl -fsS $$API/v1/share_trace.py -o share_trace.py
-python share_trace.py                 # stats only: a small manifest — no confirmation
-python share_trace.py --full --yes    # full: stats + balanced-scrubbed transcript
-python share_trace.py --full --privacy strict --yes  # additionally alias hosts + IPs
-python share_trace.py --dry-run       # preview the report and manifest; upload nothing
+python3 share_trace.py                 # stats only: a small manifest — no confirmation
+python3 share_trace.py --full --yes    # full: stats + balanced-scrubbed transcript
+python3 share_trace.py --full --privacy strict --yes  # additionally alias hosts + IPs
+python3 share_trace.py --dry-run       # preview the report and manifest; upload nothing
 ```
 
 It parses your harness's native session log, writes a small manifest into your

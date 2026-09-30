@@ -40,5 +40,5 @@ def watch_script() -> Response:
 @router.get("/v1/share_trace.py")
 def share_trace_script() -> Response:
     """Serve clients/share_trace.py the same way: `curl -fsS <base>/v1/share_trace.py
-    -o share_trace.py && python share_trace.py`."""
+    -o share_trace.py && python3 share_trace.py`."""
     return _serve(_SHARE_TRACE_PATH, "text/x-python")
