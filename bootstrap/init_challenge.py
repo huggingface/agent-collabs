@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Bootstrap (or reconfigure) one agent-collab challenge from challenge.yaml.
 
-    export HF_TOKEN=hf_...        # fine-grained, scoped to BOTH orgs;
+    export HF_TOKEN=hf_...        # fine-grained, scoped to the org(s);
                                   # job.write on the challenge org if jobs on
     python bootstrap/init_challenge.py [--config challenge.yaml] [--skip-wait]
 
@@ -12,19 +12,19 @@ central-bucket README is only (re)written with --write-readme or when absent.
 What it does, in order:
   1. validate the config + token (whoami)
   2. create the central bucket (challenge org) and the PRIVATE audit bucket
-     (admin org)
+     (admin org if configured, else the challenge org)
   3. create the Spaces (Docker SDK) and upload backend/ and dashboard/
      (the dashboard Space card gets `hf_oauth_authorized_org: <org>`), plus
-     eval-space/ into the admin org when verification.mode is eval-space
+     the private eval-space/ when verification.mode is eval-space
   4. write Space variables (from challenge.yaml) + the HF_TOKEN secret
   5. seed the central bucket: README.md (agent onboarding doc, generated),
      results/verification_status.json
   6. poll the Spaces' health endpoints
 
 The inputs that can NOT be automated (collect them first, once):
-  - create the two HF orgs: the challenge org (participants) and the admin
-    org (organizers only — audit bucket, eval Space)
-  - mint a FINE-GRAINED token scoped to both orgs — it is stored as a secret
+  - create the challenge org (participants), plus an optional admin org
+    (organizers only — audit bucket, eval Space) if you need a private eval set
+  - mint a FINE-GRAINED token scoped to the org(s) — it is stored as a secret
     on the Spaces, so keep its scope minimal
   - create a challenge-org invite link (org page → Settings → Members →
     Share invite link) for challenge.dashboard.invite_url
@@ -57,6 +57,7 @@ from huggingface_hub import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+PLACEHOLDER_ORG = "my-collab-org"  # the template's challenge.yaml ships with it
 
 
 # ───────────────────────── config ─────────────────────────
@@ -69,6 +70,11 @@ def load_config(path: Path) -> dict:
     for key in ("org", "slug", "title"):
         if not ch.get(key):
             problems.append(f"challenge.{key} is required")
+    if PLACEHOLDER_ORG in json.dumps(cfg):
+        problems.append(
+            f"still contains the template placeholder '{PLACEHOLDER_ORG}' — "
+            "replace it (challenge.org, Space ids, dashboard.invite_url) first"
+        )
     st = cfg.get("storage") or {}
     sp = cfg.get("spaces") or {}
     sc = cfg.get("scoring") or {}
@@ -85,22 +91,29 @@ def load_config(path: Path) -> dict:
             print(f"  ✗ {p}")
         sys.exit(f"invalid config: {path}")
     # defaults
-    ch.setdefault("admin_org", f"{ch['org']}-admin")
+    # Private assets go in the admin org when there is one (two-org mode),
+    # else in the challenge org (single-org mode).
+    home = ch.get("admin_org") or ch["org"]
     st.setdefault("central_bucket", f"{ch['org']}/{ch['slug']}-main-bucket")
-    # The audit bucket lives in the ADMIN org: a fine-grained org-scoped token
-    # covers it, and participants (challenge-org members) can never read it.
-    st.setdefault("audit_bucket", f"{ch['admin_org']}/{ch['slug']}-audit")
+    st.setdefault("audit_bucket", f"{home}/{ch['slug']}-audit")
     sp.setdefault("backend", f"{ch['org']}/{ch['slug']}-bucket-sync")
     sp.setdefault("dashboard", f"{ch['org']}/{ch['slug']}-dashboard")
-    sp.setdefault("eval", f"{ch['admin_org']}/{ch['slug']}-eval")
+    sp.setdefault("eval", f"{home}/{ch['slug']}-eval")
     ver.setdefault("mode", "manual")
     cfg["storage"], cfg["spaces"], cfg["verification"] = st, sp, ver
-    if st["audit_bucket"].split("/")[0] == ch["org"]:
+    # Org members can read private buckets and repos in their org. The backend
+    # already drops caller IPs from audit rows in that case; what remains
+    # sensitive is a private eval set (jobs mode) or the evaluator's code.
+    exposed = []
+    if mode == "jobs" and st["audit_bucket"].split("/")[0] == ch["org"]:
+        exposed.append(f"storage.audit_bucket ({st['audit_bucket']}, holds the private eval set)")
+    if mode == "eval-space" and sp["eval"].split("/")[0] == ch["org"]:
+        exposed.append(f"spaces.eval ({sp['eval']}, evaluator code)")
+    for what in exposed:
         print(
-            "  ⚠ storage.audit_bucket is inside the CHALLENGE org — participants "
-            "may be able to read audit records (caller IPs) and any private eval "
-            "data. Recommended: keep it in the admin org "
-            f"({ch['admin_org']}/{ch['slug']}-audit)."
+            f"  ⚠ {what} is inside the challenge org — org members can read "
+            "private buckets and repos in their org, so participants can read "
+            "it. Set challenge.admin_org to a separate organizers-only org."
         )
     return cfg
 
@@ -330,8 +343,8 @@ def main() -> int:
     if role in ("write", "read"):
         print(
             f"  ⚠ this is a broad personal '{role}' token. It will be stored as a "
-            "secret on the Spaces — use a FINE-GRAINED token scoped to the two "
-            "challenge orgs instead (see SETUP.md step 0.2)."
+            "secret on the Spaces — use a FINE-GRAINED token scoped to the "
+            "challenge org(s) instead (see SETUP.md step 0.2)."
         )
     # Fine-grained tokens: fail BEFORE creating anything if either org is
     # missing from the token's scopes (e.g. a similarly-named org was
@@ -343,7 +356,7 @@ def main() -> int:
             for s in scoped
             if "repo.write" in (s.get("permissions") or [])
         }
-        missing = [o for o in (ch["org"], ch["admin_org"]) if o not in writable]
+        missing = [o for o in (ch["org"], ch.get("admin_org")) if o and o not in writable]
         if missing:
             sys.exit(
                 f"the fine-grained token has no write scope on: {', '.join(missing)}\n"
@@ -351,8 +364,8 @@ def main() -> int:
                 "→ edit the token at https://huggingface.co/settings/tokens and add "
                 "write access for the missing org(s)."
             )
-    for org, role in ((ch["org"], "challenge"), (ch["admin_org"], "admin")):
-        if org not in orgs:
+    for org, role in ((ch["org"], "challenge"), (ch.get("admin_org"), "admin")):
+        if org and org not in orgs:
             print(f"  ⚠ token user is not visibly a member of the {role} org "
                   f"'{org}' — continuing, but creation there may fail "
                   "(create the org at https://huggingface.co/organizations/new)")
@@ -365,13 +378,13 @@ def main() -> int:
     # 1 ── buckets
     print(f"central bucket  {st['central_bucket']}")
     create_bucket(st["central_bucket"], exist_ok=True, token=token)
-    print(f"audit bucket    {st['audit_bucket']} (private, admin org)")
+    print(f"audit bucket    {st['audit_bucket']} (private)")
     try:
         create_bucket(st["audit_bucket"], private=True, exist_ok=True, token=token)
     except Exception as exc:
         sys.exit(
             f"could not create {st['audit_bucket']}: {exc}\n"
-            f"→ does the admin org '{st['audit_bucket'].split('/')[0]}' exist, "
+            f"→ does the org '{st['audit_bucket'].split('/')[0]}' exist, "
             "and is the token scoped to it?"
         )
 
@@ -403,7 +416,7 @@ def main() -> int:
     dashboard_url = space_url(sp["dashboard"], token)
 
     if ver["mode"] == "eval-space":
-        print(f"eval space      {sp['eval']}: uploading code (private, admin org)")
+        print(f"eval space      {sp['eval']}: uploading code (private)")
         create_repo(sp["eval"], repo_type="space", space_sdk="docker",
                     private=True, exist_ok=True, token=token)
         upload_folder(
@@ -498,7 +511,7 @@ def main() -> int:
         ok = True
         for name, url, path, tok in checks:
             healthy = wait_healthy(url, path, token=tok)
-            print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ TIMED OUT — check the Space logs'}")
+            print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ not healthy — see above or check the Space logs'}")
             ok = ok and healthy
         if not ok:
             print()

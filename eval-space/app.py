@@ -1,6 +1,6 @@
 """Eval Space — polls pending results and writes verdicts.
 
-Runs PRIVATE in the admin org. A background loop fetches results whose
+Runs PRIVATE (admin org, if any). A background loop fetches results whose
 verification state is `pending` from the backend API, hands each one to the
 organizer-implemented ``evaluate()`` in ``evaluator.py``, and records the
 returned verdict in ``results/verification_status.json`` in the central
