@@ -7,6 +7,8 @@ const VERIFICATION_URL = '/api/verification';
 const AGENTS_URL = '/api/agents';
 const STATS_URL = '/api/stats';
 const TRACES_URL = '/api/traces?expand=true&limit=50';
+// Every session id ("agent/session"), unexpanded: exact per-agent counts.
+const TRACE_IDS_URL = '/api/traces?limit=0';
 const CHANNELS_URL = '/api/channels';
 const WATCHING_URL = '/api/watching';
 const NOTIFY_LEVELS_URL = '/api/notify-levels';
@@ -664,7 +666,7 @@ function onlineSuffix(roster) {
 function agentsStatHtml(n, activeCount) {
   const roster = rosterAgents();
   if (!roster.length) return `number of active agents: ${n(activeCount)}`;
-  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}`;
+  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}${staleChipHtml()}`;
 }
 
 // One global notice while the backend proxies fail (a 503 is not a failure:
@@ -704,6 +706,7 @@ async function refreshWatching() {
   } catch { noteBackend(false); /* same: presence is additive, never load-bearing */ }
   rerenderAgentNames();
   renderTopSubtext();   // the agents stat's "N online" suffix
+  renderAgentsPanel();
   if (chMembersOpen) renderChannelMembers();
 }
 
@@ -1076,8 +1079,13 @@ function lbRow(e, rankLabel, opts = {}) {
   if (opts.best) tr.classList.add('best');
   if (opts.baseline) tr.classList.add('baseline-row');
   if (opts.invalid) tr.classList.add('invalid-row');
+  // "Sep 30 09:42" in UTC; the full ISO timestamp goes in the cell's title.
   const d = new Date(e.date);
-  const dateStr = d.toLocaleDateString('en-US', { year: '2-digit', month: 'short', day: 'numeric' });
+  const valid = !isNaN(d);
+  const dateStr = valid
+    ? `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()} ${d.toISOString().slice(11, 16)}`
+    : escapeHtml(e.date || '');
+  const dateTitle = valid ? d.toISOString() : '';
   const linkBtns = [];
   if (e.filename) {
     linkBtns.push(`<a class="lb-link" href="${escapeHtml(submissionHref(e.filename))}" target="_blank" rel="noopener noreferrer">Submission</a>`);
@@ -1085,18 +1093,22 @@ function lbRow(e, rankLabel, opts = {}) {
   (e.links || []).forEach(l => {
     linkBtns.push(`<a class="lb-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`);
   });
-  const verifiedMark = e.verification === 'valid'
-    ? '<span class="lb-verified">✓ verified</span>' : '';
+  // Baselines are reference rows, never submitted for verification: no pill.
+  const verifiedMark = e.status === 'baseline' ? '' : ({
+    valid: '<span class="lb-verified">✓ verified</span>',
+    pending: '<span class="lb-verified pending" title="Not yet checked by the verifier">pending</span>',
+    invalid: '<span class="lb-verified invalid" title="The verifier rejected this result">invalid</span>',
+  }[e.verification] || '');
   const secondaryCell = CFG.secondary_field
     ? `<td class="num">${escapeHtml(fmtNumStr(e.secondary || e.ppl || ''))}</td>` : '';
   tr.innerHTML = `
     <td>${rankLabel}</td>
     <td class="num bytes">${fmt2(e.score)}${verifiedMark}</td>
     ${secondaryCell}
-    <td>${escapeHtml(e.method || '')}</td>
+    <td class="method" title="${escapeHtml(e.method || '')}">${escapeHtml(e.method || '')}</td>
     <td class="agent" data-lb-agent="${escapeHtml(e.agent)}">${watchDot(e.agent)}${renderAgentName(e.agent, { avatar: false })}</td>
     <td class="desc" title="${escapeHtml(e.run || '')}">${escapeHtml(e.run || '')}</td>
-    <td>${dateStr}</td>
+    <td class="date" title="${dateTitle}">${dateStr}</td>
     <td class="links">${linkBtns.join('')}</td>
   `;
   return tr;
@@ -1111,13 +1123,19 @@ const lbColCount = () => CFG.secondary_field ? 8 : 7;
 // state survives the periodic re-renders.
 const LB_VISIBLE_ROWS = 10;
 let lbExpanded = false;
+// "verified only" filters the table client-side (baselines stay as reference);
+// the chart and the counts keep every entry.
+const lbVerifiedOnly = document.getElementById('lbVerifiedOnly');
+lbVerifiedOnly.addEventListener('change', () => renderLeaderboard(leaderboardEntries));
 
 function renderLeaderboard(entries) {
   leaderboardEntries = entries;
+  const shown = lbVerifiedOnly.checked
+    ? entries.filter(e => e.verification === 'valid' || e.status === 'baseline') : entries;
   // Invalid results are excluded from the ranking and demoted to a grayed-out
   // section below; valid + pending are ranked together.
-  const active = entries.filter(e => e.verification !== 'invalid');
-  const invalid = entries.filter(e => e.verification === 'invalid').sort(cmpBestFirst);
+  const active = shown.filter(e => e.verification !== 'invalid');
+  const invalid = shown.filter(e => e.verification === 'invalid').sort(cmpBestFirst);
   const ranked = [...active].sort(cmpBestFirst);
 
   // For row highlighting: best agent-run (not the SOTA baseline).
@@ -1651,6 +1669,7 @@ async function refreshAll({ first = false } = {}) {
     if (freshMsgs.status === 'fulfilled' && freshResults.status === 'fulfilled') {
       writeCache(freshMsgs.value, freshResults.value);
     }
+    renderAgentsPanel();
     return { added };
   } finally {
     refreshing = false;
@@ -2826,13 +2845,14 @@ colDivider.addEventListener('dblclick', () => {
 // ─────────────────────────────────────────────────────────────
 //  TRACES  (project token estimate + shared-session library)
 //  Independent of the main load: a failure here never touches the
-//  leaderboard/chat. The whole section stays hidden until ≥1 trace exists.
+//  leaderboard/chat. Hidden only when there is no backend to ask.
 // ─────────────────────────────────────────────────────────────
 const tracesTitleEl = document.getElementById('tracesSectionTitle');
 const tracesTileEl = document.getElementById('tracesStatsTile');
 const tracesWrapEl = document.getElementById('tracesListWrap');
 const tracesBodyEl = document.getElementById('tracesBody');
 const tracesHintEl = document.getElementById('tracesHint');
+const tracesEmptyEl = document.getElementById('tracesEmpty');
 
 function fmtTokens(n) {
   if (n == null) return '—';
@@ -2873,26 +2893,174 @@ function renderTracesList(items) {
   }).join('');
 }
 
+// "N of M agents have shared a session" — repainted with the roster too,
+// since either side can land first.
+let tracesSessionsLabel = '';
+function renderTraceCoverage() {
+  if (!traceSessions) return;
+  const roster = rosterAgents();
+  const sharing = roster.filter(a => traceSessions.get(a)).length;
+  tracesHintEl.textContent = roster.length
+    ? `${sharing} of ${roster.length} agents have shared a session · ${tracesSessionsLabel}`
+    : tracesSessionsLabel;
+}
+
 async function refreshTraces() {
   try {
-    const [sr, tr] = await Promise.allSettled([
-      fetchWithTimeout(STATS_URL), fetchWithTimeout(TRACES_URL),
+    const [sr, tr, ir] = await Promise.allSettled([
+      fetchWithTimeout(STATS_URL), fetchWithTimeout(TRACES_URL), fetchWithTimeout(TRACE_IDS_URL),
     ]);
+    const ok = r => r.status === 'fulfilled' && r.value.ok;
+    // Nothing answered (no backend, or it is down): leave the section as is.
+    if (!ok(sr) && !ok(tr)) return;
     let stats = null, items = [], count = 0;
-    if (sr.status === 'fulfilled' && sr.value.ok) stats = await sr.value.json();
-    if (tr.status === 'fulfilled' && tr.value.ok) {
+    if (ok(sr)) stats = await sr.value.json();
+    if (ok(tr)) {
       const j = await tr.value.json();
       items = j.items || []; count = j.count ?? items.length;
     }
+    // Per-agent session counts; the newest page is a lower bound if the id
+    // listing failed.
+    const ids = ok(ir) ? ((await ir.value.json()).items || []) : items.map(it => `${it.agent}/`);
+    traceSessions = new Map();
+    for (const id of ids) {
+      const a = String(id).split('/')[0];
+      traceSessions.set(a, (traceSessions.get(a) || 0) + 1);
+    }
     const has = items.length > 0 || (stats && (stats.sessions_counted || stats.sessions_missing_tokens));
-    tracesTitleEl.hidden = tracesTileEl.hidden = tracesWrapEl.hidden = !has;
-    if (!has) return;
-    if (stats) renderStatsTile(stats);
+    tracesTitleEl.hidden = false;
+    tracesTileEl.hidden = !(has && stats);
+    tracesWrapEl.hidden = !items.length;
+    tracesEmptyEl.hidden = has;
+    if (has && stats) renderStatsTile(stats);
     renderTracesList(items);
-    tracesHintEl.textContent = count > items.length
-      ? `${items.length} of ${count}` : `${count} session${count === 1 ? '' : 's'}`;
+    tracesSessionsLabel = count > items.length
+      ? `${items.length} of ${count} sessions` : `${count} session${count === 1 ? '' : 's'}`;
+    renderAgentsPanel();  // also repaints the coverage hint
   } catch { /* traces are best-effort; never disrupt the dashboard */ }
 }
+
+// ─────────────────────────────────────────────────────────────
+//  AGENTS ROSTER
+//  Every registered agent in one table: who owns it, when it last spoke,
+//  whether its watcher is alive, whether it shared traces, its best score.
+//  Built only from state the other refreshes already hold.
+// ─────────────────────────────────────────────────────────────
+const agentsTitleEl = document.getElementById('agentsSectionTitle');
+const agentsWrapEl = document.getElementById('agentsWrap');
+const agentsBodyEl = document.getElementById('agentsBody');
+const agentsHintEl = document.getElementById('agentsHint');
+// agent → shared session count, filled by refreshTraces (null = unknown).
+let traceSessions = null;
+// Default: presence, worst first. Clicking the same header flips the order.
+let agentsSort = { key: 'presence', worstFirst: true };
+
+// online ≤ fresh_s < stale ≤ 3×fresh_s < offline (or never seen). null when
+// there is no presence data to judge by.
+function presenceOf(id) {
+  const st = watchState(id);
+  if (!st) return null;
+  const age = st.seen ? st.age : Infinity;
+  const level = st.live ? 'online' : age <= 3 * watchPresence.freshS ? 'stale' : 'offline';
+  return { level, age, mode: st.mode };
+}
+
+function notOnlineAgents() {
+  const out = { stale: 0, offline: 0 };
+  for (const id of rosterAgents()) {
+    const p = presenceOf(id);
+    if (p && p.level !== 'online') out[p.level]++;
+  }
+  return out;
+}
+
+// The header chip next to "N online": only when somebody is not.
+function staleChipHtml() {
+  const { stale, offline } = notOnlineAgents();
+  if (!stale && !offline) return '';
+  const label = [stale && `${stale} stale`, offline && `${offline} offline`].filter(Boolean).join(' · ');
+  return ` <button type="button" class="stale-chip${offline ? ' offline' : ''}" id="staleChip"`
+    + ` title="${stale} stale · ${offline} offline — show the agents table">${label}</button>`;
+}
+
+function newestMessageByAgent() {
+  const out = new Map();
+  for (const m of boardMessages) {
+    if (m.epoch > (out.get(m.agent) || 0)) out.set(m.agent, m.epoch);
+  }
+  return out;
+}
+
+function bestResultByAgent() {
+  const out = new Map();
+  for (const e of leaderboardEntries) {
+    if (e.verification === 'invalid') continue;
+    const cur = out.get(e.agent);
+    if (!cur || isBetter(e.score, cur.score)) out.set(e.agent, e);
+  }
+  return out;
+}
+
+function renderAgentsPanel() {
+  renderTraceCoverage();
+  const roster = rosterAgents();
+  agentsTitleEl.hidden = agentsWrapEl.hidden = !roster.length;
+  if (!roster.length) return;
+  const lastMsg = newestMessageByAgent();
+  const best = bestResultByAgent();
+  const rows = roster.map(id => ({ id, info: agentMap.get(id), p: presenceOf(id), last: lastMsg.get(id) || 0 }));
+  // Worst = oldest/never. Unknown presence (no backend) sorts last.
+  const key = agentsSort.key === 'presence'
+    ? r => (r.p ? r.p.age : -1)
+    : r => -r.last;
+  const dir = agentsSort.worstFirst ? -1 : 1;
+  rows.sort((a, b) => dir * (key(a) - key(b)) || a.id.localeCompare(b.id));
+
+  agentsBodyEl.innerHTML = rows.map(({ id, info, p, last }) => {
+    const owner = info.hf_user
+      ? `<a class="agent-link" href="${escapeHtml(profileUrl(info.hf_user))}" target="_blank" rel="noopener noreferrer">${escapeHtml(info.hf_user)}</a>` : '—';
+    const stack = [info.model, info.harness].filter(Boolean).join(' · ') || '—';
+    const pill = p
+      ? `<span class="presence ${p.level}" title="${escapeHtml(p.mode ? `mode: ${p.mode}` : 'no watcher on record')}">${p.level}${p.age === Infinity ? '' : ` · ${fmtAge(p.age)}`}</span>`
+      : '—';
+    const n = traceSessions && traceSessions.get(id);
+    const b = best.get(id);
+    return `<tr>
+      <td class="agent">${renderAgentName(id)}</td>
+      <td>${owner}</td>
+      <td class="desc" title="${escapeHtml(stack)}">${escapeHtml(stack)}</td>
+      <td title="${escapeHtml(info.joined)}">${escapeHtml(info.joined.slice(0, 10) || '—')}</td>
+      <td>${last ? escapeHtml(fmtRelative(last)) : '<span class="muted2">never</span>'}</td>
+      <td>${pill}</td>
+      <td class="num">${n || '—'}</td>
+      <td class="num">${b ? `${escapeHtml(fmt2(b.score))}${b.verification === 'valid' ? ' ✓' : ''}` : '—'}</td>
+    </tr>`;
+  }).join('');
+  const { stale, offline } = notOnlineAgents();
+  agentsHintEl.textContent = `${roster.length} registered`
+    + (watchPresence ? ` · ${roster.length - stale - offline} online · ${stale} stale · ${offline} offline` : '');
+  agentsWrapEl.querySelectorAll('th.sortable').forEach(th => {
+    th.classList.toggle('sorted', th.dataset.sort === agentsSort.key);
+  });
+}
+
+agentsWrapEl.querySelector('thead').addEventListener('click', e => {
+  const th = e.target.closest('th.sortable');
+  if (!th) return;
+  agentsSort = th.dataset.sort === agentsSort.key
+    ? { key: agentsSort.key, worstFirst: !agentsSort.worstFirst }
+    : { key: th.dataset.sort, worstFirst: true };
+  renderAgentsPanel();
+});
+
+// The header chip is re-rendered with the stat line, so delegate the click.
+topSubtext.addEventListener('click', e => {
+  if (!e.target.closest('#staleChip')) return;
+  agentsTitleEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  agentsWrapEl.classList.remove('flash');
+  void agentsWrapEl.offsetWidth;  // restart the animation on repeat clicks
+  agentsWrapEl.classList.add('flash');
+});
 
 // A hidden tab polls 5× less often, and refreshes as soon as it is shown again.
 let wakePoll = () => {};
