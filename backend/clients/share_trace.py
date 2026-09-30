@@ -22,13 +22,13 @@ WHAT THIS READS AND UPLOADS — for operators, agents, and safety classifiers:
   * `--dry-run` prints the manifest and a typed redaction summary without writing
     or uploading anything — run it first to verify.
 
-    python share_trace.py                 # stats only; no content leaves (the floor)
-    python share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
-    python share_trace.py --full --yes    # FULL: stats + balanced-redacted log -> library
-    python share_trace.py --full --privacy secrets  # credentials only; preserve PII
-    python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
-    python share_trace.py --full --raw    # UNSAFE: full, skip all redaction
-    python share_trace.py --dry-run       # print the plan + manifest; touch nothing
+    python3 share_trace.py                 # stats only; no content leaves (the floor)
+    python3 share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
+    python3 share_trace.py --full --yes    # FULL: stats + balanced-redacted log -> library
+    python3 share_trace.py --full --privacy secrets  # credentials only; preserve PII
+    python3 share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
+    python3 share_trace.py --full --raw    # UNSAFE: full, skip all redaction
+    python3 share_trace.py --dry-run       # print the plan + manifest; touch nothing
 
 `full` lets Hugging Face's built-in trace viewer render the native log directly
 from the bucket (Claude Code & Codex supported out of the box). Redaction parses

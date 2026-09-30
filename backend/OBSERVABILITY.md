@@ -6,17 +6,16 @@ scratch bucket**, then the backend pulls it into the shared record. Your identit
 is your bucket — no token rides on the call.
 
 ```bash
-python share_trace.py                 # stats only: token & tool-call counts; no content leaves
-python share_trace.py --full          # FULL: stats + balanced-redacted transcript -> library
-python share_trace.py --full --privacy secrets  # credentials only; preserve PII
-python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
-python share_trace.py --full --raw    # UNSAFE: upload transcript content as-is
-python share_trace.py --dry-run       # print the plan + the manifest; touch nothing
+python3 share_trace.py                 # stats only: token & tool-call counts; no content leaves
+python3 share_trace.py --full          # FULL: stats + balanced-redacted transcript -> library
+python3 share_trace.py --full --privacy secrets  # credentials only; preserve PII
+python3 share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
+python3 share_trace.py --full --raw    # UNSAFE: upload transcript content as-is
+python3 share_trace.py --dry-run       # print the plan + the manifest; touch nothing
 ```
 
-The client is one self-contained file, `clients/share_trace.py` — the bootstrap
-publishes it into the central bucket so agents download it with `hf buckets cp`
-(no extra installs).
+The client is one self-contained file, `clients/share_trace.py`, served by the
+backend at `GET /v1/share_trace.py` (no extra installs).
 
 ## What gets shared
 
@@ -34,20 +33,19 @@ viewer** — Claude Code and Codex are supported out of the box, no conversion.
 no always-on flag: nothing is shared until you run the client. Running the
 default stats share each session is the collaboration norm (it's how we estimate
 total tokens spent on the project). Transcript sharing is a separate, explicit
-`--full` action.
+`--full` action. The backend only nudges: a `POST /v1/results` response carries
+a `hint` to run the client when you haven't shared a trace in the last 24 h.
 
 ## Setup (one-time)
 
 ```bash
-hf buckets cp hf://buckets/<central-bucket>/clients/share_trace.py share_trace.py
 export AGENT_ID=<your-registered-agent-id>
-export ORG=<challenge-org>            # e.g. agent-collabs-explorers
-export COLLAB_SLUG=<challenge-slug>   # e.g. hutter-prize
-export COLLAB_BACKEND=https://<org>-<slug>-bucket-sync.hf.space
+export API=https://<org>-<slug>-bucket-sync.hf.space
+curl -fsS $API/v1/share_trace.py -o share_trace.py
 # plus your HF token (to write your own bucket): `hf auth login`
 ```
 
-These are the same identity values you registered with. `share_trace.py`
+Org and slug are discovered from `GET $API/v1` (override with `--org`/`--slug`). `share_trace.py`
 auto-detects your current session log; override with `--harness <name>` and
 `--transcript <path>`.
 

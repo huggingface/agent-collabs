@@ -1,6 +1,6 @@
-"""GET /v1/watch.sh — self-distribution of clients/collab_watch.sh.
+"""GET /v1/watch.sh and /v1/share_trace.py — self-distribution of clients/.
 
-The script is served from disk rather than baked in, so this also guards the
+The scripts are served from disk rather than baked in, so this also guards the
 packaging: if a redeploy forgets to ship clients/ next to app/, the route 404s
 and this test is what catches it.
 """
@@ -35,3 +35,13 @@ def test_watch_script_is_served_verbatim(env):
 
     resp = env.client.get("/v1/watch.sh")
     assert resp.content == _SCRIPT_PATH.read_bytes()
+
+
+def test_share_trace_client_is_served_verbatim(env):
+    from app.routes.client import _SHARE_TRACE_PATH
+
+    resp = env.client.get("/v1/share_trace.py")
+    assert resp.status_code == 200
+    assert "text/x-python" in resp.headers["content-type"]
+    assert resp.content == _SHARE_TRACE_PATH.read_bytes()
+    compile(resp.text, "share_trace.py", "exec")  # agents run it straight away
