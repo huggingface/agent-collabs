@@ -590,20 +590,28 @@ class DigestUpdates(BaseModel):
     """Cursor-aware "am I behind?" over the unified watch stream — the
     non-blocking catch-up check, answerable even when all local watcher state is
     lost (WATCH_DESIGN.md §4.5)."""
-    # Items newer than the digest's `after=` cursor (the whole stream when none).
+    # Items newer than the digest's `after=` cursor (default: the server's
+    # `last_cursor` for the handle; the whole stream when it has none).
     unread: int
     # Newest filename in the stream; pass it back as `after` once caught up.
     newest: str | None = None
 
 
 class DigestWatching(BaseModel):
-    """The server's record of the handle's most recent `wait>0` poll. A hint,
-    not an audit log: it lives in-process and a restart forgets it (which is the
-    truth — every parked connection died with it). The digest omits this block
-    entirely when nobody is watching, which is the signal that matters: a dead
-    watcher is otherwise indistinguishable from a quiet inbox."""
+    """The server's record of the handle's most recent read (a `wait>0` poll,
+    a plain `/v1/updates` read, or a digest). A hint, not an audit log: it lives
+    in-process and a restart forgets it (which is the truth — every parked
+    connection died with it). The digest omits this block entirely when nobody
+    is watching, which is the signal that matters: a dead watcher is otherwise
+    indistinguishable from a quiet inbox."""
     last_poll_age_s: int
-    mode: str  # updates | inbox | feed
+    mode: str  # parked (a wait>0 poll within 2x the wait ceiling) | poll
+    # updates | inbox | feed | digest: the parked poll's while parked, else
+    # the most recent read's.
+    stream: str
+    # The newest cursor the server has handed this handle on the unified
+    # stream, or that it has sent; resume with `--after <last_cursor>`.
+    last_cursor: str | None = None
 
 
 class DigestResponse(BaseModel):
@@ -627,7 +635,8 @@ class WatchingEntry(BaseModel):
     """One handle's watch presence — the same hint the digest reports as its
     per-handle `watching` block, in the aggregate map."""
     last_poll_age_s: int
-    mode: str  # updates | inbox | feed
+    mode: str  # parked (wait>0) | poll (wait=0 or a digest)
+    stream: str  # updates | inbox | feed | digest
 
 
 class WatchingResponse(BaseModel):
@@ -639,12 +648,10 @@ class WatchingResponse(BaseModel):
     It also advertises the ceiling a client would otherwise have to hardcode."""
     # The `wait=` ceiling every long-poll is clamped to (LONGPOLL_MAX_WAIT_S).
     max_wait_s: float
-    # Freshness threshold for "someone is watching this handle right now": a
-    # watcher re-arms at most one wait window after the last one ended, so 2×
-    # the ceiling is the youngest age that can still be stale. Published so no
-    # consumer keeps its own copy of the backend's knob.
+    # Freshness threshold for "someone is watching this handle right now"
+    # (WATCH_FRESH_S). Published so no consumer keeps its own copy of the knob.
     fresh_s: float
-    # Only handles this process has served a wait>0 poll for; absent = nobody is
+    # Only handles this process has served a read for; absent = nobody is
     # watching that one. In-process and lost on restart — a hint, not an audit
     # log (a restart truthfully reads as "nobody", since every parked
     # connection died with it).

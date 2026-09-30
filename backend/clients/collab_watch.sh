@@ -22,8 +22,13 @@
 # modes (default: wait):
 #   (none)         block until mail, print the page, exit 0
 #   --max-wait N   ...but give up cleanly after N seconds with exit 3. N is a
-#                  floor: exit 3 never fires early, and overshoots by up to the
-#                  wait window still in flight when N expires.
+#                  ceiling: every request is clamped to the time left, so the
+#                  run returns within N seconds plus network latency (and the
+#                  2s idle floor) — size N to fit your shell tool's timeout.
+#                  A server still unreachable when N is up exits 4, not 3.
+#   --after C      start from cursor C (a filename, e.g. the digest's
+#                  watching.last_cursor) instead of the saved one; C is written
+#                  to the cursor file first. Wait and --exec modes only.
 #   --exec CMD     foreground loop: per delivery run CMD (via `sh -c`) with the
 #                  page on its stdin; the cursor advances ONLY when CMD exits 0.
 #                  CMD also sees COLLAB_WATCH_HANDLE / COLLAB_WATCH_STREAM /
@@ -52,8 +57,9 @@
 #       config, or a server that does not implement the watch API
 #   2   usage error
 #   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death
-#   4   gave up after 10 consecutive request failures (also: --status could not
-#       reach the server); the heartbeat records status=gave_up
+#   4   gave up after 10 consecutive request failures, or --max-wait ran out
+#       mid-retry (also: --status could not reach the server); the heartbeat
+#       records status=gave_up
 #   5   another watcher already holds the lock for this handle. The lock is
 #       per-HANDLE, not per-stream: one watcher covers an agent, which is what
 #       the unified `updates` stream is for
@@ -108,6 +114,9 @@
 #   silently skipped page is not.
 #
 # harness integration — exit-on-mail composes with anything:
+#   * The documented recipe (the collab README) is one synchronous
+#     `--max-wait N` run at every pause; the modes below are for harnesses
+#     that can hold a process.
 #   * Background-task harness (Claude Code, Codex, ...): launch ONE run with
 #     your harness's own background-task mechanism, react to the JSON when the
 #     task completes, then launch it again.
@@ -182,7 +191,7 @@ log() { printf '%s: %s\n' "$SELF" "$*" >&2; }
 usage_text() {
     cat <<'EOF'
 usage: sh collab_watch.sh <base-url> <handle> [updates|inbox|feed] [flags]
-flags: --max-wait N | --exec CMD | --peek | --status | --help
+flags: --max-wait N | --after CURSOR | --exec CMD | --peek | --status | --help
 exit:  0 delivered/ok | 1 fatal | 2 usage | 3 clean no-mail timeout |
        4 gave up | 5 lock held | 10 behind | 11 no watcher | 12 stale heartbeat
 EOF
@@ -219,6 +228,8 @@ STREAM=""
 MODE="wait"
 MODE_FLAG=""
 MAX_WAIT=""
+AFTER=""
+DEADLINE=""
 EXEC_CMD=""
 
 set_mode() {
@@ -246,6 +257,13 @@ while [ "$#" -gt 0 ]; do
             MAX_WAIT="$1"
             is_num "$MAX_WAIT" || usage "--max-wait must be a whole number of seconds, got '$MAX_WAIT'"
             [ "$MAX_WAIT" -gt 0 ] || usage "--max-wait must be greater than 0"
+            ;;
+        --after)
+            shift
+            [ "$#" -gt 0 ] || usage "--after needs a cursor (a message filename)"
+            AFTER="$1"
+            printf '%s\n' "$AFTER" | grep -qxE "$FILENAME_RE" ||
+                usage "--after must be a message filename like 20260728-120000-000_agent-b.md, got '$AFTER'"
             ;;
         -h | --help)
             # Self-documenting: the header comment IS the manual. Falls back to
@@ -293,6 +311,9 @@ esac
 if [ -n "$MAX_WAIT" ] && [ "$MODE" != wait ]; then
     usage "--max-wait applies to the default wait mode only (not $MODE_FLAG)"
 fi
+case "$MODE" in
+    peek | status) [ -z "$AFTER" ] || usage "--after applies to wait and --exec modes only (not $MODE_FLAG)" ;;
+esac
 
 # ── configuration ─────────────────────────────────────────────────────
 
@@ -553,6 +574,11 @@ on_retryable() {
         log "giving up after $STREAK consecutive request failures (last: HTTP $HTTP, curl rc=$CURL_RC)"
         exit 4
     fi
+    if [ -n "$DEADLINE" ] && [ $((DEADLINE - $(now))) -le "$BACKOFF" ]; then
+        hb gave_up
+        log "request failed (HTTP $HTTP, curl rc=$CURL_RC) and --max-wait ${MAX_WAIT}s is up; exiting 4"
+        exit 4
+    fi
     hb retrying
     log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK/$FAIL_STREAK_MAX in ${BACKOFF}s"
     if [ "$BACKOFF" -gt 0 ]; then
@@ -567,6 +593,22 @@ on_retryable() {
 request_ok_reset() {
     STREAK=0
     BACKOFF="$BACKOFF_BASE"
+}
+
+# curl --max-time for a request parked $1 seconds: the wait plus 20s of slack,
+# but never past the --max-wait deadline plus 5s of network latency.
+max_time() {
+    mt=$(($1 + 20))
+    if [ -n "$DEADLINE" ]; then
+        mt_cap=$((DEADLINE - $(now) + 5))
+        if [ "$mt_cap" -lt "$mt" ]; then
+            mt="$mt_cap"
+        fi
+    fi
+    if [ "$mt" -lt 1 ]; then
+        mt=1
+    fi
+    printf '%s' "$mt"
 }
 
 # Forward-drain URL: $1 = limit, $2 = wait. `after` is omitted when the cursor
@@ -586,7 +628,7 @@ poll_url() {
 # so peeking and watching agree about where "now" is.
 baseline_cursor() {
     while :; do
-        do_request "$URL${SEP}limit=1&order=desc&expand=true" $((WAIT + 20))
+        do_request "$URL${SEP}limit=1&order=desc&expand=true" "$(max_time 0)"
         bc_cls=0
         classify || bc_cls=$?
         case "$bc_cls" in
@@ -619,38 +661,44 @@ journal_page() {
         log "warning: could not append to $1 (delivery continues, recovery does not)"
 }
 
-# ── mode: wait / bounded wait ─────────────────────────────────────────
-
-run_wait() {
-    lock_acquire
-    hb starting
-
-    # --max-wait is a FLOOR, never a ceiling: exit 3 must not fire before the
-    # caller's N seconds are really up. `date +%s` truncates, so the epoch read
-    # here is up to a second earlier than the true start instant — without the
-    # +1 slack a `--max-wait 2` run could give up after 1.1s and report "no
-    # mail" for a window the caller never asked to stop watching. The cost is
-    # that the bound overshoots instead: by up to that lost second, plus
-    # whatever is left of the request already in flight when it expires (the
-    # granularity of a bounded wait is one wait window — say so, don't pretend).
-    rw_deadline=""
-    if [ -n "$MAX_WAIT" ]; then
-        rw_deadline=$(($(now) + MAX_WAIT + 1))
+# The cursor to resume from: --after if given, else the saved one, else a
+# cold-start baseline.
+load_cursor() {
+    if [ -n "$AFTER" ]; then
+        write_line "$CURSOR_FILE" "$AFTER"
+        log "cursor set to '$AFTER' (--after)"
     fi
-
     if [ ! -f "$CURSOR_FILE" ]; then
         baseline_cursor
         hb baselined
     else
         CURSOR=$(cursor_read)
     fi
+}
+
+# ── mode: wait / bounded wait ─────────────────────────────────────────
+
+run_wait() {
+    lock_acquire
+    hb starting
+
+    # --max-wait is a CEILING: it is sized to fit a shell tool's timeout, and a
+    # run the harness kills mid-request is worse than one that returns a second
+    # early. Every request is clamped to the time left, and so are curl's
+    # --max-time and the retry backoff. (`date +%s` truncates, so the run may
+    # end up to a second before N.)
+    if [ -n "$MAX_WAIT" ]; then
+        DEADLINE=$(($(now) + MAX_WAIT))
+    fi
+
+    load_cursor
 
     # Page FORWARD from the cursor (order=asc) so a burst larger than one page
     # drains oldest-first across consecutive runs with no gaps.
     while :; do
         rw_wait="$WAIT"
-        if [ -n "$rw_deadline" ]; then
-            rw_left=$((rw_deadline - $(now)))
+        if [ -n "$DEADLINE" ]; then
+            rw_left=$((DEADLINE - $(now)))
             if [ "$rw_left" -le 0 ]; then
                 hb no_mail
                 log "no mail within ${MAX_WAIT}s — clean timeout, exiting 3"
@@ -663,7 +711,7 @@ run_wait() {
 
         hb waiting
         rw_t0=$(now)
-        do_request "$(poll_url "$LIMIT" "$rw_wait")" $((rw_wait + 20))
+        do_request "$(poll_url "$LIMIT" "$rw_wait")" "$(max_time "$rw_wait")"
         rw_cls=0
         classify || rw_cls=$?
         case "$rw_cls" in
@@ -747,13 +795,7 @@ idle_pace() {
 run_exec() {
     lock_acquire
     hb starting
-
-    if [ ! -f "$CURSOR_FILE" ]; then
-        baseline_cursor
-        hb baselined
-    else
-        CURSOR=$(cursor_read)
-    fi
+    load_cursor
 
     re_page=""
     re_fails=0
