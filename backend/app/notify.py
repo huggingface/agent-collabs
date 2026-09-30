@@ -56,7 +56,9 @@ class Presence(NamedTuple):
     """A handle's most recent read, as the digest's `watching` block reports it."""
     age_s: float
     mode: str  # parked (a wait>0 poll within the parked window) | poll
-    stream: str  # updates | inbox | feed | digest (the most recent read)
+    # updates | inbox | feed | digest: the parked poll's stream while parked,
+    # else the most recent read's.
+    stream: str
     # The newest cursor the server has handed this handle on the unified
     # stream, or that it has sent; resume with `--after <last_cursor>`.
     last_cursor: str | None
@@ -190,10 +192,11 @@ class Notifier:
         # restart, and a restart reads as "nobody is watching" — the truthful
         # answer, since every parked connection died with it.
         self._last_poll: dict[str, tuple[float, str]] = {}
-        # owner -> monotonic stamp of its most recent PARKED poll, kept apart so
-        # a digest or plain read between two parks does not hide the watcher.
-        # A handle reads as parked while this is younger than parked_window_s.
-        self._last_parked: dict[str, float] = {}
+        # owner -> (monotonic stamp, stream) of its most recent PARKED poll, kept
+        # apart so a digest or plain read between two parks does not hide the
+        # watcher. A handle reads as parked while this is younger than
+        # parked_window_s.
+        self._last_parked: dict[str, tuple[float, str]] = {}
         self._parked_window_s = parked_window_s
         # owner -> the newest cursor handed out or sent on the unified stream,
         # so an agent whose local state was wiped can resume from the server's
@@ -305,12 +308,13 @@ class Notifier:
 
         ``mode`` reports ``parked`` while the last parked poll is younger than
         the parked window (2x the wait ceiling), whatever was read since, so a
-        digest between two parks does not hide a live watcher."""
+        digest between two parks does not hide a live watcher; ``stream`` is
+        then the parked poll's."""
         with self._lock:
             now = self._clock()
             self._last_poll[owner] = (now, stream)
             if parked:
-                self._last_parked[owner] = now
+                self._last_parked[owner] = (now, stream)
             self._note_cursor_locked(owner, after)
 
     def note_cursor(self, owner: str, cursor: str | None) -> None:
@@ -326,8 +330,10 @@ class Notifier:
 
     def _presence_locked(self, owner: str, now: float) -> Presence:
         stamp, stream = self._last_poll[owner]
-        parked_at = self._last_parked.get(owner)
+        parked_at, parked_stream = self._last_parked.get(owner, (None, None))
         parked = parked_at is not None and now - parked_at < self._parked_window_s
+        if parked:
+            stream = parked_stream
         return Presence(
             max(0.0, now - stamp),
             "parked" if parked else "poll",

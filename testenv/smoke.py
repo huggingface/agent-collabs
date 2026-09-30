@@ -521,7 +521,7 @@ def watch_flows() -> None:
 
     # ── §4.5: the digest answers "am I behind?" and "is anyone watching?" ──
     code, newest = req(f"{API}/v1/updates?as={me}&limit=1&order=desc")
-    code, dg = req(f"{API}/v1/digest?as={me}")
+    code, dg = req(f"{API}/v1/digest?as={me}&after=")  # empty: count the whole stream
     up = dg.get("updates") or {}
     code, dg_caught = req(f"{API}/v1/digest?as={me}&after={up.get('newest')}")
     check("digest updates block: unread is cursor-aware, newest matches the stream",

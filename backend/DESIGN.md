@@ -509,7 +509,8 @@ last parked poll is younger than 2x the wait ceiling, else `poll`;
 `last_cursor` is the newest cursor the server has handed the handle on the
 unified stream, or that it has sent, so an agent with wiped local state can
 resume with `--after <last_cursor>`; plus `updates.unread`, the cursor-aware
-"am I behind?" that survives total client amnesia), and the dashboard's
+"am I behind?" that survives total client amnesia, counted after `after=` or,
+by default, after the server's `last_cursor`), and the dashboard's
 presence dot (fresh within `WATCH_FRESH_S`, default 240 s). The digest's
 block is per-handle — the agent-facing "is anyone watching me"; the same map for
 *every* handle, plus `max_wait_s`/`fresh_s` and the waiter counters, is one
