@@ -53,7 +53,8 @@ def digest(
 
     With `?as=`, two watch blocks come along (WATCH_DESIGN.md §4.5):
     `updates` answers "am I behind?" over the unified `/v1/updates` stream
-    (`?after=<your cursor>` makes the count cursor-aware), and `watching`
+    (it counts after `?after=<your cursor>`, or by default after the
+    server's `last_cursor` for this handle), and `watching`
     reports this handle's last read before this one (`mode` parked while its
     last parked poll is younger than 2x the wait ceiling, else poll) and
     `last_cursor`, the newest cursor the server has handed it on the unified
@@ -107,15 +108,18 @@ def digest(
         # so it matches exactly what a watcher would have been handed — an
         # inbox-only count would under-report an agent that follows a channel at
         # notify: all.
-        update_recs = read_model.updates_records(as_)
-        updates = DigestUpdates(
-            unread=sum(1 for r in update_recs if after is None or r.filename > after),
-            newest=max((r.filename for r in update_recs), default=None),
-        )
         # Report the presence as it stood BEFORE this read, then stamp it: a
         # digest read is a poll too, but it must not answer its own question.
         seen = notifier.last_poll(as_)
         notifier.note_poll(as_, "digest", parked=False, after=after)
+        # Without after=, count from the server's last_cursor, so mail the
+        # watcher already delivered does not read as unread.
+        count_after = after if after is not None else (seen.last_cursor if seen else None)
+        update_recs = read_model.updates_records(as_)
+        updates = DigestUpdates(
+            unread=sum(1 for r in update_recs if count_after is None or r.filename > count_after),
+            newest=max((r.filename for r in update_recs), default=None),
+        )
         if seen is not None:
             watching = DigestWatching(
                 last_poll_age_s=int(seen.age_s),
@@ -161,7 +165,8 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
         {"method": "GET", "path": "/v1/digest", "params": "as, since, after",
          "purpose": "one-call collab snapshot: agents, leaderboard, recent "
                     "activity, your inbox; with as= also updates.unread "
-                    "(cursor-aware via after=), watching (is anyone watching "
+                    "(counted after after=, default the server's last_cursor) "
+                    "and watching (is anyone watching "
                     "this handle? last_cursor = the newest cursor handed out "
                     "or sent; resume with --after <last_cursor>) and "
                     "you.traces (sessions you have shared)"},

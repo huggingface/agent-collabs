@@ -147,12 +147,24 @@ def test_digest_updates_is_cursor_aware_via_after(env):
     cursor = env.client.get("/v1/updates?as=watcher").json()["cursor"]
     env.client.post("/v1/messages", json={"agent_id": "poster", "body": "two @watcher"})
 
-    assert env.client.get("/v1/digest?as=watcher").json()["updates"]["unread"] == 2
+    assert env.client.get("/v1/digest?as=watcher&after=").json()["updates"]["unread"] == 2
     caught_up = env.client.get(f"/v1/digest?as=watcher&after={cursor}").json()
     assert caught_up["updates"]["unread"] == 1
     # Fully drained.
     newest = caught_up["updates"]["newest"]
     assert env.client.get(f"/v1/digest?as=watcher&after={newest}").json()["updates"]["unread"] == 0
+
+
+def test_digest_without_after_counts_from_the_server_last_cursor(env):
+    """An agent that lost its state reads the digest without after=: mail the
+    watcher already delivered must not read as unread."""
+    seed_agent(env.hub, "watcher")
+    seed_agent(env.hub, "poster")
+    env.client.post("/v1/messages", json={"agent_id": "poster", "body": "one @watcher"})
+    assert env.client.get("/v1/digest?as=watcher").json()["updates"]["unread"] == 1
+    assert len(env.client.get("/v1/updates?as=watcher").json()["items"]) == 1
+
+    assert env.client.get("/v1/digest?as=watcher").json()["updates"]["unread"] == 0
 
 
 def test_digest_updates_is_zero_for_a_quiet_handle(env):
@@ -221,13 +233,13 @@ def test_digest_watching_records_the_cursor_handed_out(env):
 
 def test_a_digest_read_does_not_hide_a_parked_watcher(env):
     """mode follows the last PARKED poll, not the last read: a digest between
-    two parks still reports parked; stream is the most recent read."""
+    two parks still reports parked, with the parked poll's stream."""
     seed_agent(env.hub, "watcher")
     env.client.get("/v1/updates?as=watcher&wait=0.05")
     env.client.get("/v1/digest?as=watcher")
 
     block = env.client.get("/v1/digest?as=watcher").json()["watching"]
-    assert (block["mode"], block["stream"]) == ("parked", "digest")
+    assert (block["mode"], block["stream"]) == ("parked", "updates")
 
 
 def test_digest_watching_reports_the_stream(env):
