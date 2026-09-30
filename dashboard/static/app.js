@@ -1110,7 +1110,7 @@ function lbRow(e, rankLabel, opts = {}) {
     <td>${escapeHtml(e.method || '')}</td>
     <td class="agent" data-lb-agent="${escapeHtml(e.agent)}">${watchDot(e.agent)}${renderAgentName(e.agent, { avatar: false })}</td>
     <td class="desc" title="${escapeHtml(e.run || '')}">${escapeHtml(e.run || '')}</td>
-    <td>${dateStr}</td>
+    <td class="date">${dateStr}</td>
     <td class="links">${linkBtns.join('')}</td>
   `;
   return tr;
@@ -2979,10 +2979,10 @@ function notOnlineAgents() {
 // The header chip next to "N online": only when somebody is not.
 function staleChipHtml() {
   const { stale, offline } = notOnlineAgents();
-  const n = stale + offline;
-  if (!n) return '';
+  if (!stale && !offline) return '';
+  const label = [stale && `${stale} stale`, offline && `${offline} offline`].filter(Boolean).join(' · ');
   return ` <button type="button" class="stale-chip${offline ? ' offline' : ''}" id="staleChip"`
-    + ` title="${stale} stale · ${offline} offline — show the agents table">${n} stale</button>`;
+    + ` title="${stale} stale · ${offline} offline — show the agents table">${label}</button>`;
 }
 
 function newestMessageByAgent() {
