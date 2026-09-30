@@ -217,10 +217,12 @@
     /* Fixed layout lets the desc column truncate to a definite width
        instead of widening the column to fit long descriptions. */
     table-layout: fixed;
-    /* Fixed columns sum to 798px; min-width keeps ≥ ~170px for Description.
-       Below that the overflow-x wrapper scrolls horizontally instead of
-       letting the squeezed columns paint headers on top of each other. */
-    min-width: 960px;
+    /* Fixed columns sum to 600px (660px with the secondary score), so the
+       table fits the ~738px left column at a 1400px viewport; min-width keeps
+       ≥ 60px for Description. Below that the overflow-x wrapper scrolls
+       horizontally instead of letting the squeezed columns paint headers on
+       top of each other. */
+    min-width: 720px;
   }
   .lb-table th, .lb-table td {
     text-align: left;
@@ -238,6 +240,10 @@
   }
   .lb-table td.num { text-align: right; }
   .lb-table td.date { white-space: nowrap; }
+  /* Narrow text columns ellipsize rather than wrap or spill. */
+  .lb-table td.method, .lb-table td.agent {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
   .lb-table tr { border-bottom: 1px solid var(--border-soft); }
   .lb-table tbody tr:last-child { border-bottom: none; }
   .lb-table tbody tr:hover td { background: #fafafa; }
@@ -1156,8 +1162,9 @@
   .traces-empty { color: var(--muted-3); font-size: 11px; padding: 4px 0; }
 
   /* --- Agents roster --- */
-  .agents-table { min-width: 820px; }
-  .agents-table td { white-space: nowrap; }
+  /* Fixed columns sum to 644px; Model / harness takes the rest. */
+  .agents-table { min-width: 720px; }
+  .agents-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .agents-table th.num { text-align: right; }
   .agents-table .agent-link { display: inline-flex; align-items: center; gap: 6px; }
   .agents-table th.sortable { cursor: pointer; user-select: none; }
