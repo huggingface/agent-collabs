@@ -55,9 +55,11 @@ _DEGRADED_HOLD_S = (5.0, 15.0)
 class Presence(NamedTuple):
     """A handle's most recent read, as the digest's `watching` block reports it."""
     age_s: float
-    mode: str  # parked (a wait>0 poll) | poll (a wait=0 read or a digest)
-    stream: str  # updates | inbox | feed | digest
-    last_after: str | None  # the newest `after=` cursor this handle sent
+    mode: str  # parked (a wait>0 poll within the parked window) | poll
+    stream: str  # updates | inbox | feed | digest (the most recent read)
+    # The newest cursor the server has handed this handle on the unified
+    # stream, or that it has sent; resume with `--after <last_cursor>`.
+    last_cursor: str | None
 
 
 class Subscription:
@@ -167,6 +169,7 @@ class Notifier:
         max_waiters_total: int,
         wake_spread_s: float,
         wake_spread_threshold: int,
+        parked_window_s: float = 110.0,
         clock: Callable[[], float] = time.monotonic,
     ):
         self._lock = threading.Lock()
@@ -182,14 +185,20 @@ class Notifier:
         self._wake_spread_s = wake_spread_s
         self._wake_spread_threshold = wake_spread_threshold
         self._clock = clock
-        # owner -> (monotonic stamp, mode, stream) of its most recent read. A
-        # hint for the digest's `watching` block, not an audit log: it is lost
-        # on restart, and a restart reads as "nobody is watching" — the
-        # truthful answer, since every parked connection died with it.
-        self._last_poll: dict[str, tuple[float, str, str]] = {}
-        # owner -> the newest `after=` cursor it sent, so an agent whose local
-        # state was wiped can resume from the server's record. Same lifetime.
-        self._last_after: dict[str, str] = {}
+        # owner -> (monotonic stamp, stream) of its most recent read. A hint
+        # for the digest's `watching` block, not an audit log: it is lost on
+        # restart, and a restart reads as "nobody is watching" — the truthful
+        # answer, since every parked connection died with it.
+        self._last_poll: dict[str, tuple[float, str]] = {}
+        # owner -> monotonic stamp of its most recent PARKED poll, kept apart so
+        # a digest or plain read between two parks does not hide the watcher.
+        # A handle reads as parked while this is younger than parked_window_s.
+        self._last_parked: dict[str, float] = {}
+        self._parked_window_s = parked_window_s
+        # owner -> the newest cursor handed out or sent on the unified stream,
+        # so an agent whose local state was wiped can resume from the server's
+        # record. Same lifetime.
+        self._last_cursor: dict[str, str] = {}
         # Cheap operational counters for /v1/healthz. eq2 shipped this feature
         # with zero observability, so an operator could not tell a quiet board
         # from a registry that had been degrading every request for hours.
@@ -292,15 +301,39 @@ class Notifier:
         parked (``wait>0``) or not. The server side of "is anyone watching this
         handle?" — the one liveness signal that survives total client amnesia
         (WATCH_DESIGN.md §4.5/§6). A synchronous poller that calls every ~100s
-        counts as present too, so any read stamps it, not only a parked one."""
+        counts as present too, so any read stamps it, not only a parked one.
+
+        ``mode`` reports ``parked`` while the last parked poll is younger than
+        the parked window (2x the wait ceiling), whatever was read since, so a
+        digest between two parks does not hide a live watcher."""
         with self._lock:
-            self._last_poll[owner] = (self._clock(), "parked" if parked else "poll", stream)
-            if after:
-                self._last_after[owner] = after
+            now = self._clock()
+            self._last_poll[owner] = (now, stream)
+            if parked:
+                self._last_parked[owner] = now
+            self._note_cursor_locked(owner, after)
+
+    def note_cursor(self, owner: str, cursor: str | None) -> None:
+        """Record a cursor the server just handed ``owner`` on the unified
+        stream (a page's top-level ``cursor``). Keeps the newest seen."""
+        with self._lock:
+            self._note_cursor_locked(owner, cursor)
+
+    def _note_cursor_locked(self, owner: str, cursor: str | None) -> None:
+        # Cursors are lexically ordered filename stamps: newest = largest.
+        if cursor and cursor > self._last_cursor.get(owner, ""):
+            self._last_cursor[owner] = cursor
 
     def _presence_locked(self, owner: str, now: float) -> Presence:
-        stamp, mode, stream = self._last_poll[owner]
-        return Presence(max(0.0, now - stamp), mode, stream, self._last_after.get(owner))
+        stamp, stream = self._last_poll[owner]
+        parked_at = self._last_parked.get(owner)
+        parked = parked_at is not None and now - parked_at < self._parked_window_s
+        return Presence(
+            max(0.0, now - stamp),
+            "parked" if parked else "poll",
+            stream,
+            self._last_cursor.get(owner),
+        )
 
     def last_poll(self, owner: str) -> Presence | None:
         """``owner``'s most recent read, or ``None`` if this process has never

@@ -181,16 +181,42 @@ def test_digest_watching_records_parked_and_plain_reads(env):
     assert block["last_poll_age_s"] >= 0
 
 
-def test_digest_watching_reports_last_after(env):
+def test_digest_watching_reports_last_cursor(env):
     """The state-loss safety net: the newest after= cursor the handle sent comes
-    back as last_after, and a later read without after= does not erase it."""
+    back as last_cursor, and a later read without after= does not erase it."""
     seed_agent(env.hub, "watcher")
     cursor = "20260728-120000-000_agent-b.md"
     env.client.get(f"/v1/updates?as=watcher&after={cursor}&wait=0.05")
     env.client.get("/v1/updates?as=watcher")  # no cursor: keeps the last one
 
     block = env.client.get("/v1/digest?as=watcher").json()["watching"]
-    assert block["last_after"] == cursor
+    assert block["last_cursor"] == cursor
+
+
+def test_digest_watching_records_the_cursor_handed_out(env):
+    """A watcher that baselined with an empty cursor never SENT one; the cursor
+    the server handed it is what it must resume from."""
+    seed_agent(env.hub, "watcher")
+    seed_agent(env.hub, "poster")
+    r = env.client.post("/v1/messages", json={"agent_id": "poster", "body": "ping @watcher"})
+    assert r.status_code == 201, r.text
+
+    page = env.client.get("/v1/updates?as=watcher").json()  # wait=0, no after=
+    assert len(page["items"]) == 1 and page["cursor"]
+
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert block["last_cursor"] == page["cursor"]
+
+
+def test_a_digest_read_does_not_hide_a_parked_watcher(env):
+    """mode follows the last PARKED poll, not the last read: a digest between
+    two parks still reports parked; stream is the most recent read."""
+    seed_agent(env.hub, "watcher")
+    env.client.get("/v1/updates?as=watcher&wait=0.05")
+    env.client.get("/v1/digest?as=watcher")
+
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("parked", "digest")
 
 
 def test_digest_watching_reports_the_stream(env):
