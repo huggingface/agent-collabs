@@ -7,7 +7,7 @@ top-level ``cursor``, and a ``watch`` block whenever ``wait>0`` was requested.
 Why a stub instead of the FastAPI app (which is how eq2 tested this): the
 client contract is what is under test here, and half of it only exists in
 conditions a healthy server will not produce on demand — a 4xx on a typo'd
-handle, ten 5xx in a row, an instantly-empty *degraded* answer, a page whose
+handle, a 5xx outage, an instantly-empty *degraded* answer, a page whose
 record content is deliberately shaped like a cursor. The stub makes each of
 those a one-line setting, keeps the suite honest about what the *client* does,
 and leaves it runnable while the server side is still being written.
@@ -67,6 +67,8 @@ class Stub:
     omit_cursor: bool = False             # pretend the server predates §4.4
     matched_override: int | None = None   # lie about `matched`
     grow_polls: int = 0                   # land fresh mail during the next N polls
+    fail_first: int = 0                   # answer the next N requests with fail_status
+    fail_status: int = 503
     _n: int = 0
 
     def add(self, body: str = "ping @agent-a", author: str = "agent-b",
@@ -141,6 +143,9 @@ class _Handler(BaseHTTPRequestHandler):
         with stub.lock:
             stub.requests.append((parsed.path, query))
             forced, err = stub.http_status, stub.error_body
+            if not forced and stub.fail_first > 0:
+                stub.fail_first -= 1
+                forced = stub.fail_status
             grow = stub.grow_polls > 0
             if grow:
                 stub.grow_polls -= 1
@@ -253,8 +258,9 @@ def popen(stub: Stub, state: Path | None, *flags: str, handle: str = "agent-a",
 
 def stop(proc: subprocess.Popen, timeout: float = 10) -> tuple[str, str]:
     """Terminate a watcher and collect its output. The script traps TERM and
-    exits through its cleanup path, but a shell only runs the trap once the
-    foreground curl returns — hence the tiny waits everywhere."""
+    exits through its cleanup path at once: curl and sleeps run in the
+    background under `wait`, which a trapped signal interrupts (only an --exec
+    handler still delays the trap)."""
     if proc.poll() is None:
         proc.terminate()
     try:
@@ -629,18 +635,39 @@ def test_3xx_fails_fast_with_a_redirect_hint(stub, tmp_path):
     assert heartbeat(state)[1] == "http_301"
 
 
-def test_ten_failures_give_up_with_exit_4_and_gave_up_heartbeat(stub, tmp_path):
-    """5xx shares the backoff ladder; a streak of 10 exits 4 and leaves
-    status=gave_up behind, so --status can report it once the process is gone."""
+def test_retry_budget_gives_up_with_exit_4_and_gave_up_heartbeat(stub, tmp_path):
+    """5xx shares the backoff ladder; once the failures in a row span
+    COLLAB_WATCH_RETRY_BUDGET_S it exits 4 and leaves status=gave_up behind,
+    so --status can report it once the process is gone."""
     stub.http_status = 503
     state = fresh(tmp_path, cursor="")
+    t0 = time.monotonic()
+
+    result = run(stub, state, timeout=60, COLLAB_WATCH_RETRY_BUDGET_S="1")
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 4, result.stderr
+    assert elapsed < 4, f"a 1s budget took {elapsed:.1f}s"
+    assert "giving up after" in result.stderr
+    assert heartbeat(state)[1] == "gave_up"
+
+
+@pytest.mark.parametrize("status", [502, 503, 504])
+def test_an_edge_outage_is_outlasted_not_counted(stub, tmp_path, status):
+    """A Space rebuild answers 502/503/504 from the edge for longer than any
+    fixed retry count survives; the budget is time, so the watcher keeps going
+    well past 10 failures and delivers once the Space is back."""
+    stub.fail_first = 15
+    stub.fail_status = status
+    state = fresh(tmp_path, cursor="")
+    filename = stub.add()
 
     result = run(stub, state, timeout=60)
 
-    assert result.returncode == 4
-    assert stub.n_requests() == 10
-    assert "giving up after 10" in result.stderr
-    assert heartbeat(state)[1] == "gave_up"
+    assert result.returncode == 0, result.stderr
+    assert stub.n_requests() == 16
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [filename]
+
 
 
 def test_backoff_ladder_is_used_when_not_disabled(stub, tmp_path):
@@ -914,7 +941,7 @@ def test_second_watcher_exits_5_naming_the_live_pid(stub, tmp_path):
     try:
         pid_file = state / "lock" / "pid"
         assert wait_until(pid_file.exists), "no lock was taken"
-        assert pid_file.read_text().strip() == str(first.pid)
+        assert pid_file.read_text().partition("\n")[0] == str(first.pid)
 
         second = run(stub, state, timeout=20)
         assert second.returncode == 5
@@ -926,7 +953,28 @@ def test_second_watcher_exits_5_naming_the_live_pid(stub, tmp_path):
         "the lock must be released on exit"
 
 
+def test_term_while_parked_exits_at_once_and_releases_the_lock(stub, tmp_path):
+    """A TERM must not wait for the parked curl (up to 75s): until the process
+    exits, its lock reads as live and a replacement watcher exits 5."""
+    state = fresh(tmp_path, cursor="")
+    proc = popen(stub, state, wait="55")
+    try:
+        assert wait_until(lambda: stub.n_requests() >= 1), "never parked"
+        time.sleep(0.3)  # let curl settle into the parked request
+        t0 = time.monotonic()
+        proc.terminate()
+        proc.communicate(timeout=10)
+        elapsed = time.monotonic() - t0
+    finally:
+        if proc.poll() is None:
+            stop(proc)
+    assert proc.returncode == 143
+    assert elapsed < 2, f"TERM took {elapsed:.1f}s: the trap waited for curl"
+    assert not (state / "lock").exists(), "the lock must be released"
+
+
 def test_stale_lock_is_reclaimed(stub, tmp_path):
+
     """A lock whose PID is gone (kill -9, harness reaping) is not a wall."""
     reaped = subprocess.Popen(["true"])
     reaped.wait()
@@ -942,7 +990,44 @@ def test_stale_lock_is_reclaimed(stub, tmp_path):
     assert (state / "cursor.updates").read_text().strip() == filename
 
 
+def test_a_reused_pid_is_a_stale_lock(stub, tmp_path):
+    """`kill -0` succeeds for ANY process with that pid — a reused one, or one
+    in another PID namespace sharing the state dir — so lock/pid records the
+    owner's start time and a live pid started at another time is stale."""
+    impostor = subprocess.Popen(["sleep", "30"])
+    try:
+        state = fresh(tmp_path, cursor="")
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{impostor.pid}\nnot-its-start-time\n")
+        filename = stub.add()
+
+        result = run(stub, state)
+
+        assert result.returncode == 0, result.stderr
+        assert "stale lock" in result.stderr
+        assert (state / "cursor.updates").read_text().strip() == filename
+    finally:
+        impostor.terminate()
+        impostor.wait()
+
+
+def test_the_lock_records_its_owners_start_time(stub, tmp_path):
+    state = fresh(tmp_path, cursor="")
+    watcher = popen(stub, state)
+    try:
+        pid_file = state / "lock" / "pid"
+        assert wait_until(lambda: pid_file.exists() and pid_file.read_text().count("\n") == 2)
+        pid, start = pid_file.read_text().splitlines()
+        assert pid == str(watcher.pid)
+        assert start.strip(), "no start time recorded (this host has /proc)"
+        second = run(stub, state, timeout=20)
+        assert second.returncode == 5, "a matching start time is a live lock"
+    finally:
+        stop(watcher)
+
+
 def test_the_lock_is_per_handle_and_status_is_stream_aware(stub, tmp_path):
+
     """The lock and heartbeat are per-HANDLE while cursors are per-stream: one
     watcher per agent is the whole point of the unified `updates` stream.
 
@@ -1000,6 +1085,8 @@ def test_status_10_outranks_a_watcher_on_another_stream(stub, tmp_path):
         fields = _status_line(result)
         assert fields["STATUS"] == "BEHIND" and fields["UNREAD"] == "1"
         assert fields["STREAM"] == "updates"
+        assert "agent-a feed --max-wait 5" in result.stderr
+
     finally:
         alive.terminate()
         alive.wait()
@@ -1058,7 +1145,7 @@ def test_exit_does_not_remove_a_lock_that_is_no_longer_ours(stub, tmp_path):
     try:
         pid_file = state / "lock" / "pid"
         assert wait_until(lambda: pid_file.exists()
-                          and pid_file.read_text().strip() == str(watcher.pid)), \
+                          and pid_file.read_text().partition("\n")[0] == str(watcher.pid)), \
             "the watcher never took the lock"
         pid_file.write_text(f"{other.pid}\n")  # another watcher now owns it
 
@@ -1148,6 +1235,12 @@ def test_status_10_when_behind_outranks_liveness(stub, tmp_path):
     assert fields["PID"] == "-"
     assert fields["LAST"] == "gave_up", "the give-up must survive the process"
     assert int(fields["HEARTBEAT_AGE"].rstrip("s")) >= 412
+    command = f"sh {SCRIPT} {stub.base_url} agent-a --max-wait 5"
+    assert command in result.stderr, "BEHIND must name the command that reads it"
+    t0 = time.monotonic()
+    read = run(stub, state, "--max-wait", "5")
+    assert read.returncode == 0 and len(json.loads(read.stdout)["items"]) == 3
+    assert time.monotonic() - t0 < 3, "pending mail must come back at once"
 
 
 def test_status_12_when_the_lock_is_live_but_the_heartbeat_is_stale(stub, tmp_path):
