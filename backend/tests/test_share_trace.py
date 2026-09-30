@@ -22,7 +22,11 @@ import share_trace as st  # noqa: E402
 
 
 CWD = "/work/proj"  # absolute; detect only uses it to compute slugs / cwd-match
-_MARKERS = ("CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED")
+# Env the client reads; cleared so the host environment never leaks into tests.
+_MARKERS = (
+    "CLAUDE_CODE_SESSION_ID", "CLAUDECODE", "CODEX_SANDBOX", "CODEX_SANDBOX_NETWORK_DISABLED",
+    "CODEX_HOME", "CLAUDE_CONFIG_DIR", "COLLAB_BACKEND", "API",
+)
 
 
 def _slug(cwd: str) -> str:
@@ -75,6 +79,44 @@ def test_codex_marker_never_grabs_a_claude_log(home, monkeypatch):
     harness, path, _ = st.detect(CWD, "auto")
     assert harness == "codex"
     assert path == rollout               # never the CC log
+
+
+def test_config_dir_env_vars_are_honoured(home, monkeypatch, tmp_path):
+    # CLAUDE_CONFIG_DIR / CODEX_HOME relocate the logs; ~/.claude and ~/.codex
+    # are only the fallbacks.
+    assert st._cc_project_dir(CWD) == home / ".claude" / "projects" / _slug(CWD)
+    assert st._codex_home() == home / ".codex"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "cx" / ".codex"))
+    assert st._cc_project_dir(CWD) == tmp_path / "cc" / "projects" / _slug(CWD)
+    rollout = _codex(tmp_path / "cx")  # writes under <root>/.codex/sessions
+    assert st._codex_logs() == [rollout]
+    assert st._infer_harness(rollout) == "codex"
+
+
+def test_claude_config_dir_detects_pinned_session(home, monkeypatch, tmp_path):
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "cc"))
+    d = tmp_path / "cc" / "projects" / _slug(CWD)
+    d.mkdir(parents=True)
+    mine = d / "sid-1.jsonl"
+    mine.write_text("{}\n")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-1")
+    assert st.detect(CWD, "auto") == ("claude-code", mine, False)
+    assert st._infer_harness(mine) == "claude-code"
+
+
+def test_codex_home_is_not_a_harness_marker(home, monkeypatch):
+    # CODEX_HOME is often exported globally (e.g. by agent managers); it only
+    # relocates the logs and must not decide which harness is running.
+    monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
+    assert st._running_harness() == (None, None)
+
+
+def test_codex_cwd_match_respects_path_boundary(home):
+    assert _codex(home, cwd="/work/proj") and st._codex_matches_cwd(st._codex_logs()[0], CWD)
+    assert st._mentions_cwd("cd /work/proj/src && ls", CWD)
+    assert not st._mentions_cwd("/work/proj2", CWD)
+    assert not st._mentions_cwd("cd /work/proj-old", CWD)
 
 
 def test_ambiguous_without_markers_refuses(home):
@@ -420,3 +462,91 @@ def test_session_id_must_be_a_safe_bucket_component():
     assert st._safe_session_id("rollout-2026.06_29") == "rollout-2026.06_29"
     with pytest.raises(SystemExit, match="safe --session-id"):
         st._safe_session_id("../another-session")
+
+
+def test_claude_code_usage_is_counted_once_per_message_id(tmp_path):
+    # Claude Code writes one line per content block; lines of one API response
+    # repeat message.id and usage. Summing every line over-counted tokens.
+    usage = {"input_tokens": 10, "output_tokens": 5,
+             "cache_read_input_tokens": 100, "cache_creation_input_tokens": 1}
+
+    def line(mid, content):
+        msg = {"model": "m", "content": content, "usage": usage}
+        if mid:
+            msg["id"] = mid
+        return json.dumps({"type": "assistant", "sessionId": "s", "message": msg})
+
+    tool = {"type": "tool_use", "id": "tu1", "name": "Bash"}
+    transcript = tmp_path / "s.jsonl"
+    transcript.write_text("\n".join([
+        line("msg_1", [{"type": "thinking"}]),
+        line("msg_1", [{"type": "text"}]),
+        line("msg_1", [tool]),
+        line("msg_1", [tool]),  # same tool_use block written twice
+        line("msg_2", [{"type": "tool_use", "id": "tu2", "name": "Read"}]),
+        line(None, [{"type": "text"}]),  # no id: still counts once
+    ]) + "\n")
+
+    fields = st.adapter_claude_code(transcript)
+    assert fields["usage"] == {
+        "input_tokens": 30, "output_tokens": 15, "cache_read_tokens": 300,
+        "cache_creation_tokens": 3, "total_tokens": 348,
+    }
+    assert fields["extensions"]["api_requests"] == 3
+    assert fields["activity"] == {"tool_calls": 2, "tool_calls_by_name": {"Bash": 1, "Read": 1}}
+
+
+def _run(monkeypatch, *argv):
+    monkeypatch.setattr(sys, "argv", ["share_trace.py", *argv])
+    return st.main()
+
+
+def test_unknown_harness_with_transcript_ships_minimal_manifest(home, monkeypatch, tmp_path, capsys):
+    transcript = tmp_path / "session-1.log"
+    transcript.write_text("anything\n")
+    assert _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "harness    : cursor" in out
+    assert "stats will be partial" in out
+
+
+def test_harness_must_be_a_slug(home, monkeypatch):
+    with pytest.raises(SystemExit):
+        _run(monkeypatch, "--harness", "Not A Slug", "--dry-run")
+    with pytest.raises(SystemExit, match="--transcript"):
+        _run(monkeypatch, "--harness", "cursor", "--dry-run")
+
+
+def test_backend_falls_back_to_api_env(home, monkeypatch, tmp_path):
+    monkeypatch.delenv("COLLAB_BACKEND", raising=False)
+    monkeypatch.setenv("API", "https://api.example")
+    seen = []
+    monkeypatch.setattr(st, "_fetch_v1", lambda backend: seen.append(backend))
+    transcript = tmp_path / "s.log"
+    transcript.write_text("x\n")
+    _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--dry-run")
+    assert seen == ["https://api.example"]
+
+
+def test_stats_share_never_needs_confirmation(monkeypatch):
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
+    kw = dict(log_path=Path("x.jsonl"), uncertain=True, yes=False, raw=False, privacy="balanced")
+    st._confirm_or_exit(share="stats", **kw)  # no exit, no prompt
+    with pytest.raises(SystemExit, match="--yes"):
+        st._confirm_or_exit(share="full", **kw)
+
+
+def test_promotion_failure_exits_non_zero(home, monkeypatch, tmp_path, capsys):
+    transcript = tmp_path / "s.log"
+    transcript.write_text("x\n")
+    monkeypatch.setattr(st, "_hf_cp", lambda local, dest: None)
+    monkeypatch.setattr(st.shutil, "which", lambda _: "/usr/bin/hf")
+
+    def fail(*a, **k):
+        raise st.urllib.error.URLError("down")
+
+    monkeypatch.setattr(st.urllib.request, "urlopen", fail)
+    rc = _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript),
+              "--agent-id", "a1", "--org", "o", "--slug", "c", "--backend", "https://b.example")
+    assert rc == 1
+    assert "backend promotion failed" in capsys.readouterr().out
