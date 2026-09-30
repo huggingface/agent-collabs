@@ -76,7 +76,7 @@ def register(
     if not caller_token:
         raise Unauthorized(
             "missing Authorization: Bearer <hf_token>",
-            hint="pass your HF token: -H \"authorization: Bearer $(hf auth token)\"",
+            hint="pass your HF token: -H \"authorization: Bearer $(hf auth token 2>/dev/null)\"",
         )
     try:
         identity = hub.whoami_identity(caller_token)
@@ -85,7 +85,7 @@ def register(
     except Exception:
         raise Unauthorized(
             "could not resolve caller identity via whoami; check your token",
-            hint="run `hf auth login`, then pass $(hf auth token)",
+            hint="run `hf auth login`, then pass $(hf auth token 2>/dev/null)",
         )
     creator = identity.username
 
