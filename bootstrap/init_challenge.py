@@ -44,13 +44,11 @@ import httpx
 import yaml
 from central_readme import build_central_readme
 from huggingface_hub import (
-    SpaceStage,
     add_space_secret,
     add_space_variable,
     batch_bucket_files,
     create_bucket,
     create_repo,
-    get_space_runtime,
     get_token,
     list_bucket_tree,
     space_info,
@@ -314,15 +312,7 @@ def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
         upload_folder(repo_id=repo_id, repo_type="space", folder_path=str(dst), token=token)
 
 
-# Stages a Space can never recover from on its own — no point polling further.
-DEAD_SPACE_STAGES = {
-    SpaceStage.PAUSED, SpaceStage.BUILD_ERROR, SpaceStage.RUNTIME_ERROR,
-    SpaceStage.CONFIG_ERROR, SpaceStage.DELETING, SpaceStage.NO_APP_FILE,
-}
-
-
-def wait_healthy(url: str, path: str, repo_id: str, *, token: str | None = None,
-                  timeout_s: int = 600) -> bool:
+def wait_healthy(url: str, path: str, *, token: str | None = None, timeout_s: int = 600) -> bool:
     # `token` is needed for PRIVATE Spaces (the eval space): their *.hf.space
     # endpoint requires bearer auth.
     headers = {"Authorization": f"Bearer {token}"} if token else {}
@@ -334,18 +324,6 @@ def wait_healthy(url: str, path: str, repo_id: str, *, token: str | None = None,
                 return True
         except Exception:
             pass
-        try:
-            runtime = get_space_runtime(repo_id, token=token)
-        except Exception:
-            runtime = None
-        if runtime is not None and runtime.stage in DEAD_SPACE_STAGES:
-            err = runtime.raw.get("errorMessage") or "see the Space logs"
-            print(f"  {repo_id:9s} ✗ {runtime.stage}: {err}")
-            if "quota" in err.lower():
-                print("    the org has no Space quota for this hardware — add a payment "
-                      "method / check the org's Spaces settings, then re-run (the bootstrap "
-                      "is idempotent)")
-            return False
         time.sleep(10)
     return False
 
@@ -537,14 +515,14 @@ def main() -> int:
         print(f"eval space: https://huggingface.co/spaces/{sp['eval']} (private)")
     if not args.skip_wait:
         print("waiting for the Spaces to build (first build takes a few minutes)…")
-        checks = [("backend", backend_url, "/v1/healthz", None, sp["backend"]),
-                  ("dashboard", dashboard_url, "/api/health", None, sp["dashboard"])]
+        checks = [("backend", backend_url, "/v1/healthz", None),
+                  ("dashboard", dashboard_url, "/api/health", None)]
         if ver["mode"] == "eval-space":
-            checks.append(("eval", space_url(sp["eval"], token), "/healthz", token, sp["eval"]))
+            checks.append(("eval", space_url(sp["eval"], token), "/healthz", token))
         ok = True
-        for name, url, path, tok, repo_id in checks:
-            healthy = wait_healthy(url, path, repo_id, token=tok)
-            print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ TIMED OUT — check the Space logs'}")
+        for name, url, path, tok in checks:
+            healthy = wait_healthy(url, path, token=tok)
+            print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ not healthy — see above or check the Space logs'}")
             ok = ok and healthy
         if not ok:
             print()
