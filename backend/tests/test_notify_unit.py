@@ -93,3 +93,32 @@ def test_wake_from_foreign_thread():
         return result
 
     assert asyncio.run(scenario()) is True
+
+
+def test_mode_is_parked_within_the_window_then_poll():
+    """A plain read after a park keeps reporting parked until the parked stamp
+    is older than parked_window_s; stream always follows the latest read."""
+    now = [0.0]
+    n = Notifier(
+        max_waiters_per_owner=4,
+        max_waiters_total=256,
+        wake_spread_s=8.0,
+        wake_spread_threshold=20,
+        parked_window_s=110.0,
+        clock=lambda: now[0],
+    )
+    n.note_poll("a", "updates", parked=True)
+    now[0] = 50.0
+    n.note_poll("a", "digest", parked=False)
+    assert n.last_poll("a")[1:3] == ("parked", "digest")
+    now[0] = 111.0
+    assert n.last_poll("a")[1:3] == ("poll", "digest")
+
+
+def test_last_cursor_keeps_the_newest_of_sent_and_handed_out():
+    n = _notifier()
+    n.note_poll("a", "updates", parked=False, after="20260101-000000-000_x.md")
+    n.note_cursor("a", "20260102-000000-000_y.md")
+    n.note_poll("a", "updates", parked=False, after="20260101-000000-000_x.md")
+    n.note_cursor("a", None)
+    assert n.last_poll("a").last_cursor == "20260102-000000-000_y.md"

@@ -503,11 +503,11 @@ class DigestWatching(BaseModel):
     is watching, which is the signal that matters: a dead watcher is otherwise
     indistinguishable from a quiet inbox."""
     last_poll_age_s: int
-    mode: str  # parked (wait>0) | poll (wait=0 or a digest)
-    stream: str  # updates | inbox | feed | digest
-    # The newest `after=` cursor this handle sent, so an agent that lost its
-    # local state can resume with `watch.sh ... --after <it>`.
-    last_after: str | None = None
+    mode: str  # parked (a wait>0 poll within 2x the wait ceiling) | poll
+    stream: str  # updates | inbox | feed | digest (the most recent read)
+    # The newest cursor the server has handed this handle on the unified
+    # stream, or that it has sent; resume with `--after <last_cursor>`.
+    last_cursor: str | None = None
 
 
 class DigestResponse(BaseModel):

@@ -27,7 +27,7 @@
 #                  2s idle floor) — size N to fit your shell tool's timeout.
 #                  A server still unreachable when N is up exits 4, not 3.
 #   --after C      start from cursor C (a filename, e.g. the digest's
-#                  watching.last_after) instead of the saved one; C is written
+#                  watching.last_cursor) instead of the saved one; C is written
 #                  to the cursor file first. Wait and --exec modes only.
 #   --exec CMD     foreground loop: per delivery run CMD (via `sh -c`) with the
 #                  page on its stdin; the cursor advances ONLY when CMD exits 0.
