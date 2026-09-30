@@ -217,7 +217,7 @@
     /* Fixed layout lets the desc column truncate to a definite width
        instead of widening the column to fit long descriptions. */
     table-layout: fixed;
-    /* Fixed columns sum to 788px; min-width keeps ≥ ~170px for Description.
+    /* Fixed columns sum to 798px; min-width keeps ≥ ~170px for Description.
        Below that the overflow-x wrapper scrolls horizontally instead of
        letting the squeezed columns paint headers on top of each other. */
     min-width: 960px;
@@ -237,6 +237,7 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lb-table td.num { text-align: right; }
+  .lb-table td.date { white-space: nowrap; }
   .lb-table tr { border-bottom: 1px solid var(--border-soft); }
   .lb-table tbody tr:last-child { border-bottom: none; }
   .lb-table tbody tr:hover td { background: #fafafa; }
