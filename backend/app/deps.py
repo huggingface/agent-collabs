@@ -58,6 +58,7 @@ def get_notifier() -> Notifier:
         max_waiters_total=s.longpoll_max_waiters_total,
         wake_spread_s=s.longpoll_wake_spread_s,
         wake_spread_threshold=s.longpoll_wake_spread_threshold,
+        parked_window_s=2 * s.longpoll_max_wait_s,
     )
 
 

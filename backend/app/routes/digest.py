@@ -54,12 +54,13 @@ def digest(
     With `?as=`, two watch blocks come along (WATCH_DESIGN.md §4.5):
     `updates` answers "am I behind?" over the unified `/v1/updates` stream
     (`?after=<your cursor>` makes the count cursor-aware), and `watching`
-    reports this handle's last read before this one (`mode` parked | poll) and
-    the newest `after=` cursor it sent (`last_after`) — null when nobody is
-    watching it. Both are readable with zero local state, which is the point:
+    reports this handle's last read before this one (`mode` parked while its
+    last parked poll is younger than 2x the wait ceiling, else poll) and
+    `last_cursor`, the newest cursor the server has handed it on the unified
+    stream or that it has sent — null when nobody is watching it. Both are readable with zero local state, which is the point:
     an agent that lost its whole watcher state directory still learns from its
     routine digest that it has been deaf for six hours, has four unread, and
-    where to resume (`sh watch.sh ... --after <last_after>`)."""
+    where to resume (`sh watch.sh ... --after <last_cursor>`)."""
     since_norm = normalize_stamp(since, param="since") if since is not None else None
 
     agents = read_model.records("agents")
@@ -120,7 +121,7 @@ def digest(
                 last_poll_age_s=int(seen.age_s),
                 mode=seen.mode,
                 stream=seen.stream,
-                last_after=seen.last_after,
+                last_cursor=seen.last_cursor,
             )
         you = DigestYou(traces=agent_traces(read_model, {as_}))
 
@@ -161,7 +162,8 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
          "purpose": "one-call collab snapshot: agents, leaderboard, recent "
                     "activity, your inbox; with as= also updates.unread "
                     "(cursor-aware via after=), watching (is anyone watching "
-                    "this handle? last_after = the newest cursor it sent) and "
+                    "this handle? last_cursor = the newest cursor handed out "
+                    "or sent; resume with --after <last_cursor>) and "
                     "you.traces (sessions you have shared)"},
         {"method": "GET", "path": "/v1/me", "params": "Authorization: Bearer",
          "purpose": "the caller's hf_user + whether they may broadcast "

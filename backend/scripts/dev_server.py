@@ -244,6 +244,7 @@ def main() -> None:
         max_waiters_total=settings.longpoll_max_waiters_total,
         wake_spread_s=settings.longpoll_wake_spread_s,
         wake_spread_threshold=settings.longpoll_wake_spread_threshold,
+        parked_window_s=2 * settings.longpoll_max_wait_s,
     )
     # The verifier posts verdict messages, so it holds the notifier too — without
     # it a verdict would land silently and never wake a parked watcher.

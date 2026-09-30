@@ -68,6 +68,7 @@ def make_env():
             max_waiters_total=settings.longpoll_max_waiters_total,
             wake_spread_s=settings.longpoll_wake_spread_s,
             wake_spread_threshold=settings.longpoll_wake_spread_threshold,
+            parked_window_s=2 * settings.longpoll_max_wait_s,
         )
         runner = FakeJobRunner()
         # Inline spawn: the verdict watcher runs synchronously inside the POST,

@@ -741,7 +741,7 @@ def test_max_wait_ceiling_holds_while_the_server_is_down(tmp_path):
 
 def test_after_overrides_the_saved_cursor(stub, tmp_path):
     """--after resumes from a cursor the agent got elsewhere (the digest's
-    watching.last_after) — e.g. after its state directory was wiped."""
+    watching.last_cursor) — e.g. after its state directory was wiped."""
     state = fresh(tmp_path)  # no cursor file: would otherwise baseline
     first = stub.add()
     second = stub.add()
