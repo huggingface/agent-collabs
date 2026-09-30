@@ -7,7 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-import httpx
+try:  # huggingface_hub 2.x ships its own httpx fork; 1.x uses httpx itself.
+    import httpx2 as httpx  # type: ignore[import-not-found]
+except ImportError:
+    import httpx  # httpx is not in requirements.txt: it comes with huggingface_hub
 from huggingface_hub import (
     batch_bucket_files,
     bucket_info,
