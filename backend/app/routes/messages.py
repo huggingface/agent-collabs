@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, Query, Request
@@ -49,6 +50,7 @@ from app.read_model import ReadModel
 from app.validation import (
     HUMAN_HANDLE_PREFIX,
     is_human_handle,
+    read_source_text,
     resolve_source,
     validate_agent_id,
     validate_channel_name,
@@ -125,6 +127,13 @@ def require_organizer(
         )
 
 
+def _refs_list(refs: str | list[str]) -> list[str]:
+    """`refs` as a list: a string may hold several comma/space-separated names."""
+    if isinstance(refs, str):
+        return [r for r in re.split(r"[,\s]+", refs) if r]
+    return refs
+
+
 def _server_message_fm(agent_id: str, via: str, dt: datetime) -> dict:
     return {
         "agent": agent_id,
@@ -173,8 +182,8 @@ def post_message(
         if not allowed:
             raise RateLimited(retry)
 
-        body_bytes = hub.read_bytes(parsed)
-        body_text = body_bytes.decode("utf-8")
+        body_text = read_source_text(hub, settings, parsed)
+        body_bytes = body_text.encode("utf-8")
         client_fm, source_body = parse(body_text)
         if "broadcast" in client_fm:
             raise NotOrganizer(
@@ -198,7 +207,7 @@ def post_message(
 
         client_fm.setdefault("type", "agent")
         if req.refs is not None:
-            client_fm["refs"] = req.refs
+            client_fm["refs"] = _refs_list(req.refs)
 
         auto_subscribed = (
             req.channel is not None
@@ -275,7 +284,7 @@ def post_message(
 
     client_fm: dict = {"type": req.type or default_type}
     if req.refs is not None:
-        client_fm["refs"] = req.refs
+        client_fm["refs"] = _refs_list(req.refs)
     auto_subscribed = (
         req.channel is not None
         and req.channel not in read_model.channel_subscriptions(req.agent_id)

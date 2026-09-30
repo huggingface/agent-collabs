@@ -56,7 +56,12 @@ class NotRegistered(APIError):
 
 class SourceNotFound(APIError):
     def __init__(self, uri: str):
-        super().__init__(404, "SOURCE_NOT_FOUND", f"source not found: {uri}")
+        super().__init__(
+            404,
+            "SOURCE_NOT_FOUND",
+            f"source not found: {uri}",
+            f"upload the file to your bucket first: hf buckets cp <local> {uri}",
+        )
 
 
 class AgentIdTaken(APIError):
@@ -146,6 +151,18 @@ class BucketMissing(APIError):
         )
 
 
+class InvalidRequest(APIError):
+    def __init__(self, message: str):
+        super().__init__(
+            400, "INVALID_REQUEST", message, "GET /v1 lists every endpoint and its params"
+        )
+
+
+class TooLarge(APIError):
+    def __init__(self, message: str):
+        super().__init__(413, "TOO_LARGE", message)
+
+
 class SyncTooLarge(APIError):
     def __init__(self, message: str):
         super().__init__(413, "SYNC_TOO_LARGE", message)
@@ -218,3 +235,18 @@ class QuotaBackendUnavailable(APIError):
             "retry shortly",
         )
         self.headers = {"Retry-After": "30"}
+
+
+class StorageUnavailable(APIError):
+    def __init__(self, status: int | None = None) -> None:
+        if status and 400 <= status < 500 and status != 429:
+            # The Hub refused the Space's own token: a deployment problem, not
+            # a blip. Retrying will not help; the organizer has to look.
+            message = (
+                f"the storage backend rejected the request (HTTP {status}); "
+                "nothing was written; this is a deployment problem — tell the organizer"
+            )
+        else:
+            message = "the storage backend failed; nothing was written; retry in a few seconds"
+        super().__init__(503, "STORAGE_UNAVAILABLE", message)
+        self.headers = {"Retry-After": "5"}

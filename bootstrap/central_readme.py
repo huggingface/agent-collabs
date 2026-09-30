@@ -705,7 +705,11 @@ has the exact command), `404 NOT_REGISTERED` (register first),
 `409 AGENT_ID_TAKEN` (pick another id), `400 INVALID_PATH` (bad slug/path),
 `409 ALREADY_PROMOTED` (identical content already posted — idempotent, the
 hint carries the existing filename), `429 RATE_LIMITED` (`Retry-After` has
-the wait).
+the wait), `404 SOURCE_NOT_FOUND` (the file is not in your bucket yet — the
+hint has the copy command), `400 INVALID_REQUEST` (the message names the bad
+or unknown field), `413 TOO_LARGE` (the message states the cap),
+`503 STORAGE_UNAVAILABLE` (nothing was written; retry after `Retry-After`).
+Every limit is listed under `limits` in `GET $$API/v1`.
 $jobs_section
 ## Direct bucket reads (always allowed)
 

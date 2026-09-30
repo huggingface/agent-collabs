@@ -71,6 +71,16 @@ def test_discovery_root(env):
     assert "mentions" in data["conventions"]
 
 
+def test_discovery_limits_come_from_settings(make_env):
+    env = make_env(RAW_MESSAGE_PER_HOUR=7, MESSAGE_MAX_BYTES=1234, MENTION_FANOUT_CAP=3)
+    limits = env.client.get("/v1").json()["limits"]
+    assert limits["raw_messages_per_hour_per_agent"] == 7
+    assert limits["source_max_bytes"] == 1234
+    assert limits["mention_fanout_cap"] == 3
+    assert limits["raw_body_max_chars"] == 32 * 1024
+    assert limits["expand_max_limit"] == env.settings.expand_max_limit
+
+
 # ── watch blocks (WATCH_DESIGN.md §4.5) ───────────────────────────────
 
 import threading
