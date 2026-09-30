@@ -817,3 +817,40 @@ def test_scan_accepts_placeholder_url_credentials_only():
     assert st.scan_upload({"t": clean})[0] == []
     hits, _ = st.scan_upload({"t": "curl https://<REDACTED:USERNAME_1>:hunter2@db.example/app"})
     assert [(h["category"], h["masked"]) for h in hits] == [("PASSWORD", "...(7 chars)")]
+
+
+def _cc_line(mid, tokens, *, tool=None, ts="2026-06-29T00:00:00Z"):
+    content = [tool] if tool else [{"type": "text"}]
+    msg = {"id": mid, "model": "m", "content": content,
+           "usage": {"input_tokens": tokens, "output_tokens": 0}}
+    return json.dumps({"type": "assistant", "sessionId": "s", "timestamp": ts, "message": msg})
+
+
+def test_claude_code_counts_subagent_logs(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text(_cc_line("m1", 100, ts="2026-06-29T01:00:00Z") + "\n")
+    subs = tmp_path / "s" / "subagents"
+    subs.mkdir(parents=True)
+    bash = {"type": "tool_use", "id": "tu1", "name": "Bash"}
+    (subs / "agent-a.jsonl").write_text("\n".join([
+        _cc_line("a1", 10, tool=bash, ts="2026-06-29T00:30:00Z"),
+        _cc_line("a1", 10, tool=bash),  # same response, written twice
+        _cc_line("a2", 20),
+    ]) + "\n")
+    (subs / "agent-b.jsonl").write_text(_cc_line("b1", 5, ts="2026-06-29T02:00:00Z") + "\n")
+    (subs / "agent-b.meta.json").write_text('{"agentType": "Explore"}')
+
+    fields = st.adapter_claude_code(main)
+    assert fields["usage"]["total_tokens"] == 135
+    assert fields["activity"]["tool_calls_by_name"] == {"Bash": 1}
+    assert fields["extensions"] == {"api_requests": 4, "subagent_sessions": 2, "subagent_tokens": 35}
+    assert (fields["started_at"], fields["ended_at"]) == ("2026-06-29T00:30:00Z", "2026-06-29T02:00:00Z")
+    assert fields["session_id"] == "s"
+
+
+def test_claude_code_without_subagents_is_unchanged(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text(_cc_line("m1", 100) + "\n")
+    fields = st.adapter_claude_code(main)
+    assert fields["usage"]["total_tokens"] == 100
+    assert fields["extensions"] == {"api_requests": 1}
