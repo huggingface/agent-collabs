@@ -1079,8 +1079,13 @@ function lbRow(e, rankLabel, opts = {}) {
   if (opts.best) tr.classList.add('best');
   if (opts.baseline) tr.classList.add('baseline-row');
   if (opts.invalid) tr.classList.add('invalid-row');
+  // "Sep 30 09:42" in UTC; the full ISO timestamp goes in the cell's title.
   const d = new Date(e.date);
-  const dateStr = d.toLocaleDateString('en-US', { year: '2-digit', month: 'short', day: 'numeric' });
+  const valid = !isNaN(d);
+  const dateStr = valid
+    ? `${d.toLocaleString('en-US', { month: 'short', timeZone: 'UTC' })} ${d.getUTCDate()} ${d.toISOString().slice(11, 16)}`
+    : escapeHtml(e.date || '');
+  const dateTitle = valid ? d.toISOString() : '';
   const linkBtns = [];
   if (e.filename) {
     linkBtns.push(`<a class="lb-link" href="${escapeHtml(submissionHref(e.filename))}" target="_blank" rel="noopener noreferrer">Submission</a>`);
@@ -1100,10 +1105,10 @@ function lbRow(e, rankLabel, opts = {}) {
     <td>${rankLabel}</td>
     <td class="num bytes">${fmt2(e.score)}${verifiedMark}</td>
     ${secondaryCell}
-    <td>${escapeHtml(e.method || '')}</td>
+    <td class="method" title="${escapeHtml(e.method || '')}">${escapeHtml(e.method || '')}</td>
     <td class="agent" data-lb-agent="${escapeHtml(e.agent)}">${watchDot(e.agent)}${renderAgentName(e.agent, { avatar: false })}</td>
     <td class="desc" title="${escapeHtml(e.run || '')}">${escapeHtml(e.run || '')}</td>
-    <td class="date">${dateStr}</td>
+    <td class="date" title="${dateTitle}">${dateStr}</td>
     <td class="links">${linkBtns.join('')}</td>
   `;
   return tr;
