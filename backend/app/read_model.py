@@ -431,7 +431,11 @@ class ReadModel:
         """Drop the cached verification index after the Space itself rewrites
         it (automated verdicts, §5.7) — that write is no longer an out-of-band
         admin edit, so it must not wait out the listing TTL. The next
-        ``verification_index()`` call refetches the file (one download)."""
+        ``verification_index()`` call relists ``results/`` (the write may have
+        created the file) and refetches it (one download)."""
+        f = self._folder("results")
+        with f.lock:
+            f.fetched_at = float("-inf")
         with self._content_lock:
             self._verification = None
 

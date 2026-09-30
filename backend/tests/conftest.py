@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from app.announce import reset_stamp_guard
 from app.audit import AuditLogger
 from app.config import Settings
-from app.dedup import PromotionLRU
+from app.dedup import PromotionLRU, RecentPosts
 from app.deps import (
     get_audit,
     get_bucket_write_limiter,
@@ -18,6 +18,7 @@ from app.deps import (
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
+    get_recent_posts,
     get_registration_limiter,
     get_settings_dep,
     get_verification_status,
@@ -56,6 +57,7 @@ def make_env():
         # One LRU per env, like production's process-wide singleton — a
         # per-request instance would make cross-request dedup untestable.
         dedup = PromotionLRU(10_000)
+        recent_posts = RecentPosts(10_000)
         verification = VerificationStatusStore(
             hub, runs_prefix=settings.verification_runs_prefix
         )
@@ -88,6 +90,7 @@ def make_env():
                 get_org_roles: lambda: OrgRoles(hub, settings),
                 get_audit: lambda: AuditLogger(hub),
                 get_dedup: lambda: dedup,
+                get_recent_posts: lambda: recent_posts,
                 get_verification_status: lambda: verification,
                 get_verifier: lambda: verifier,
                 get_bucket_write_limiter: generous,

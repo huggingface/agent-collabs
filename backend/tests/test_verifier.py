@@ -302,7 +302,7 @@ def test_non_sota_post_does_not_launch(venv):
     venv.hub.seed("results/verification_status.json", json.dumps({champ: "valid"}))
     filename = post_result(venv, score=200.0)
     assert venv.runner.launches == []
-    assert central_index(venv)[filename] == "pending"
+    assert filename not in central_index(venv)  # absent = pending
 
 
 def test_invalid_verdict_announced_with_failing_check(venv):
@@ -321,7 +321,7 @@ def test_unresolvable_submission_nudges_and_stays_pending(venv):
     seed_agent(venv.hub, "agent-1")
     filename = post_result(venv, score=200.0, artifacts="nowhere/")
     assert venv.runner.launches == []
-    assert central_index(venv)[filename] == "pending"
+    assert filename not in central_index(venv)  # absent = pending
     msgs = venv.client.get("/v1/messages?expand=true&limit=1").json()["items"]
     assert msgs and "couldn't" in msgs[0]["body"] and "runnable submission" in msgs[0]["body"]
 
@@ -332,7 +332,7 @@ def test_failed_job_leaves_pending_no_announcement(venv):
     venv.runner.terminal = ("error", "ERROR", "boom")
     filename = post_result(venv, score=200.0)
     assert len(venv.runner.launches) == 1
-    assert central_index(venv)[filename] == "pending"
+    assert filename not in central_index(venv)  # absent = pending
     assert venv.client.get("/v1/messages").json()["items"] == []
     # single-flight marker released → a later event may retry
     assert filename not in venv.verifier._in_flight

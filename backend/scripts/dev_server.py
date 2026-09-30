@@ -33,12 +33,13 @@ os.environ.setdefault("RAW_MESSAGE_PER_HOUR", "1000")
 
 from app.audit import AuditLogger                      # noqa: E402
 from app.config import Settings                        # noqa: E402
-from app.dedup import PromotionLRU                     # noqa: E402
+from app.dedup import PromotionLRU, RecentPosts        # noqa: E402
 from app.deps import (                                 # noqa: E402
     bucket_write_limiter,
     get_audit,
     get_bucket_write_limiter,
     get_dedup,
+    get_recent_posts,
     get_hub,
     get_notifier,
     get_org_roles,
@@ -135,10 +136,6 @@ class PersistentFakeHub(FakeHub):
     def write_bytes_to_bucket(self, bucket: str, path: str, data: bytes) -> None:
         super().write_bytes_to_bucket(bucket, path, data)
         self._persist(bucket, path)
-
-    def append_jsonl_audit(self, path: str, line: str) -> None:
-        super().append_jsonl_audit(path, line)
-        self._persist(self._settings.audit_bucket, path)
 
     def write_bytes_audit(self, path: str, data: bytes) -> None:
         super().write_bytes_audit(path, data)
@@ -237,6 +234,7 @@ def main() -> None:
 
     read_model = ReadModel(hub, settings)
     dedup = PromotionLRU(settings.dedup_lru_size)
+    recent_posts = RecentPosts(settings.dedup_lru_size)
     verification = VerificationStatusStore(hub, runs_prefix=settings.verification_runs_prefix)
     # Every singleton in app/deps.py reads the env-backed settings, so each one
     # this Settings() must reach needs an override below — the notifier included,
@@ -260,6 +258,7 @@ def main() -> None:
         get_org_roles: lambda: OrgRoles(hub, settings),
         get_audit: lambda: AuditLogger(hub),
         get_dedup: lambda: dedup,
+        get_recent_posts: lambda: recent_posts,
         get_verification_status: lambda: verification,
         get_verifier: lambda: verifier,
         # Real (env-tunable) production limiter shapes — the point of the
