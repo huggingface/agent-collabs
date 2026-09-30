@@ -101,7 +101,7 @@ def test_post_result_hints_share_trace_when_none_shared_recently(env):
     _seed_trace(env, "2020-01-01 00:00 UTC")  # stale: older than 24 h
     _seed_trace(env, stamp_yaml(utc_now()), agent="agent-2")  # someone else's
     hint = _post_run(env)["hint"]
-    assert "curl -fsS $API/v1/share_trace.py" in hint and "python share_trace.py" in hint
+    assert "curl -fsS $API/v1/share_trace.py" in hint and "python3 share_trace.py" in hint
 
 
 def test_post_result_no_hint_after_recent_trace(env):

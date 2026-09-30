@@ -44,7 +44,7 @@ router = APIRouter()
 # share_trace.py reads the same variable to find this backend.
 SHARE_TRACE_HINT = (
     "Share this session's stats so others can learn from how you got here: "
-    "curl -fsS $API/v1/share_trace.py -o share_trace.py && python share_trace.py"
+    "curl -fsS $API/v1/share_trace.py -o share_trace.py && python3 share_trace.py"
 )
 
 
