@@ -82,7 +82,16 @@ the caller is in `ORG`, the Space creates `{ORG}/{COLLAB_SLUG}-{agent_id}` and
 writes its handshake **with the caller's token**, never the admin token, so
 the caller is the bucket's creator and the ACL above holds unchanged. If the
 bucket already exists, a handshake write with the caller's token succeeding is
-itself proof of ownership; a Hub 403 means the bucket is someone else's.
+itself proof of ownership; a Hub 403 means the bucket is someone else's. The
+write happens even when the handshake already names the caller: handshake text
+alone proves nothing, since anyone can create a bucket and write a victim's
+username into it. A handshake naming another user is that user's claim and is
+never overwritten, even by a caller (an org admin) whose token could. The
+registration and handshake reads distinguish a missing file from a failed
+read; a failed read returns `503` before anything is created or written, so a
+Hub blip cannot make a live identity look unclaimed. The caller's token is used
+only for these Hub calls during the request: it is never stored, logged, or
+echoed in an error.
 
 Org admins can write every contributor's bucket, so an organizer could forge
 authorship; that is acceptable (organizers already control the Space) and is

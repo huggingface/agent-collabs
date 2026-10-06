@@ -71,7 +71,8 @@ class BucketCreateForbidden(APIError):
             "BUCKET_CREATE_FORBIDDEN",
             f"your token could not create the scratch bucket '{bucket}'",
             "you need the contributor role in the org and a token that can "
-            "write (a read-only token cannot)",
+            "write (a read-only token cannot): run `hf auth login --force` "
+            "and log in through the browser",
         )
 
 

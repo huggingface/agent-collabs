@@ -274,12 +274,24 @@ class HubClient:
         a storage blip: skip the update rather than overwrite a live file with a
         fresh, near-empty one. Mirrors ``read_audit_bytes`` for the central bucket.
         """
+        return self._download_optional(self._settings.central_bucket, target_path)
+
+    def read_text_optional(self, uri: SourceURI | str) -> str | None:
+        """``read_central_bytes_optional`` for any bucket: None only when the
+        file is genuinely missing; any other failure propagates."""
+        parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
+        if parsed is None:
+            raise ValueError(f"invalid source URI: {uri}")
+        data = self._download_optional(f"{parsed.org}/{parsed.bucket}", parsed.path)
+        return None if data is None else data.decode("utf-8")
+
+    def _download_optional(self, bucket: str, remote_path: str) -> bytes | None:
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "f"
             try:
                 download_bucket_files(
-                    bucket_id=self._settings.central_bucket,
-                    files=[(target_path, str(local))],
+                    bucket_id=bucket,
+                    files=[(remote_path, str(local))],
                     raise_on_missing_files=True,
                     token=self._token,
                 )

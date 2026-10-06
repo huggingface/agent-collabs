@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from huggingface_hub.errors import HfHubHTTPError
+from huggingface_hub.errors import EntryNotFoundError, HfHubHTTPError
 
 import app.hub as hub_module
 from app.deps import get_registration_limiter
@@ -83,10 +83,112 @@ def test_fresh_registration_provisions_bucket_with_caller_token(env):
     assert env.hub.buckets[bucket][".bucket-sync-handshake"] == b"test-user"
 
 
-def test_matching_handshake_needs_no_writes(env):
-    env.hub.seed(".bucket-sync-handshake", "test-user", bucket="test-org/test-agent-9")
+BUCKET = "test-org/test-agent-9"
+HANDSHAKE = ".bucket-sync-handshake"
+
+
+def test_matching_handshake_is_still_proved_by_a_caller_write(env):
+    env.hub.seed(HANDSHAKE, "test-user", bucket=BUCKET)
+    env.hub.bucket_owners[BUCKET] = "test-user"
     assert _register(env).status_code == 201
-    assert env.hub.created_buckets == [] and env.hub.caller_writes == []
+    assert env.hub.created_buckets == []
+    assert env.hub.caller_writes == [(BUCKET, HANDSHAKE, "hf_caller")]
+
+
+def test_handshake_planted_in_someone_elses_bucket_is_refused(env):
+    # An attacker pre-creates the bucket a victim will register and writes the
+    # victim's public username into it. Matching text is not proof: the
+    # victim's token cannot write there, so registration must refuse.
+    env.hub.seed(HANDSHAKE, "test-user", bucket=BUCKET)
+    env.hub.bucket_owners[BUCKET] = "attacker"
+    r = _register(env)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "BUCKET_NOT_YOURS"
+    assert env.hub.caller_writes == []
+    assert env.client.get("/v1/agents").json()["count"] == 0
+
+
+def _victim_state(env):
+    """Victim's registration of agent-9 and the handshake in its bucket."""
+    seed_agent(env.hub, "agent-9", hf_user="victim")
+    env.hub.seed(HANDSHAKE, "victim", bucket=BUCKET)
+    env.hub.bucket_owners[BUCKET] = "victim"
+    env.hub.caller_is_org_admin = True  # the caller could write anywhere
+    return dict(env.hub.buckets[env.settings.central_bucket]), dict(env.hub.buckets[BUCKET])
+
+
+def _assert_untouched(env, before):
+    central, bucket = before
+    assert env.hub.buckets[env.settings.central_bucket] == central
+    assert env.hub.buckets[BUCKET] == bucket
+    assert env.hub.caller_writes == [] and env.hub.created_buckets == []
+
+
+def test_registration_read_outage_aborts_before_provisioning(env):
+    before = _victim_state(env)
+    env.hub.failing_reads.add("agents/agent-9.md")
+    r = _register(env, force=True)
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "HUB_UNAVAILABLE"
+    _assert_untouched(env, before)
+
+
+def test_handshake_read_outage_aborts_before_writing(env):
+    before = _victim_state(env)
+    env.hub.buckets[env.settings.central_bucket].pop("agents/agent-9.md")
+    before = (dict(env.hub.buckets[env.settings.central_bucket]), before[1])
+    env.hub.failing_reads.add(f"{BUCKET}/{HANDSHAKE}")
+    r = _register(env)
+    assert r.status_code == 503
+    _assert_untouched(env, before)
+
+
+def test_foreign_handshake_blocks_even_a_caller_who_could_write(env):
+    # An unregistered bucket whose handshake names another user is theirs; an
+    # org admin's token could overwrite it, but registration must not.
+    before = _victim_state(env)
+    env.hub.buckets[env.settings.central_bucket].pop("agents/agent-9.md")
+    before = (dict(env.hub.buckets[env.settings.central_bucket]), before[1])
+    r = _register(env)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "BUCKET_NOT_YOURS"
+    assert "victim" in r.json()["error"]["message"]
+    _assert_untouched(env, before)
+
+
+SECRET = "hf_SECRETtokenDoNotLeak123"
+
+
+def test_caller_token_never_reaches_responses_or_logs(env, monkeypatch, caplog):
+    caplog.set_level("DEBUG")
+    headers = {"authorization": f"Bearer {SECRET}"}
+    body = {"agent_id": "agent-9", "model": "m", "harness": "h", "tools": []}
+    post = lambda: env.client.post("/v1/agents/register", json=body, headers=headers)
+    texts = []
+
+    env.hub.whoami_fails = True                               # 401
+    texts.append(post()); env.hub.whoami_fails = False
+    env.hub.whoami_orgs = set()                               # 403 NOT_ORG_MEMBER
+    texts.append(post()); env.hub.whoami_orgs = {env.settings.org}
+    env.hub.failing_reads.add("agents/agent-9.md")            # 503 lookup outage
+    texts.append(post()); env.hub.failing_reads.clear()
+
+    def forbid(bucket, token):
+        raise PermissionError(f"403 for token {token}")
+    monkeypatch.setattr(env.hub, "create_bucket_as", forbid)  # 403 BUCKET_CREATE_FORBIDDEN
+    texts.append(post()); monkeypatch.undo()
+    env.hub.seed(HANDSHAKE, "test-user", bucket=BUCKET)       # 403 BUCKET_NOT_YOURS
+    env.hub.bucket_owners[BUCKET] = "attacker"
+    texts.append(post())
+    env.hub.bucket_owners[BUCKET] = "test-user"               # 201, audited
+    texts.append(post())
+
+    assert [r.status_code for r in texts] == [401, 403, 503, 403, 403, 201]
+    for r in texts:
+        assert SECRET not in r.text
+    assert SECRET not in caplog.text
+    audit = b"".join(env.hub.buckets[env.settings.audit_bucket].values())
+    assert SECRET.encode() not in audit
 
 
 def test_own_bucket_without_handshake_gets_one(env):
@@ -191,3 +293,22 @@ def test_transient_bucket_check_is_503(env, monkeypatch):
     r = _register(env)
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "HUB_UNAVAILABLE"
+
+
+def test_optional_reads_map_only_missing_entries_to_none(env, monkeypatch):
+    client = hub_module.HubClient(env.settings)
+
+    def missing(**k):
+        raise EntryNotFoundError("no such file")
+
+    def outage(**k):
+        raise _hub_error(500)
+
+    monkeypatch.setattr(hub_module, "download_bucket_files", missing)
+    assert client.read_text_optional("hf://buckets/test-org/test-agent-9/.bucket-sync-handshake") is None
+    assert client.read_central_bytes_optional("agents/agent-9.md") is None
+    monkeypatch.setattr(hub_module, "download_bucket_files", outage)
+    with pytest.raises(HfHubHTTPError):
+        client.read_text_optional("hf://buckets/test-org/test-agent-9/.bucket-sync-handshake")
+    with pytest.raises(HfHubHTTPError):
+        client.read_central_bytes_optional("agents/agent-9.md")
