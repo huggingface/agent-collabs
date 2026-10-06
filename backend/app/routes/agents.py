@@ -53,6 +53,12 @@ from app.validation import (
 
 log = logging.getLogger(__name__)
 
+def _log_read_failure(op: str, agent_id: str, e: Exception) -> None:
+    """Structured fields only: exception text can carry signed URLs or Xet
+    credentials, so it never reaches the log."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    log.warning("register %s: %s failed (type=%s status=%s)", agent_id, op, type(e).__name__, status)
+
 router = APIRouter()
 
 
@@ -109,8 +115,7 @@ def register(
     try:
         existing_bytes = hub.read_central_bytes_optional(target)
     except Exception as e:
-        # The type only: an exception's text may carry request details.
-        log.warning("register %s: registration lookup failed (%s)", agent_id, type(e).__name__)
+        _log_read_failure("registration lookup", agent_id, e)
         raise HubUnavailable()
     existing_text = existing_bytes.decode("utf-8") if existing_bytes is not None else None
 
@@ -149,7 +154,7 @@ def register(
             try:
                 handshake = hub.read_text_optional(handshake_uri)
             except Exception as e:
-                log.warning("register %s: handshake read failed (%s)", agent_id, type(e).__name__)
+                _log_read_failure("handshake read", agent_id, e)
                 raise HubUnavailable()
             if handshake is not None and handshake.strip() != creator:
                 raise BucketNotYours(

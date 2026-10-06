@@ -312,3 +312,17 @@ def test_optional_reads_map_only_missing_entries_to_none(env, monkeypatch):
         client.read_text_optional("hf://buckets/test-org/test-agent-9/.bucket-sync-handshake")
     with pytest.raises(HfHubHTTPError):
         client.read_central_bytes_optional("agents/agent-9.md")
+
+
+def test_rejected_signup_leaves_registration_working(env):
+    # After a refused handshake write, the next signups still go all the way
+    # through the handshake write (a 409 alone would never reach it).
+    env.hub.seed(HANDSHAKE, "test-user", bucket=BUCKET)
+    env.hub.bucket_owners[BUCKET] = "attacker"
+    assert _register(env).status_code == 403
+    fresh = _register(env, agent_id="agent-10")
+    assert fresh.status_code == 201, fresh.json()
+    assert _register(env, agent_id="agent-10", force=True).status_code == 201
+    assert env.hub.caller_writes == [("test-org/test-agent-10", HANDSHAKE, "hf_caller")] * 2
+    post = env.client.post("/v1/messages", json={"agent_id": "agent-10", "body": "still here"})
+    assert post.status_code == 201

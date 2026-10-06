@@ -1,8 +1,13 @@
 """Wrapper over huggingface_hub's bucket API."""
 from __future__ import annotations
 
+import json
 import logging
+import os
+import subprocess
+import sys
 import tempfile
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -27,6 +32,7 @@ from huggingface_hub.errors import (
 )
 from huggingface_hub.utils import build_hf_headers, get_session
 
+from app.caller_write import classify as classify_caller_write_error
 from app.config import Settings
 from app.naming import SourceURI, parse_source_uri
 
@@ -71,12 +77,68 @@ def _transient(e: Exception) -> bool:
 
 
 def _raise_caller_write_error(e: Exception) -> None:
-    """A write refused for a caller's token raises PermissionError; an outage
-    raises HubUnreachable; anything else returns for the caller to re-raise."""
-    if _status(e) in (401, 403):
-        raise PermissionError(str(e)) from e
-    if _transient(e):
-        raise HubUnreachable(str(e)) from e
+    """A Hub call refused for a caller's token raises PermissionError; an
+    outage raises HubUnreachable; anything else returns for the caller to
+    re-raise. Uses the caller-write child's classifier, so a refusal is only
+    ever an explicit 401/403."""
+    if classify_caller_write_error(e)["result"] == "forbidden":
+        raise PermissionError(f"the caller's token was refused (HTTP {_status(e) or '401/403'})") from e
+    if isinstance(e, ConnectionError) or _transient(e):
+        raise HubUnreachable(type(e).__name__) from e
+
+
+# ── Caller-token bucket writes run in a child process (see app/caller_write.py)
+_CALLER_WRITE_CMD = [sys.executable, "-m", "app.caller_write"]
+_CALLER_WRITE_CWD = Path(__file__).resolve().parent.parent  # the dir holding app/
+CALLER_WRITE_TIMEOUT_S = 60.0
+# Registration is limited to a few per minute per user, so a handful of slots
+# is plenty; a request that cannot get one in time gets a 503, not a pile-up.
+CALLER_WRITE_SLOTS = threading.BoundedSemaphore(4)
+CALLER_WRITE_SLOT_WAIT_S = 20.0
+_ADMIN_TOKEN_VARS = ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACEHUB_API_TOKEN")
+
+
+def _caller_write_env() -> dict[str, str]:
+    """The Space's environment minus its admin credential: the child acts only
+    with the token it is handed on stdin."""
+    env = {k: v for k, v in os.environ.items() if k not in _ADMIN_TOKEN_VARS}
+    env["HF_TOKEN_PATH"] = os.devnull  # no fallback to a stored token file
+    env["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
+    return env
+
+
+def _run_caller_write(bucket: str, path: str, text: str, token: str) -> dict:
+    """Run one caller-token write in a child and return its structured result.
+    Timeouts, crashes and unreadable output come back as "failed"."""
+    if not CALLER_WRITE_SLOTS.acquire(timeout=CALLER_WRITE_SLOT_WAIT_S):
+        log.warning("caller write: no free slot (bucket=%s)", bucket)
+        return {"result": "failed", "type": "NoSlot", "status": None}
+    try:
+        try:
+            proc = subprocess.run(
+                _CALLER_WRITE_CMD,
+                input=json.dumps({"token": token, "bucket": bucket, "path": path, "text": text}),
+                capture_output=True, text=True, timeout=CALLER_WRITE_TIMEOUT_S,
+                cwd=_CALLER_WRITE_CWD, env=_caller_write_env(),
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("caller write: timed out after %ss (bucket=%s)", CALLER_WRITE_TIMEOUT_S, bucket)
+            return {"result": "failed", "type": "Timeout", "status": None}
+    finally:
+        CALLER_WRITE_SLOTS.release()
+    # The child's stderr is never logged: only its size, for diagnosis.
+    lines = proc.stdout.strip().splitlines()
+    try:
+        result = json.loads(lines[-1])
+        if result.get("result") not in ("ok", "forbidden", "failed"):
+            raise ValueError
+    except (IndexError, ValueError, AttributeError):
+        log.warning(
+            "caller write: no result from child (bucket=%s exit=%s stderr_bytes=%d)",
+            bucket, proc.returncode, len(proc.stderr or ""),
+        )
+        return {"result": "failed", "type": "ChildCrashed", "status": None}
+    return result
 
 
 class HubClient:
@@ -108,18 +170,43 @@ class HubClient:
         Raises PermissionError if the token may not create it."""
         try:
             create_bucket(bucket, exist_ok=True, token=token)
-        except (HfHubHTTPError, httpx.TransportError) as e:
+        except (HfHubHTTPError, httpx.TransportError, ConnectionError) as e:
             _raise_caller_write_error(e)
             raise
 
+    def caller_may_write(self, bucket: str, token: str) -> bool | None:
+        """Ask the Hub for a bucket write token with the caller's token, over
+        plain HTTP (the request batch_bucket_files makes first). False on
+        401/403, True on success, None when it can't tell. Only a pre-check
+        for clean errors: the write itself remains the ownership proof. The
+        response carries a Xet access token, so only its status is read."""
+        url = f"{ENDPOINT}/api/buckets/{bucket}/xet-write-token"
+        try:
+            resp = get_session().get(url, headers=build_hf_headers(token=token), timeout=10)
+        except Exception as e:
+            log.warning("caller write pre-check failed (bucket=%s type=%s)", bucket, type(e).__name__)
+            return None
+        if resp.status_code in (401, 403):
+            return False
+        return True if 200 <= resp.status_code < 300 else None
+
     def write_text_as(self, bucket: str, path: str, text: str, token: str) -> None:
         """Write one file with the caller's token. Raises PermissionError when
-        the Hub refuses (the bucket is not the caller's)."""
-        try:
-            batch_bucket_files(bucket_id=bucket, add=[(text.encode("utf-8"), path)], token=token)
-        except (HfHubHTTPError, httpx.TransportError) as e:
-            _raise_caller_write_error(e)
-            raise
+        the Hub refuses (the bucket is not the caller's), HubUnreachable for
+        anything else. The upload runs in a child process: a refused Xet
+        upload poisons the process-wide Xet session (app/caller_write.py)."""
+        if self.caller_may_write(bucket, token) is False:
+            raise PermissionError(f"the caller's token may not write {bucket}")
+        result = _run_caller_write(bucket, path, text, token)
+        if result["result"] == "ok":
+            return
+        if result["result"] == "forbidden":
+            raise PermissionError(f"the caller's token may not write {bucket} (HTTP {result.get('status')})")
+        log.warning(
+            "caller write failed (bucket=%s type=%s status=%s)",
+            bucket, result.get("type"), result.get("status"),
+        )
+        raise HubUnreachable(f"caller write to {bucket} failed")
 
     def bucket_author(self, bucket: str) -> str | None:
         """Return the `author` field from BucketInfo (the org name for org buckets).

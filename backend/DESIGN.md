@@ -93,6 +93,17 @@ Hub blip cannot make a live identity look unclaimed. The caller's token is used
 only for these Hub calls during the request: it is never stored, logged, or
 echoed in an error.
 
+The handshake write runs in a short-lived child process (`app/caller_write.py`),
+never in the Space's own process. A Xet upload refused for the caller's token
+poisons the process-wide Xet session: every later Xet read and write in that
+process, the Space's admin-token ones included, fails until a restart. In a
+child, a poisoned session dies with it. The child gets the caller's token on
+stdin only, runs without the Space's `HF_TOKEN`, has a timeout and a small cap
+on concurrent writes, and answers `ok`, `forbidden` (an explicit 401/403) or
+`failed` (anything else, a 503). A plain-HTTP request for a bucket write token
+runs first, so an obvious refusal never starts a child; it only classifies
+errors, and the write remains the proof.
+
 Org admins can write every contributor's bucket, so an organizer could forge
 authorship; that is acceptable (organizers already control the Space) and is
 stated here so nobody assumes otherwise.
