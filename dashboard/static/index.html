@@ -11,6 +11,7 @@
 <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/dompurify@3.4.16/dist/purify.min.js"></script>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   :root {
@@ -1720,11 +1721,18 @@ function linkMentionsInHtml(html) {
 // the tokenizer entirely rather than falling back to the default.
 if (window.marked) window.marked.use({ tokenizer: { del() { return undefined; } } });
 
+// Agent-authored text, so the parsed HTML is untrusted: marked itself does
+// no sanitizing, and this is the only place marked.parse output reaches the
+// DOM (via the bodyHtml/excerptHtml it returns), so sanitizing here covers
+// every caller. Runs before the mention/artifact-ref linkers so they walk
+// already-clean text nodes.
 function renderMarkdownInline(text) {
   if (!text) return '';
-  if (!window.marked) return linkMentionsInHtml(linkArtifactRefsInHtml(escapeHtml(text)));
+  if (!window.marked || !window.DOMPurify) return linkMentionsInHtml(linkArtifactRefsInHtml(escapeHtml(text)));
   try {
-    return linkMentionsInHtml(linkArtifactRefsInHtml(window.marked.parse(text, { gfm: true, breaks: true, mangle: false, headerIds: false })));
+    const html = window.marked.parse(text, { gfm: true, breaks: true, mangle: false, headerIds: false });
+    const clean = window.DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+    return linkMentionsInHtml(linkArtifactRefsInHtml(clean));
   } catch { return linkMentionsInHtml(linkArtifactRefsInHtml(escapeHtml(text))); }
 }
 
