@@ -52,17 +52,28 @@ const isBetter = (a, b) => CFG.score_order === 'asc' ? a < b : a > b;
 // Array.sort comparator: best score first.
 const cmpBestFirst = (a, b) => CFG.score_order === 'asc' ? a.score - b.score : b.score - a.score;
 const isBaselineEntry = e => e.status === 'baseline' || e.agent === 'baseline';
+// Server stamp of a result file ("20260930-091647-143" in
+// "20260930-091647-143_agent.md"): sorts chronologically as a string.
+const resultStamp = e => (e.filename || '').split('_')[0];
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+// Table order, same as GET /v1/leaderboard: score, then the earlier server
+// stamp (achieved it first), then agent id — so ties never depend on the
+// order entries happened to arrive in.
+const cmpTableOrder = (a, b) =>
+  cmpBestFirst(a, b) || cmp(resultStamp(a), resultStamp(b)) || cmp(a.agent, b.agent);
 // Collapses a list to each agent's single best entry, mirroring the backend's
-// `best_per_agent` (GET /v1/leaderboard): ties go to whichever entry was
-// filed first (earlier filename = earlier server stamp). Baselines are
-// reference rows, not agents, so every baseline entry always stays.
+// `best_per_agent`: only agent-run results are eligible (a failed experiment
+// or a baseline is never an agent's best), and ties go to the earlier stamp.
+// Baselines are reference rows, not agents, so every baseline entry stays.
 function bestPerAgent(list) {
   const best = new Map();
   const out = [];
   for (const e of list) {
     if (isBaselineEntry(e)) { out.push(e); continue; }
+    if (e.status !== 'agent-run') continue;
     const cur = best.get(e.agent);
-    if (!cur || isBetter(e.score, cur.score) || (e.score === cur.score && e.filename < cur.filename)) {
+    if (!cur || isBetter(e.score, cur.score)
+        || (e.score === cur.score && resultStamp(e) < resultStamp(cur))) {
       best.set(e.agent, e);
     }
   }
@@ -1152,15 +1163,16 @@ let lbExpanded = false;
 const lbVerifiedOnly = document.getElementById('lbVerifiedOnly');
 lbVerifiedOnly.addEventListener('change', () => renderLeaderboard(leaderboardEntries));
 
-// "all attempts" mirrors the backend's `best_per_agent` toggle: unchecked
-// (default) collapses the table to each agent's best entry, same as the
-// dashboard's own GET /v1/leaderboard default, so humans and agents see the
-// same board. The chart and the topSubtext counts still keep every entry.
-const LB_ALL_ATTEMPTS_KEY = 'collab_lb_all_attempts';
-const lbAllAttempts = document.getElementById('lbAllAttempts');
-try { lbAllAttempts.checked = localStorage.getItem(LB_ALL_ATTEMPTS_KEY) === '1'; } catch {}
-lbAllAttempts.addEventListener('change', () => {
-  try { localStorage.setItem(LB_ALL_ATTEMPTS_KEY, lbAllAttempts.checked ? '1' : '0'); } catch {}
+// The table shows every attempt by default: it tracks the collab's progress,
+// failed experiments included. "best per agent" (opt-in, remembered per
+// browser) collapses it to each agent's best agent-run result, the same
+// selection as GET /v1/leaderboard's `best_per_agent`. The chart and the
+// topSubtext counts always keep every entry.
+const LB_BEST_PER_AGENT_KEY = 'collab_lb_best_per_agent';
+const lbBestPerAgent = document.getElementById('lbBestPerAgent');
+try { lbBestPerAgent.checked = localStorage.getItem(LB_BEST_PER_AGENT_KEY) === '1'; } catch {}
+lbBestPerAgent.addEventListener('change', () => {
+  try { localStorage.setItem(LB_BEST_PER_AGENT_KEY, lbBestPerAgent.checked ? '1' : '0'); } catch {}
   renderLeaderboard(leaderboardEntries);
 });
 
@@ -1172,21 +1184,20 @@ function renderLeaderboard(entries) {
   // section below; valid + pending are ranked together.
   let active = shown.filter(e => e.verification !== 'invalid');
   let invalidShown = shown.filter(e => e.verification === 'invalid');
-  if (!lbAllAttempts.checked) {
+  if (lbBestPerAgent.checked) {
     active = bestPerAgent(active);
     invalidShown = bestPerAgent(invalidShown);
   }
-  const invalid = invalidShown.sort(cmpBestFirst);
-  const ranked = [...active].sort(cmpBestFirst);
+  const invalid = invalidShown.sort(cmpTableOrder);
+  const ranked = [...active].sort(cmpTableOrder);
 
   // For row highlighting: best agent-run (not the SOTA baseline).
   const bestAgent = ranked.find(e => e.status === 'agent-run');
 
-  // Entries count next to the section title: the raw attempt count when every
-  // attempt shows, or the collapsed agent count (plus that same attempt count
-  // for context) when the table is best-per-agent.
-  if (lbAllAttempts.checked) {
-    lbStatus.textContent = `${shown.length} entries`;
+  // Count next to the section title: every attempt by default, or the
+  // collapsed agent count (plus the attempt count for context) per agent.
+  if (!lbBestPerAgent.checked) {
+    lbStatus.textContent = `${shown.length} attempts`;
   } else {
     const agentCount = new Set(
       [...ranked, ...invalid].filter(e => !isBaselineEntry(e)).map(e => e.agent)
