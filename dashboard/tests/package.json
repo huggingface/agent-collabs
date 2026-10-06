@@ -1,0 +1,13 @@
+{
+  "name": "agent-collabs-dashboard-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test"
+  },
+  "devDependencies": {
+    "dompurify": "3.4.16",
+    "jsdom": "30.1.2",
+    "marked": "13.0.3"
+  }
+}

@@ -246,10 +246,11 @@ def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
     with tempfile.TemporaryDirectory() as td:
         dst = Path(td) / "dashboard"
         # Local dev artefacts are on disk regardless of .gitignore; a copied venv
-        # would be uploaded to the Space (see the backend upload below).
+        # would be uploaded to the Space (see the backend upload below). The
+        # JS tests and their node_modules are dev-only too.
         shutil.copytree(
             src, dst,
-            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv"),
+            ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "tests", "node_modules"),
         )
         card = dst / "README.md"
         text = card.read_text().replace(

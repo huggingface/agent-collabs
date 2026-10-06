@@ -208,6 +208,7 @@ changed (config changes apply with a ~1–2 min Space-restart lag).
 ```bash
 ./.venv/bin/pip install -r backend/requirements-dev.txt
 ./.venv/bin/python -m pytest backend     # offline, in-memory hub fakes
+(cd dashboard/tests && npm ci && npm test)  # app.js markdown rendering + sanitizer, in jsdom (Node 22+)
 
 cd dashboard      # local mode: reads a directory, no token
 LOCAL_BUCKET_DIR=/path/to/bucket CHALLENGE_TITLE="Dev" ../.venv/bin/uvicorn app:app --port 8765

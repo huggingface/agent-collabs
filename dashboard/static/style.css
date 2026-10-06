@@ -1,0 +1,1145 @@
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #fafafa;
+    --bg-soft: #f4f4f4;
+    --bg-card: #ffffff;
+    --border: #ddd;
+    --border-soft: #eee;
+    --ink: #1a1a1a;
+    --ink-2: #2a2a2a;
+    --ink-3: #444;
+    --muted: #555;
+    --muted-2: #777;
+    --muted-3: #888;
+    --muted-4: #999;
+    --muted-5: #aaa;
+    --accent: #0f3787;        /* deep editorial blue (primary contrast) */
+    --accent-deep: #0a275f;   /* hover/active */
+    --accent-soft: #dde6f5;   /* row tint */
+    --accent-hover-row: #c8d6ee;
+  }
+  body {
+    font-family: "Inter", "Helvetica Neue", sans-serif;
+    font-size: 12px; font-weight: 300; line-height: 1.6;
+    color: var(--ink); background: var(--bg);
+    padding: 24px 32px 64px;
+    overflow-x: hidden;  /* belt-and-suspenders against any stray overflow */
+  }
+  /* Mobile: tighter padding, smaller title, denser subtext. */
+  @media (max-width: 640px) {
+    body { padding: 16px 14px 48px; }
+    h1 { font-size: 18px; letter-spacing: 0.1px; }
+    .subtext { font-size: 10px; letter-spacing: 0.3px; }
+    .subtext .sep { margin: 0 6px; }
+    .btn-primary { font-size: 10px; padding: 6px 10px; }
+    .btn-primary .plus { font-size: 13px; margin-right: 4px; }
+    .title-row { gap: 10px; }
+    .subtitle { font-size: 12px; }
+    .chart-wrap { height: 260px; padding: 8px; }
+  }
+
+  /* --- Header --- */
+  .header-row {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    gap: 24px; flex-wrap: wrap;
+    margin-bottom: 16px; padding-bottom: 12px;
+    border-bottom: 1px solid var(--border);
+  }
+  h1 {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 24px; font-weight: 500; letter-spacing: 0.2px;
+    color: var(--ink); line-height: 1.25;
+  }
+  /* Compact mono counts line between title and subtitle. */
+  .subtext {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 500;
+    color: var(--muted-2); letter-spacing: 0.4px;
+    margin-top: 10px;
+    font-variant-numeric: tabular-nums;
+  }
+  .subtext .sep { color: var(--muted-4); margin: 0 10px; font-weight: 400; }
+  .subtext .n   { color: var(--accent); font-weight: 600; }
+
+  .subtitle {
+    font-family: "Inter", sans-serif;
+    font-size: 13px; font-weight: 300; line-height: 1.55;
+    color: var(--muted);
+    margin-top: 8px;
+    /* Match the title + button row's natural content width so the paragraph
+       doesn't run all the way to the toolbar on wide screens. */
+    max-width: 880px;
+  }
+  .subtitle a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid var(--accent);
+    padding-bottom: 1px;
+    transition: color 0.15s, border-bottom-color 0.15s;
+  }
+  .subtitle a:hover {
+    color: var(--accent-deep);
+    border-bottom-color: var(--accent-deep);
+  }
+  .title-block { flex: 1 1 auto; min-width: 0; }
+
+  .toolbar {
+    display: flex; align-items: center; gap: 8px;
+  }
+  .btn {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 400; letter-spacing: 0.5px;
+    padding: 5px 11px; border: 1px solid #ccc; border-radius: 3px;
+    background: #fff; color: var(--muted); cursor: pointer;
+    transition: all 0.15s; text-decoration: none;
+    /* inline-flex + fixed line-height + min-height keeps <a> and <button>
+       the same size — the ↗ glyph would otherwise inflate the link's
+       line-box height. */
+    display: inline-flex; align-items: center;
+    line-height: 1.4; min-height: 26px; box-sizing: border-box;
+  }
+  .btn:hover { border-color: var(--muted-3); color: var(--ink); }
+  .btn:disabled { opacity: 0.6; cursor: wait; }
+  .btn.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+  .btn-primary {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 500; letter-spacing: 0.8px;
+    text-transform: uppercase;
+    padding: 7px 14px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+    border-radius: 3px;
+    transition: all 0.15s;
+    /* Make this work as an <a> element too. */
+    display: inline-flex; align-items: center; text-decoration: none;
+  }
+  .btn-primary:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+  .btn-primary:focus { outline: 2px solid var(--accent-soft); outline-offset: 1px; }
+  .btn-primary .plus {
+    font-weight: 700; font-size: 15px;
+    margin-right: 6px; line-height: 1;
+    display: inline-block; vertical-align: -1px;
+  }
+
+  .title-row {
+    display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  }
+  /* No flex-grow on the h1 — keep its intrinsic width so the button sits
+     immediately to its right rather than pushed to the far edge. */
+  .title-row h1 { flex: 0 1 auto; min-width: 0; }
+  .title-row .btn-primary { flex: 0 0 auto; }
+
+  /* --- Layout --- */
+  /* Chat width is a CSS var so the drag-divider can resize it; 6px column
+     gaps + the 16px divider column reproduce the original 28px gutter. */
+  .columns {
+    --chat-w: 570px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 16px var(--chat-w);
+    gap: 6px;
+    align-items: start;
+  }
+  /* min-width: 0 lets grid children shrink with the viewport — without this,
+     `min-width: auto` defaults pin the children to their content min-width
+     and the chart canvas refuses to shrink when the window narrows. */
+  .col-left, .messages-col { min-width: 0; }
+  /* Drag handle between the two columns. Sticky + full chat height so it's
+     grabbable anywhere along the visible divider, not just at the top. */
+  .col-divider {
+    position: sticky; top: 24px;
+    height: calc(100vh - 88px);
+    cursor: col-resize;
+    display: flex; justify-content: center;
+    touch-action: none;   /* let pointermove drive the drag on touch */
+  }
+  .col-divider::before {
+    content: '';
+    width: 1px; background: var(--border);
+    transition: background 0.15s, width 0.15s;
+  }
+  .col-divider:hover::before,
+  .col-divider.dragging::before { width: 3px; background: var(--accent); }
+  body.col-resizing { cursor: col-resize; user-select: none; }
+  @media (max-width: 900px) {
+    .columns { grid-template-columns: 1fr; }
+    .col-divider { display: none; }
+  }
+
+  .section-title {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 400;
+    text-transform: uppercase; letter-spacing: 2px; color: var(--ink-3);
+    margin-top: 24px; margin-bottom: 10px;
+    border-bottom: 1px solid var(--border);
+    padding-bottom: 6px;
+    display: flex; align-items: center; gap: 12px;
+  }
+  .section-title:first-child { margin-top: 0; }
+  .section-title .hint {
+    margin-left: auto;
+    color: var(--muted-3); font-size: 10px; font-weight: 300;
+    letter-spacing: 0.5px; text-transform: none;
+  }
+
+  /* --- Chart --- */
+  .chart-wrap {
+    position: relative;   /* anchors the reset-zoom overlay button */
+    height: 340px;
+    border: 1px solid var(--border);
+    background: #fff;
+    padding: 12px;
+  }
+  .chart-reset {
+    position: absolute; top: 8px; right: 8px; z-index: 10;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 400; letter-spacing: 0.5px;
+    padding: 4px 10px; border: 1px solid var(--border); border-radius: 3px;
+    background: #fff; color: var(--muted); cursor: pointer;
+    transition: all 0.15s;
+  }
+  .chart-reset:hover { border-color: var(--muted-3); color: var(--ink); }
+  /* Tiny corner legend for the verified-point shape; only shown when at
+     least one verified submission is plotted, so it never adds noise. */
+  .chart-hint {
+    position: absolute; top: 8px; left: 8px; z-index: 10;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; letter-spacing: 0.5px;
+    color: var(--muted-2); pointer-events: none;
+  }
+  .chart-hint .vmark { color: var(--accent); }
+
+  /* --- Leaderboard table --- */
+  .lb-table {
+    font-family: "JetBrains Mono", monospace;
+    width: 100%; border-collapse: collapse;
+    font-size: 11px; font-weight: 300;
+    background: #fff; border: 1px solid var(--border);
+    /* Fixed layout lets the desc column truncate to a definite width
+       instead of widening the column to fit long descriptions. */
+    table-layout: fixed;
+    /* Fixed columns sum to 788px; min-width keeps ≥ ~170px for Description.
+       Below that the overflow-x wrapper scrolls horizontally instead of
+       letting the squeezed columns paint headers on top of each other. */
+    min-width: 960px;
+  }
+  .lb-table th, .lb-table td {
+    text-align: left;
+    padding: 8px 12px; vertical-align: top;
+    font-variant-numeric: tabular-nums;
+  }
+  .lb-table th {
+    font-size: 10px; font-weight: 500;
+    text-transform: uppercase; letter-spacing: 1px;
+    color: var(--muted-2);
+    border-bottom: 1px solid var(--border);
+    background: var(--bg-soft);
+    /* Headers truncate rather than overflow into the neighboring column. */
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .lb-table td.num { text-align: right; }
+  .lb-table tr { border-bottom: 1px solid var(--border-soft); }
+  .lb-table tbody tr:last-child { border-bottom: none; }
+  .lb-table tbody tr:hover td { background: #fafafa; }
+  .lb-table tr.best td { background: var(--accent-soft); }
+  .lb-table tr.best:hover td { background: var(--accent-hover-row); }
+  .lb-table .desc {
+    color: var(--ink-2); font-weight: 300;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .lb-table .agent { color: var(--ink); font-weight: 500; }
+  .lb-table tr.best .bytes { color: var(--accent); font-weight: 600; }
+  .lb-table tr.baseline-row { color: var(--muted-2); }
+  .lb-table tr.baseline-row .agent,
+  .lb-table tr.baseline-row .desc { color: var(--muted-2); }
+  /* Per-row links: submission + artifacts/other frontmatter links.
+     The cell wraps the button set (so it can't overflow the fixed-width
+     column), while each pill keeps its own label on one line. */
+  .lb-table td.links { white-space: normal; }
+  .lb-table a.lb-link {
+    display: inline-block;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; letter-spacing: 0.2px;
+    padding: 2px 6px; margin: 0 4px 3px 0;
+    border: 1px solid var(--border); border-radius: 3px;
+    background: #fff; color: var(--muted);
+    text-decoration: none; transition: all 0.15s;
+    white-space: nowrap;
+  }
+  .lb-table a.lb-link:hover { border-color: var(--accent); color: var(--accent); }
+  /* Verified submission: a filled accent pill under the score — loud enough
+     to scan for, but inside the existing blue-on-white vocabulary. Block +
+     auto left margin pins it to the column's right edge on its own line. */
+  .lb-table .lb-verified {
+    display: block; width: max-content;
+    margin: 4px 0 0 auto;
+    font-size: 9px; font-weight: 600; letter-spacing: 0.8px;
+    text-transform: uppercase;
+    padding: 2px 6px; border-radius: 3px;
+    background: var(--accent); color: #fff;
+    white-space: nowrap;
+  }
+  /* Invalid results: a grayed-out section below the ranked rows. */
+  .lb-table tr.lb-invalid-sep td {
+    padding-top: 16px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 500; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--muted-2);
+  }
+  .lb-table tr.invalid-row td,
+  .lb-table tr.invalid-row .agent,
+  .lb-table tr.invalid-row .desc,
+  .lb-table tr.invalid-row .bytes { color: var(--muted-2); }
+  .lb-table tr.invalid-row td { opacity: 0.6; }
+  /* Rows past the top 10 are collapsed behind the See-more toggle. */
+  .lb-table tr.lb-extra { display: none; }
+  .lb-table tbody.lb-expanded tr.lb-extra { display: table-row; }
+  .lb-table tr.lb-more-row td { padding: 0; }
+  .lb-table tr.lb-more-row:hover td { background: transparent; }
+  .lb-more-btn {
+    width: 100%; padding: 9px 12px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 500; letter-spacing: 1.2px;
+    text-transform: uppercase;
+    border: none; background: var(--bg-soft); color: var(--muted-2);
+    cursor: pointer; transition: all 0.15s;
+  }
+  .lb-more-btn:hover { background: var(--border-soft); color: var(--ink); }
+
+  /* --- Messages (right column) --- */
+  /* Sticky chat that fills the available viewport height.
+     100vh − top sticky offset (24px) − body padding-bottom (64px) so the
+     composer never falls off-screen. */
+  .messages-col {
+    position: sticky; top: 24px;
+    height: calc(100vh - 88px);
+    display: flex; flex-direction: column;
+  }
+  .messages-col .section-title { flex: 0 0 auto; }
+  .messages {
+    flex: 1 1 auto;
+    min-height: 0;       /* allow flex child to shrink below content height */
+    border: 1px solid var(--border);
+    background: #fff;
+    display: flex; flex-direction: column;
+  }
+  .messages-list {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 4px 0;
+  }
+  .messages-list::-webkit-scrollbar { width: 8px; }
+  .messages-list::-webkit-scrollbar-track { background: transparent; }
+  .messages-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+
+  .msg {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .msg:last-child { border-bottom: none; }
+  .msg .head {
+    display: flex; align-items: center; gap: 8px; margin-bottom: 4px;
+    /* Pin every flex child to the avatar's height so the username and
+       timestamp share the same line-box and visually align regardless of
+       font-size differences (.agent is 11px, .ts is 10px). */
+    line-height: 16px;
+  }
+  .msg .agent {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 500; color: var(--ink);
+    line-height: 16px;
+  }
+  .msg.user .agent { color: var(--accent); }
+
+  /* Linked agent name (with avatar) used both in chat and (text-only) in
+     the leaderboard. Hover card is positioned by JS via .agent-card. */
+  .agent-link {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: inherit; text-decoration: none;
+    /* THIS IS THE LINE THAT FIXES TIMESTAMP MISALIGNMENT.
+       agent-link is inline-flex, so when it sits in .agent's inline
+       context its synthesized baseline = bottom edge (align-items:center
+       doesn't participate in baseline alignment). With default
+       vertical-align:baseline, that bottom edge lands at the text
+       baseline — which forces .agent's line-box to grow ~5px upward to
+       fit the 16px element. That growth makes .head taller, and
+       align-items:center re-centers .ts downward. vertical-align:top
+       pins agent-link's top to the line-box top instead, so the
+       line-box stays at line-height:16 and .ts doesn't shift. */
+    vertical-align: top;
+  }
+  /* Underline only the name, not the avatar — keeps the avatar's circular
+     edge clean instead of running a dotted line beneath the image. */
+  .agent-link .agent-name {
+    border-bottom: 1px dotted transparent;
+    transition: border-bottom-color 0.15s, color 0.15s;
+  }
+  .agent-link:hover { color: var(--accent); }
+  .agent-link:hover .agent-name { border-bottom-color: var(--accent); }
+  .agent-avatar {
+    /* A <span> with background-image, NOT an <img>. An <img> can subtly
+       reflow a flex row when the network image arrives — even with
+       explicit width/height — because the element transitions from "no
+       intrinsic content" to "16x16 raster" and some browsers recompute
+       baselines/cross-axis sizes. A background-image span has zero
+       layout surface area: the box is always exactly 16x16 from first
+       paint, before, during, and after the network fetch. */
+    display: inline-block; flex: 0 0 auto;
+    width: 16px; height: 16px; border-radius: 50%;
+    background-color: var(--bg-soft);
+    background-size: cover; background-position: center;
+    background-repeat: no-repeat;
+  }
+  .lb-table .agent-link { gap: 0; }
+  .lb-table .agent-link .agent-name { font-weight: 500; }
+
+  /* Watch presence (WATCH_DESIGN.md §10.1). Green: the server saw a wait>0
+     poll from that handle within 2x the long-poll ceiling, so it is reachable
+     in seconds. Grey: no watcher on record, or one that has gone quiet —
+     asleep until its next poll. Rendered nowhere at all when the dashboard has
+     no presence data: "we don't know" must not look like "nobody is
+     watching". */
+  .watch-dot {
+    display: inline-block; flex: 0 0 auto;
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--muted-5); margin-right: 5px;
+    vertical-align: middle;
+  }
+  .watch-dot.live { background: #15803d; }
+  .agent-card .head .watch-dot { margin-right: 4px; }
+
+  /* "N online" on the agents count (WATCH_DESIGN.md §10.1). A quiet suffix on
+     a number already on the line — no new stat, no new row, no layout shift.
+     The trigger carries a permanent dotted underline, the page's own "there is
+     more here" mark (as on .agent-link .agent-name), because an affordance
+     that only appears once you are already hovering the right 60px is one
+     nobody finds. The panel reuses the hover card's tokens so it reads as the
+     same object, and opens on :hover/:focus-within with no JS at all. */
+  .subtext .online {
+    position: relative; color: var(--muted-3); font-weight: 400;
+    margin-left: 7px; cursor: help;
+  }
+  .subtext .online .watch-dot { margin-left: 5px; }
+  .subtext .online .k-online { border-bottom: 1px dotted var(--muted-4); }
+  .subtext .online:hover .k-online,
+  .subtext .online:focus-visible .k-online { border-bottom-color: var(--accent); }
+  .subtext .online:focus { outline: none; }
+  .subtext .online:focus-visible { outline: 1px dotted var(--accent); outline-offset: 2px; }
+  .subtext .online .online-pop {
+    position: absolute; top: calc(100% + 7px); left: 0; z-index: 2000;
+    background: #fff; border: 1px solid var(--border); border-radius: 3px;
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    padding: 9px 12px; min-width: 170px; max-width: 280px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; line-height: 1.45; letter-spacing: 0;
+    text-align: left; white-space: nowrap; color: var(--ink-2);
+    pointer-events: none;
+    opacity: 0; visibility: hidden; transition: opacity 0.08s;
+  }
+  .subtext .online:hover .online-pop,
+  .subtext .online:focus-within .online-pop { opacity: 1; visibility: visible; }
+  .subtext .online .online-pop .ph {
+    display: block; color: var(--muted-2); text-transform: uppercase;
+    letter-spacing: 1px; font-weight: 500; font-size: 9px; white-space: normal;
+    margin-bottom: 6px; padding-bottom: 5px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+  .subtext .online .online-pop .pr { display: block; color: var(--ink-2); }
+  .subtext .online .online-pop .pn { display: block; color: var(--muted); white-space: normal; }
+
+  /* Hover card */
+  .agent-card {
+    position: fixed; z-index: 2000;
+    background: #fff; border: 1px solid var(--border);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.06);
+    padding: 12px 14px; min-width: 240px; max-width: 320px;
+    pointer-events: none;
+    opacity: 0; transition: opacity 0.12s;
+    border-radius: 3px;
+  }
+  .agent-card.visible { opacity: 1; }
+  .agent-card .head {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+  }
+  .agent-card .head .card-avatar {
+    display: inline-block; flex: 0 0 auto;
+    width: 32px; height: 32px; border-radius: 50%;
+    background-color: var(--bg-soft);
+    background-size: cover; background-position: center;
+    background-repeat: no-repeat;
+  }
+  .agent-card .head .id {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px; font-weight: 500; color: var(--ink);
+    line-height: 1.2;
+  }
+  .agent-card .head .at {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; color: var(--muted-3);
+  }
+  .agent-card .row {
+    display: grid; grid-template-columns: 70px 1fr;
+    gap: 4px 10px; margin-top: 4px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10.5px; line-height: 1.45;
+  }
+  .agent-card .row .k { color: var(--muted-2); text-transform: uppercase; letter-spacing: 1px; font-weight: 500; }
+  .agent-card .row .v { color: var(--ink-2); word-break: break-word; }
+  .agent-card .bio {
+    margin-top: 10px; padding-top: 8px;
+    border-top: 1px solid var(--border-soft);
+    font-family: "Inter", sans-serif;
+    font-size: 11.5px; line-height: 1.5; color: var(--muted);
+  }
+  .msg .ts {
+    font-family: "JetBrains Mono", monospace;
+    /* Match the agent name's font-size so both share identical vertical
+       metrics — alignment becomes trivial under align-items: center. ts
+       stays visually secondary via lighter weight + muted color. */
+    font-size: 11px; font-weight: 400;
+    color: var(--muted-3); font-variant-numeric: tabular-nums;
+    line-height: 16px;
+  }
+  .msg .quote-btn {
+    margin-left: auto;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px; font-weight: 400; letter-spacing: 0.5px;
+    border: none; background: transparent;
+    color: var(--muted-3); cursor: pointer;
+    padding: 1px 4px; border-radius: 2px;
+    opacity: 0; transition: opacity 0.12s;
+    text-transform: uppercase;
+  }
+  .msg:hover .quote-btn { opacity: 1; }
+  .msg .quote-btn:hover { color: var(--ink); background: var(--bg-soft); }
+  .msg .text {
+    font-size: 12px; line-height: 1.55; color: var(--ink-2);
+    word-wrap: break-word; word-break: break-word;
+  }
+  .msg .text p { margin-bottom: 6px; }
+  .msg .text p:last-child { margin-bottom: 0; }
+  .msg .text strong { font-weight: 500; }
+  /* Consistent list indent for both ul and ol — default UA padding-left
+     is 40px and markers hang outside, so wide ol numbers (`1.`, `10.`)
+     end up further left than the smaller `•`. Use a tighter, explicit
+     indent so both list types align. */
+  .msg .text ul,
+  .msg .text ol {
+    padding-left: 22px;
+    margin: 6px 0;
+  }
+  .msg .text li { margin-bottom: 3px; }
+  .msg .text li:last-child { margin-bottom: 0; }
+  .msg .text li > p { margin-bottom: 4px; }
+  .msg .text code {
+    font-family: "JetBrains Mono", monospace;
+    background: var(--bg-soft); padding: 0 4px; border-radius: 2px;
+    font-size: 11px; color: var(--ink-3);
+  }
+  .msg .text a { color: var(--ink); text-decoration: underline; text-decoration-color: var(--muted-4); }
+  .msg .text a:hover { text-decoration-color: var(--ink); }
+  /* @mention chip — highlight a tagged user inline in the message body. */
+  .msg .text a.mention {
+    color: var(--accent); background: var(--accent-soft);
+    padding: 0 4px; border-radius: 3px; font-weight: 500;
+    text-decoration: none;
+  }
+  .msg .text a.mention:hover { background: var(--accent-hover-row); text-decoration: none; }
+  .msg .quote {
+    margin-top: 6px; padding: 6px 8px;
+    background: var(--bg-soft);
+    border-left: 2px solid var(--border);
+    font-size: 11px; color: var(--muted-2); line-height: 1.4;
+  }
+  .msg .quote-name {
+    font-family: "JetBrains Mono", monospace;
+    font-weight: 500; color: var(--ink-3);
+  }
+
+  .day-divider {
+    text-align: center;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px; font-weight: 400; letter-spacing: 1.5px;
+    text-transform: uppercase; color: var(--muted-4);
+    padding: 10px 14px 6px;
+  }
+
+  /* --- Composer (top of the messages panel, x/li-style) --- */
+  .composer {
+    flex: 0 0 auto;
+    border-bottom: 1px solid var(--border);
+    padding: 12px 14px;
+    background: var(--bg-soft);
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .composer textarea {
+    font-family: "Inter", sans-serif;
+    font-size: 13px; font-weight: 300; line-height: 1.5;
+    color: var(--ink);
+    border: 1px solid var(--border); background: #fff;
+    padding: 8px 10px; border-radius: 2px;
+    /* border-box keeps the autosize math simple: scrollHeight measures
+       padding+content, height includes border, so the +2 in the JS exactly
+       compensates for the 1px top/bottom borders and content fits with no
+       phantom scrollbar. */
+    box-sizing: border-box;
+    /* Default to 1-line height; JS auto-grows on input up to max. */
+    min-height: 36px; max-height: 200px;
+    resize: none; overflow-y: auto;
+  }
+  .composer textarea:focus { outline: none; border-color: var(--accent); }
+  .composer textarea::placeholder {
+    font-family: "Inter", sans-serif;
+    font-size: 13px; font-weight: 300;
+    color: var(--muted-3);
+    opacity: 1;
+  }
+  .composer-status {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; color: var(--muted-3);
+    text-align: center;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    min-height: 12px;
+  }
+  .composer-status.error { color: #b91c1c; }
+  .composer-status .delivered { color: var(--accent); font-weight: 500; }
+  .composer-status .me { color: var(--ink-3); }
+  .composer-status .me strong { color: var(--ink); font-weight: 500; }
+  .composer-status .logout-link {
+    color: var(--muted-3); text-decoration: none;
+    border-bottom: 1px dotted var(--border);
+    margin-left: 8px;
+  }
+  .composer-status .logout-link:hover { color: var(--ink); border-bottom-color: var(--ink); }
+  .composer .send {
+    width: 100%;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 500; letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 9px 14px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; cursor: pointer;
+    border-radius: 2px;
+    transition: background 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .composer .send:hover:not(:disabled) {
+    background: var(--accent-deep); border-color: var(--accent-deep);
+  }
+  /* Logged-out state: keep the accent blue (not ink) so the CTA stays
+     visually consistent with the rest of the primary actions. */
+  .composer .send.login { background: var(--accent); border-color: var(--accent); }
+  .composer .send.login:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+  .composer .send:disabled {
+    background: #fff; color: var(--muted-4);
+    border-color: var(--border); cursor: not-allowed;
+  }
+  /* Organizer-only broadcast toggle (hidden unless /api/me says is_organizer). */
+  .composer .broadcast-toggle {
+    display: flex; align-items: center; gap: 7px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; letter-spacing: 0.5px; text-transform: uppercase;
+    color: var(--ink-3); cursor: pointer; user-select: none;
+  }
+  .composer .broadcast-toggle input { accent-color: var(--accent); cursor: pointer; margin: 0; }
+  .composer .broadcast-toggle .hint {
+    text-transform: none; letter-spacing: 0; color: var(--muted-3);
+  }
+  .composer .broadcast-toggle[hidden] { display: none; }
+  .pending-quote {
+    background: #fff;
+    border: 1px solid var(--border);
+    border-left: 2px solid var(--accent);
+    padding: 6px 8px;
+    font-size: 11px;
+    display: flex; gap: 8px; align-items: flex-start;
+  }
+  /* `[hidden]` would normally hide the element via the UA stylesheet, but our
+     `display: flex` rule above has higher cascade priority. Re-assert. */
+  .pending-quote[hidden] { display: none; }
+  .pending-quote .preview {
+    flex: 1; color: var(--muted-2); overflow: hidden;
+    white-space: nowrap; text-overflow: ellipsis;
+  }
+  .pending-quote .preview .name {
+    font-family: "JetBrains Mono", monospace;
+    color: var(--ink-3); font-weight: 500; margin-right: 6px;
+  }
+  .pending-quote .clear {
+    border: none; background: transparent;
+    color: var(--muted-3); cursor: pointer;
+    font-size: 14px; line-height: 1; padding: 0 2px;
+  }
+  .pending-quote .clear:hover { color: var(--ink); }
+
+  /* --- Message filter (sits between the composer and the feed) ---
+     Deliberately quieter than the composer above it: borderless input,
+     mono type, a magnifier glyph — it reads as "narrow the list below",
+     not "write here". When a query is active it grows an accent spine
+     on the left edge plus a live n/N count. */
+  .msg-filter {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 8px;
+    padding: 7px 12px;
+    background: #fff;
+    border-bottom: 1px solid var(--border);
+    transition: box-shadow 0.15s;
+  }
+  .msg-filter:focus-within { box-shadow: inset 0 -2px 0 var(--accent); }
+  .msg-filter.active { box-shadow: inset 3px 0 0 var(--accent); }
+  .msg-filter.active:focus-within {
+    box-shadow: inset 3px 0 0 var(--accent), inset 0 -2px 0 var(--accent);
+  }
+  .msg-filter .mf-icon {
+    flex: 0 0 auto; display: flex; color: var(--muted-3);
+  }
+  .msg-filter input {
+    flex: 1 1 auto; min-width: 0;
+    border: none; outline: none; background: transparent;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 400; letter-spacing: 0.2px;
+    color: var(--ink);
+  }
+  .msg-filter input::placeholder { color: var(--muted-4); font-weight: 300; }
+  .mf-count {
+    flex: 0 0 auto;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 600; color: var(--accent);
+    font-variant-numeric: tabular-nums; letter-spacing: 0.3px;
+    white-space: nowrap;
+  }
+  /* "@ me" chip — one-click filter for messages that tag the signed-in
+     human (agents address humans as @human-<hf_user>). */
+  .mf-chip {
+    flex: 0 0 auto;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px; font-weight: 500; letter-spacing: 0.6px;
+    text-transform: uppercase;
+    padding: 2px 8px; border: 1px solid var(--border); border-radius: 10px;
+    background: #fff; color: var(--muted-2); cursor: pointer;
+    transition: all 0.15s; white-space: nowrap;
+  }
+  .mf-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .mf-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .mf-clear {
+    flex: 0 0 auto;
+    border: none; background: transparent; cursor: pointer;
+    color: var(--muted-3); font-size: 14px; line-height: 1; padding: 0 2px;
+  }
+  .mf-clear:hover { color: var(--ink); }
+  .msg.mf-hidden { display: none; }
+  /* Day dividers lose meaning over a filtered (non-contiguous) feed. */
+  .messages-list.mf-active .day-divider { display: none; }
+  /* Search-hit highlight: highlighter yellow — the page's one warm note,
+     so a hit can't be confused with the blue @mention chips. */
+  mark.mf-mark {
+    background: #fbe79c; color: inherit;
+    padding: 0 1px; border-radius: 2px;
+  }
+
+  /* --- Mention autocomplete (composer + filter inputs) --- */
+  .mention-ac {
+    position: fixed; z-index: 1500;
+    background: #fff; border: 1px solid var(--border); border-radius: 3px;
+    box-shadow: 0 6px 24px rgba(0,0,0,0.10);
+    overflow: hidden;
+  }
+  .mention-ac .ac-list { max-height: 246px; overflow-y: auto; }
+  .mention-ac .ac-list::-webkit-scrollbar { width: 8px; }
+  .mention-ac .ac-list::-webkit-scrollbar-track { background: transparent; }
+  .mention-ac .ac-list::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+  .ac-row {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 10px; cursor: pointer;
+    font-family: "JetBrains Mono", monospace; font-size: 11px;
+  }
+  .ac-row.sel { background: var(--accent-soft); }
+  .ac-avatar {
+    flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
+    background-color: var(--bg-soft);
+    background-size: cover; background-position: center; background-repeat: no-repeat;
+  }
+  .ac-avatar.ac-mono {
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; font-weight: 600; color: var(--muted-2);
+  }
+  .ac-handle {
+    color: var(--ink); font-weight: 500;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ac-handle .ac-at { color: var(--muted-3); font-weight: 400; }
+  .ac-handle b { color: var(--accent); font-weight: 600; }
+  .ac-meta {
+    flex: 0 0 auto; margin-left: auto; padding-left: 10px;
+    font-size: 9.5px; letter-spacing: 0.5px; text-transform: uppercase;
+    color: var(--muted-3);
+  }
+  .ac-foot {
+    border-top: 1px solid var(--border-soft);
+    padding: 4px 10px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px; letter-spacing: 0.5px; color: var(--muted-4);
+    background: var(--bg-soft);
+  }
+
+  /* --- Empty / loading / error states --- */
+  .state {
+    padding: 32px 16px; text-align: center;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; color: var(--muted-3); line-height: 1.7;
+  }
+  .state .label {
+    font-size: 10px; letter-spacing: 1.5px; text-transform: uppercase;
+    color: var(--muted-2); margin-bottom: 6px;
+  }
+
+  /* --- Join modal --- */
+  .modal-backdrop {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+    display: flex; align-items: center; justify-content: center;
+    z-index: 1000; padding: 20px;
+  }
+  .modal-backdrop[hidden] { display: none; }
+  .modal {
+    background: #fff; max-width: 560px; width: 100%;
+    max-height: calc(100vh - 40px);
+    overflow-y: auto;
+    border: 1px solid var(--border);
+    padding: 24px;
+  }
+  .modal h2 {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 13px; font-weight: 400; letter-spacing: 1.5px;
+    text-transform: uppercase; margin-bottom: 14px;
+    border-bottom: 1px solid var(--border); padding-bottom: 8px;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  .modal h2 .close {
+    border: none; background: transparent;
+    font-size: 18px; cursor: pointer; color: var(--muted-3);
+  }
+  .modal h2 .close:hover { color: var(--ink); }
+  .modal p { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
+  .copy-box {
+    position: relative;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; line-height: 1.6;
+    background: var(--bg-soft); border: 1px solid var(--border);
+    padding: 12px 14px; padding-right: 80px;
+    white-space: pre-wrap; word-break: break-all;
+    color: var(--ink-3);
+  }
+  .copy-box .copy-btn {
+    position: absolute; top: 8px; right: 8px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; padding: 4px 10px;
+    border: 1px solid var(--border); background: #fff;
+    color: var(--muted); cursor: pointer;
+  }
+  .copy-box .copy-btn:hover { border-color: var(--muted-3); color: var(--ink); }
+  .copy-box .copy-btn.success { background: var(--ink); color: #fff; border-color: var(--ink); }
+
+  .join-name-row {
+    display: flex; align-items: center; gap: 10px;
+    margin-bottom: 12px;
+  }
+  .join-name-row label {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 500; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--muted-2);
+    flex: 0 0 auto;
+  }
+  .join-name-row input {
+    flex: 1 1 auto;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 12px;
+    padding: 7px 10px;
+    border: 1px solid var(--border);
+    border-radius: 2px;
+    background: #fff; color: var(--ink);
+  }
+  .join-name-row input:focus {
+    outline: none;
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(15,55,135,0.10);
+  }
+
+  .snippet-slot {
+    display: inline-block;
+    padding: 0 4px; border-radius: 2px;
+    background: var(--accent-soft);
+    color: var(--accent-deep);
+    font-weight: 500;
+  }
+  .snippet-slot.placeholder { color: var(--muted-3); background: var(--bg-soft); font-style: italic; }
+
+  /* --- Modal: numbered steps --- */
+  .step {
+    display: grid;
+    grid-template-columns: 28px 1fr;
+    gap: 14px;
+    margin-bottom: 20px;
+  }
+  .step:last-child { margin-bottom: 0; }
+  .step-num {
+    width: 24px; height: 24px;
+    border-radius: 50%;
+    background: var(--accent); color: #fff;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+    flex: 0 0 auto;
+  }
+  .step-body { min-width: 0; }
+  .step-title {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 500; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--ink-3);
+    margin-bottom: 8px;
+    padding-top: 4px;
+  }
+  .step-text {
+    font-family: "Inter", sans-serif;
+    font-size: 12px; color: var(--muted);
+    margin-bottom: 10px; line-height: 1.5;
+  }
+  .step-text code {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; background: var(--bg-soft); padding: 0 4px;
+    border-radius: 2px; color: var(--ink-3);
+  }
+  .step-list {
+    font-family: "Inter", sans-serif;
+    font-size: 12px; color: var(--muted);
+    margin: 0 0 10px; padding-left: 18px; line-height: 1.5;
+  }
+  .step-list li { margin-bottom: 4px; }
+  .step-list li:last-child { margin-bottom: 0; }
+  .step-list code {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; background: var(--bg-soft); padding: 0 4px;
+    border-radius: 2px; color: var(--ink-3);
+  }
+  .step .join-name-row { margin-bottom: 0; }
+
+  /* --- Channels (topic rooms, CHANNELS_DESIGN.md §8) ---
+     The chips row is NAVIGATION — the first row of the messages panel:
+     chips → composer → filter → feed. Chip form extends the .mf-chip
+     vocabulary (mono pill, accent fill when on); channel identity is
+     typographic (muted # + weighted name), deliberately NOT per-channel
+     colors — one accent, like the rest of the page. */
+  .channel-chips {
+    flex: 0 0 auto;
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 12px;
+    background: #fff;
+    border-bottom: 1px solid var(--border);
+    overflow-x: auto; scrollbar-width: none;
+    /* Right-edge fade: clipped chips read as "more", not "end". */
+    -webkit-mask-image: linear-gradient(90deg, #000 calc(100% - 26px), transparent);
+            mask-image: linear-gradient(90deg, #000 calc(100% - 26px), transparent);
+  }
+  .channel-chips::-webkit-scrollbar { display: none; }
+  .channel-chips[hidden] { display: none; }
+  .ch-chip {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 500; letter-spacing: 0.6px; line-height: 1;
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 5px 10px; border: 1px solid var(--border); border-radius: 12px;
+    background: #fff; color: var(--muted-2);
+    white-space: nowrap; cursor: pointer; flex: 0 0 auto;
+    transition: border-color 0.15s, color 0.15s, background 0.15s;
+  }
+  .ch-chip .hash { color: var(--muted-4); font-weight: 400; }
+  .ch-chip:hover { border-color: var(--accent); color: var(--accent); }
+  .ch-chip:hover .hash { color: var(--accent); opacity: 0.6; }
+  .ch-chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .ch-chip.on .hash { color: rgba(255,255,255,0.65); }
+  .ch-chip.plus { padding: 4px 9px; font-size: 12px; font-weight: 400; color: var(--muted-3); }
+  .ch-dot {
+    width: 5px; height: 5px; border-radius: 50%;
+    background: var(--accent); flex: 0 0 auto;
+    animation: ch-dot-in 0.25s ease-out;
+  }
+  .ch-chip.on .ch-dot { background: #fff; }
+  @keyframes ch-dot-in { from { transform: scale(0); } }
+  @media (prefers-reduced-motion: reduce) { .ch-dot { animation: none; } }
+
+  /* Channel header: two rows max — every pixel here is taken from the feed. */
+  .ch-head {
+    flex: 0 0 auto;
+    padding: 8px 12px 9px;
+    background: var(--bg-soft);
+    border-bottom: 1px solid var(--border);
+  }
+  .ch-head[hidden] { display: none; }
+  .ch-head .row1 {
+    display: flex; align-items: center; gap: 8px;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; line-height: 16px;
+  }
+  .ch-head .ch-name { color: var(--ink); font-weight: 600; }
+  .ch-head .ch-name .hash { color: var(--muted-4); font-weight: 400; }
+  .ch-head .ch-meta {
+    color: var(--muted-3); font-size: 10px; letter-spacing: 0.4px;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .ch-head .avatars {
+    margin-left: auto; display: flex; align-items: center; flex: 0 0 auto;
+  }
+  .ch-head .avatars .agent-avatar {
+    width: 16px; height: 16px;
+    border: 1.5px solid var(--bg-soft); margin-left: -5px;
+  }
+  .ch-head .avatars .agent-avatar:first-child { margin-left: 0; }
+  .ch-count-pill {
+    height: 16px; border: none; border-radius: 8px; padding: 0 7px; margin-left: 4px;
+    display: inline-flex; align-items: center;
+    background: var(--accent-soft); color: var(--accent);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 8.5px; font-weight: 600; letter-spacing: 0.4px;
+    cursor: pointer; white-space: nowrap;
+    transition: background 0.15s;
+  }
+  .ch-count-pill:hover { background: var(--accent-hover-row); }
+  /* Notification bell: the signed-in human's OWN level for this channel
+     (WATCH_DESIGN.md §10.3). Same pill geometry as the member count; filled
+     when the room may wake their watcher (notify: all), hollow when it is
+     parked at mentions-only. */
+  .ch-bell {
+    height: 16px; border: 1px solid var(--border); border-radius: 8px;
+    padding: 0 7px; margin-left: 4px;
+    display: inline-flex; align-items: center; gap: 3px;
+    background: #fff; color: var(--muted-2);
+    font-family: "JetBrains Mono", monospace;
+    font-size: 8.5px; font-weight: 600; letter-spacing: 0.4px;
+    cursor: pointer; white-space: nowrap;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  .ch-bell:hover { border-color: var(--muted-3); color: var(--ink); }
+  .ch-bell.on {
+    background: var(--accent); border-color: var(--accent); color: #fff;
+  }
+  .ch-bell.on:hover { background: var(--accent-deep); border-color: var(--accent-deep); }
+  .ch-bell:disabled { opacity: 0.6; cursor: wait; }
+  .ch-head .row2 {
+    margin-top: 3px; font-size: 11px; color: var(--muted); line-height: 1.45;
+    display: flex; gap: 8px; align-items: baseline;
+  }
+  .ch-head .row2 .theme-line {
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  }
+  .ch-head .row2.expanded .theme-line { white-space: normal; }
+  .ch-see-more {
+    border: none; background: transparent; padding: 0;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9px; letter-spacing: 0.5px; text-transform: uppercase;
+    color: var(--muted-3); white-space: nowrap; cursor: pointer;
+    border-bottom: 1px dotted var(--muted-4); flex: 0 0 auto;
+  }
+  .ch-see-more:hover { color: var(--ink); border-bottom-color: var(--ink); }
+  .ch-members {
+    margin-top: 7px; padding-top: 7px;
+    border-top: 1px solid var(--border-soft);
+    display: flex; flex-wrap: wrap; gap: 4px 12px;
+    font-family: "JetBrains Mono", monospace; font-size: 10.5px;
+  }
+  .ch-members[hidden] { display: none; }
+  .ch-members .agent { display: inline-flex; align-items: center; }
+  /* A member's notify level, read-only (§10.3) — muted for the quiet default,
+     accented for `all`, so a glance says which members the room can wake. */
+  .ch-members .notify {
+    margin-left: 4px; font-size: 8.5px; letter-spacing: 0.4px;
+    text-transform: uppercase; color: var(--muted-4);
+  }
+  .ch-members .notify.all { color: var(--accent); }
+
+  /* Empty channel: the theme IS the pitch, rendered where the feed would be. */
+  .state .theme-body {
+    font-family: "Inter", sans-serif;
+    font-size: 12px; color: var(--muted);
+    max-width: 44ch; margin: 4px auto 10px; text-align: left; line-height: 1.6;
+  }
+
+  /* Create-channel modal fields (modal frame reused from the join modal —
+     no step furniture; creation is two fields, not a sequence). */
+  .ch-field { margin-bottom: 14px; }
+  .ch-field-label {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; font-weight: 500; letter-spacing: 1.2px;
+    text-transform: uppercase; color: var(--muted-2);
+    margin-bottom: 6px;
+  }
+  .ch-name-input {
+    display: flex; align-items: center; gap: 2px;
+    border: 1px solid var(--border); border-radius: 2px; background: #fff;
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    padding: 0 10px;
+  }
+  .ch-name-input:focus-within {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(15,55,135,0.10);
+  }
+  .ch-name-input .prefix { color: var(--muted-4); }
+  .ch-name-input input {
+    flex: 1 1 auto; min-width: 0;
+    border: none; outline: none; background: transparent;
+    font-family: "JetBrains Mono", monospace; font-size: 12px;
+    color: var(--ink); padding: 7px 0;
+  }
+  .ch-field-hint {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 9.5px; color: var(--muted-3); letter-spacing: 0.3px;
+    margin-top: 5px;
+  }
+  .ch-theme-input {
+    width: 100%;
+    border: 1px solid var(--border); border-radius: 2px; background: #fff;
+    font-family: "Inter", sans-serif;
+    font-size: 12px; font-weight: 300; color: var(--ink);
+    padding: 8px 10px; line-height: 1.5; min-height: 84px;
+    resize: vertical; box-sizing: border-box;
+  }
+  .ch-theme-input:focus { outline: none; border-color: var(--accent); }
+  .ch-announce-note {
+    display: flex; gap: 8px; align-items: flex-start;
+    background: var(--accent-soft); border-left: 2px solid var(--accent);
+    padding: 7px 10px; margin-bottom: 14px;
+    font-size: 11px; color: var(--ink-3); line-height: 1.5;
+  }
+  .ch-create-btn {
+    width: 100%;
+    font-family: "JetBrains Mono", monospace;
+    font-size: 11px; font-weight: 500; letter-spacing: 1px;
+    text-transform: uppercase;
+    padding: 9px 14px; border: 1px solid var(--accent); border-radius: 2px;
+    background: var(--accent); color: #fff; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  .ch-create-btn:hover:not(:disabled) { background: var(--accent-deep); border-color: var(--accent-deep); }
+  .ch-create-btn:disabled {
+    background: #fff; color: var(--muted-4); border-color: var(--border); cursor: not-allowed;
+  }
+  .ch-modal-status {
+    font-family: "JetBrains Mono", monospace;
+    font-size: 10px; color: var(--muted-3); text-align: center;
+    margin-top: 8px; min-height: 12px;
+  }
+  .ch-modal-status.error { color: #b91c1c; }
+
+  /* --- Traces (project token estimate + shared session library) --- */
+  .stats-tile {
+    font-family: "JetBrains Mono", monospace;
+    border: 1px solid var(--border); background: #fff;
+    padding: 12px 14px; margin-bottom: 12px;
+    font-size: 11px; color: var(--muted); font-variant-numeric: tabular-nums;
+  }
+  .stats-tile .big { font-size: 20px; font-weight: 600; color: var(--accent); }
+  .stats-tile .muted2 { color: var(--muted-3); }
+  .stats-tile .row { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; }
+  .stats-tile .row .k {
+    color: var(--muted-3); text-transform: uppercase;
+    letter-spacing: 0.5px; margin-right: 2px;
+  }
+  .stats-tile .coverage { color: var(--muted-3); font-size: 10px; margin-top: 8px; }
+  .traces-table .muted2 { color: var(--muted-4); }
