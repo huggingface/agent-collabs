@@ -20,8 +20,9 @@ export function installedVersion(pkg) {
 }
 
 // `libs` picks which CDN globals load before app.js, to cover the fallback
-// taken when one of them fails to load.
-export function loadDashboard({ libs = ['marked', 'DOMPurify'] } = {}) {
+// taken when one of them fails to load. `storage` seeds localStorage first,
+// as a returning visitor's saved preferences would be.
+export function loadDashboard({ libs = ['marked', 'DOMPurify'], storage = {} } = {}) {
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', e => errors.push(e));
@@ -33,6 +34,7 @@ export function loadDashboard({ libs = ['marked', 'DOMPurify'] } = {}) {
   // Boot fetches /api/config; leave it pending so no request or render races
   // the assertions.
   window.fetch = () => new Promise(() => {});
+  for (const [k, v] of Object.entries(storage)) window.localStorage.setItem(k, v);
   // Classic <script>s, as in the page, so app.js's top-level let/const (CFG,
   // agentMap) are globals that window.eval can reach.
   for (const src of [...libs.map(name => LIBS[name]), appJs]) {
