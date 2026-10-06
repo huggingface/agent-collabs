@@ -669,23 +669,28 @@ function agentsStatHtml(n, activeCount) {
   return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}`;
 }
 
-// One global notice while the backend proxies fail (a 503 is not a failure:
-// it means this deployment has no backend). Cleared by the next success.
+// One global notice while any backend proxy fails (a 503 is not a failure:
+// it means this deployment has no backend). Tracked per endpoint, so one
+// endpoint's success never hides another's outage; the banner clears only
+// once every failing endpoint has recovered.
 const backendBanner = document.getElementById('backendBanner');
-let backendDownSince = null;
-function noteBackend(ok) {
-  backendDownSince = ok ? null : (backendDownSince || new Date());
-  backendBanner.hidden = !backendDownSince;
-  if (backendDownSince) {
-    const t = backendDownSince.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    backendBanner.textContent = `Backend unreachable since ${t} — presence and channels may be stale`;
-  }
+const BACKEND_FEATURES = { watching: 'presence', channels: 'channels' };
+const backendDownSince = new Map();   // endpoint key -> Date of first failure
+function noteBackend(key, ok) {
+  if (ok) backendDownSince.delete(key);
+  else if (!backendDownSince.has(key)) backendDownSince.set(key, new Date());
+  backendBanner.hidden = backendDownSince.size === 0;
+  if (!backendDownSince.size) return;
+  const since = new Date(Math.min(...backendDownSince.values()));
+  const t = since.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const stale = [...backendDownSince.keys()].map(k => BACKEND_FEATURES[k]).join(' and ');
+  backendBanner.textContent = `Backend unreachable since ${t} — ${stale} may be stale`;
 }
 
 async function refreshWatching() {
   try {
     const r = await fetchWithTimeout(WATCHING_URL);
-    noteBackend(r.ok || r.status === 503);
+    noteBackend('watching', r.ok || r.status === 503);
     // 503 = this deployment has no bucket-sync backend (plain local dev):
     // drop the dots entirely rather than claim nobody is watching.
     if (r.status === 503) { watchPresence = null; }
@@ -703,7 +708,7 @@ async function refreshWatching() {
     }
     // Any other status: keep the last known presence — a transient blip must
     // not grey out every agent on screen.
-  } catch { noteBackend(false); /* same: presence is additive, never load-bearing */ }
+  } catch { noteBackend('watching', false); /* same: presence is additive, never load-bearing */ }
   rerenderAgentNames();
   renderTopSubtext();   // the agents stat's "N online" suffix
   if (chMembersOpen) renderChannelMembers();
@@ -2331,8 +2336,8 @@ async function fetchChannels() {
 async function refreshChannels() {
   let fresh;
   try { fresh = await fetchChannels(); }
-  catch { noteBackend(false); return; }  // transient — keep the current chips
-  noteBackend(true);
+  catch { noteBackend('channels', false); return; }  // transient — keep the current chips
+  noteBackend('channels', true);
   channels = fresh;
   renderChannelChips();
   renderMsgCount();
