@@ -244,6 +244,10 @@
   .lb-table td.method, .lb-table td.agent {
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
+  /* The agent link is inline-flex, which the cell's ellipsis would replace
+     wholesale with "…"; truncate the name inside it instead. */
+  .lb-table td.agent .agent-link { max-width: calc(100% - 10px); vertical-align: bottom; }
+  .lb-table td.agent .agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .lb-table tr { border-bottom: 1px solid var(--border-soft); }
   .lb-table tbody tr:last-child { border-bottom: none; }
   .lb-table tbody tr:hover td { background: #fafafa; }
@@ -287,7 +291,6 @@
     background: var(--accent); color: #fff;
     white-space: nowrap;
   }
-  .lb-table .lb-verified.pending { background: var(--bg-soft); color: var(--muted-3); font-weight: 500; }
   .lb-table .lb-verified.invalid { background: #b91c1c; }
   .lb-filter {
     display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
@@ -1177,12 +1180,3 @@
   }
   .presence.online { background: #dcfce7; color: #15803d; }
   .presence.stale { background: #fef3c7; color: #b45309; }
-  .presence.offline { background: #fee2e2; color: #b91c1c; }
-  .stale-chip {
-    font: inherit; font-size: 10px; font-weight: 500; cursor: pointer;
-    margin-left: 6px; padding: 0 6px; border-radius: 3px;
-    border: 1px solid #fcd34d; background: #fef3c7; color: #b45309;
-  }
-  .stale-chip.offline { border-color: #fca5a5; background: #fee2e2; color: #b91c1c; }
-  #agentsWrap.flash { animation: agents-flash 1.6s ease-out; }
-  @keyframes agents-flash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }

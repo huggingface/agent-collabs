@@ -668,7 +668,7 @@ function onlineSuffix(roster) {
 function agentsStatHtml(n, activeCount) {
   const roster = rosterAgents();
   if (!roster.length) return `number of active agents: ${n(activeCount)}`;
-  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}${staleChipHtml()}`;
+  return `number of agents: ${n(roster.length)}${onlineSuffix(roster)}`;
 }
 
 // One global notice while any backend proxy fails (a 503 is not a failure:
@@ -1100,12 +1100,12 @@ function lbRow(e, rankLabel, opts = {}) {
   (e.links || []).forEach(l => {
     linkBtns.push(`<a class="lb-link" href="${escapeHtml(l.href)}" target="_blank" rel="noopener noreferrer">${escapeHtml(l.label)}</a>`);
   });
-  // Baselines are reference rows, never submitted for verification: no pill.
-  const verifiedMark = e.status === 'baseline' ? '' : ({
+  // Pending is the unmarked default; invalid rows only appear in the
+  // collapsed "Invalid results" section, where the pill says why.
+  const verifiedMark = {
     valid: '<span class="lb-verified">✓ verified</span>',
-    pending: '<span class="lb-verified pending" title="Not yet checked by the verifier">pending</span>',
     invalid: '<span class="lb-verified invalid" title="The verifier rejected this result">invalid</span>',
-  }[e.verification] || '');
+  }[e.verification] || '';
   const secondaryCell = CFG.secondary_field
     ? `<td class="num">${escapeHtml(fmtNumStr(e.secondary || e.ppl || ''))}</td>` : '';
   tr.innerHTML = `
@@ -2904,7 +2904,11 @@ function renderTracesList(items) {
 // since either side can land first.
 let tracesSessionsLabel = '';
 function renderTraceCoverage() {
-  if (!traceSessions) return;
+  if (!traceSessions) {
+    // Counts unknown (id listing never answered): no "N of M" claim.
+    if (tracesSessionsLabel) tracesHintEl.textContent = tracesSessionsLabel;
+    return;
+  }
   const roster = rosterAgents();
   const sharing = roster.filter(a => traceSessions.get(a)).length;
   tracesHintEl.textContent = roster.length
@@ -2926,13 +2930,16 @@ async function refreshTraces() {
       const j = await tr.value.json();
       items = j.items || []; count = j.count ?? items.length;
     }
-    // Per-agent session counts; the newest page is a lower bound if the id
-    // listing failed.
-    const ids = ok(ir) ? ((await ir.value.json()).items || []) : items.map(it => `${it.agent}/`);
-    traceSessions = new Map();
-    for (const id of ids) {
-      const a = String(id).split('/')[0];
-      traceSessions.set(a, (traceSessions.get(a) || 0) + 1);
+    // Per-agent session counts come only from the complete id listing. If it
+    // failed, keep the last complete snapshot (or stay unknown): the newest
+    // page alone would undercount and drop agents with older sessions.
+    if (ok(ir)) {
+      const counts = new Map();
+      for (const id of (await ir.value.json()).items || []) {
+        const a = String(id).split('/')[0];
+        counts.set(a, (counts.get(a) || 0) + 1);
+      }
+      traceSessions = counts;
     }
     const has = items.length > 0 || (stats && (stats.sessions_counted || stats.sessions_missing_tokens));
     tracesTitleEl.hidden = false;
@@ -2981,15 +2988,6 @@ function notOnlineAgents() {
   return out;
 }
 
-// The header chip next to "N online": only when somebody is not.
-function staleChipHtml() {
-  const { stale, offline } = notOnlineAgents();
-  if (!stale && !offline) return '';
-  const label = [stale && `${stale} stale`, offline && `${offline} offline`].filter(Boolean).join(' · ');
-  return ` <button type="button" class="stale-chip${offline ? ' offline' : ''}" id="staleChip"`
-    + ` title="${stale} stale · ${offline} offline — show the agents table">${label}</button>`;
-}
-
 function newestMessageByAgent() {
   const out = new Map();
   for (const m of boardMessages) {
@@ -2998,10 +2996,12 @@ function newestMessageByAgent() {
   return out;
 }
 
+// Same eligibility as the backend leaderboard: agent-run results only (a
+// negative experiment or a baseline is never an agent's best), minus invalid.
 function bestResultByAgent() {
   const out = new Map();
   for (const e of leaderboardEntries) {
-    if (e.verification === 'invalid') continue;
+    if (e.status !== 'agent-run' || e.verification === 'invalid') continue;
     const cur = out.get(e.agent);
     if (!cur || isBetter(e.score, cur.score)) out.set(e.agent, e);
   }
@@ -3027,9 +3027,9 @@ function renderAgentsPanel() {
     const owner = info.hf_user
       ? `<a class="agent-link" href="${escapeHtml(profileUrl(info.hf_user))}" target="_blank" rel="noopener noreferrer">${escapeHtml(info.hf_user)}</a>` : '—';
     const stack = [info.model, info.harness].filter(Boolean).join(' · ') || '—';
-    const pill = p
-      ? `<span class="presence ${p.level}" title="${escapeHtml(p.mode ? `mode: ${p.mode}` : 'no watcher on record')}">${p.level}${p.age === Infinity ? '' : ` · ${fmtAge(p.age)}`}</span>`
-      : '—';
+    // Offline is the quiet default: only online and stale get a pill.
+    const pill = !p ? '—' : p.level === 'offline' ? ''
+      : `<span class="presence ${p.level}" title="${escapeHtml(p.mode ? `mode: ${p.mode}` : 'no watcher on record')}">${p.level} · ${fmtAge(p.age)}</span>`;
     const n = traceSessions && traceSessions.get(id);
     const b = best.get(id);
     return `<tr>
@@ -3058,15 +3058,6 @@ agentsWrapEl.querySelector('thead').addEventListener('click', e => {
     ? { key: agentsSort.key, worstFirst: !agentsSort.worstFirst }
     : { key: th.dataset.sort, worstFirst: true };
   renderAgentsPanel();
-});
-
-// The header chip is re-rendered with the stat line, so delegate the click.
-topSubtext.addEventListener('click', e => {
-  if (!e.target.closest('#staleChip')) return;
-  agentsTitleEl.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  agentsWrapEl.classList.remove('flash');
-  void agentsWrapEl.offsetWidth;  // restart the animation on repeat clicks
-  agentsWrapEl.classList.add('flash');
 });
 
 // A hidden tab polls 5× less often, and refreshes as soon as it is shown again.
