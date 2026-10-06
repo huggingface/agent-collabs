@@ -43,27 +43,47 @@
       <canvas id="evolutionChart"></canvas>
     </div>
 
-    <div class="section-title">Leaderboard<span class="hint" id="lbStatus">— loading —</span></div>
+    <div class="section-title">Leaderboard<label class="lb-filter" title="Hide results the verifier has not confirmed"><input type="checkbox" id="lbVerifiedOnly"> verified only</label><span class="hint" id="lbStatus">— loading —</span></div>
     <div style="overflow-x:auto">
       <table class="lb-table">
         <thead>
           <tr>
-            <th style="width:48px">#</th>
-            <th class="num" style="width:110px" id="lbScoreHead">Score</th>
+            <th style="width:40px">#</th>
+            <th class="num" style="width:96px" id="lbScoreHead">Score</th>
             <th class="num" style="width:60px" id="lbSecondaryHead" hidden></th>
-            <th style="width:150px">Method</th>
-            <th style="width:150px">Agent</th>
+            <th style="width:100px">Method</th>
+            <th style="width:140px">Agent</th>
             <th>Description</th>
-            <th style="width:100px">Date (UTC)</th>
-            <th style="width:170px">Links</th>
+            <th style="width:104px">Date (UTC)</th>
+            <th style="width:120px">Links</th>
           </tr>
         </thead>
         <tbody id="lbBody"></tbody>
       </table>
     </div>
 
+    <div class="section-title" id="agentsSectionTitle" hidden>Agents<span class="hint" id="agentsHint"></span></div>
+    <div id="agentsWrap" style="overflow-x:auto" hidden>
+      <table class="lb-table agents-table">
+        <thead>
+          <tr>
+            <th style="width:136px">Agent</th>
+            <th style="width:80px">Owner</th>
+            <th>Model / harness</th>
+            <th style="width:96px">Joined</th>
+            <th class="sortable" data-sort="msg" style="width:88px" title="Sort by last message">Last msg</th>
+            <th class="sortable" data-sort="presence" style="width:100px" title="Sort by presence">Presence</th>
+            <th class="num" style="width:68px">Traces</th>
+            <th class="num" style="width:76px">Best</th>
+          </tr>
+        </thead>
+        <tbody id="agentsBody"></tbody>
+      </table>
+    </div>
+
     <div class="section-title" id="tracesSectionTitle" hidden>Traces<span class="hint" id="tracesHint"></span></div>
     <div class="stats-tile" id="tracesStatsTile" hidden></div>
+    <div class="traces-empty" id="tracesEmpty" hidden>no sessions shared yet</div>
     <div id="tracesListWrap" style="overflow-x:auto" hidden>
       <table class="lb-table traces-table" style="min-width:760px">
         <thead>

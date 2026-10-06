@@ -217,10 +217,12 @@
     /* Fixed layout lets the desc column truncate to a definite width
        instead of widening the column to fit long descriptions. */
     table-layout: fixed;
-    /* Fixed columns sum to 788px; min-width keeps ≥ ~170px for Description.
-       Below that the overflow-x wrapper scrolls horizontally instead of
-       letting the squeezed columns paint headers on top of each other. */
-    min-width: 960px;
+    /* Fixed columns sum to 600px (660px with the secondary score), so the
+       table fits the ~738px left column at a 1400px viewport; min-width keeps
+       ≥ 60px for Description. Below that the overflow-x wrapper scrolls
+       horizontally instead of letting the squeezed columns paint headers on
+       top of each other. */
+    min-width: 720px;
   }
   .lb-table th, .lb-table td {
     text-align: left;
@@ -237,6 +239,15 @@
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   }
   .lb-table td.num { text-align: right; }
+  .lb-table td.date { white-space: nowrap; }
+  /* Narrow text columns ellipsize rather than wrap or spill. */
+  .lb-table td.method, .lb-table td.agent {
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  /* The agent link is inline-flex, which the cell's ellipsis would replace
+     wholesale with "…"; truncate the name inside it instead. */
+  .lb-table td.agent .agent-link { max-width: calc(100% - 10px); vertical-align: bottom; }
+  .lb-table td.agent .agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
   .lb-table tr { border-bottom: 1px solid var(--border-soft); }
   .lb-table tbody tr:last-child { border-bottom: none; }
   .lb-table tbody tr:hover td { background: #fafafa; }
@@ -279,6 +290,11 @@
     padding: 2px 6px; border-radius: 3px;
     background: var(--accent); color: #fff;
     white-space: nowrap;
+  }
+  .lb-table .lb-verified.invalid { background: #b91c1c; }
+  .lb-filter {
+    display: inline-flex; align-items: center; gap: 4px; cursor: pointer;
+    font-size: 10px; letter-spacing: 0.5px; text-transform: none; color: var(--muted-2);
   }
   /* Invalid results: a grayed-out section below the ranked rows. */
   .lb-table tr.lb-invalid-sep td {
@@ -1146,3 +1162,21 @@
   }
   .stats-tile .coverage { color: var(--muted-3); font-size: 10px; margin-top: 8px; }
   .traces-table .muted2 { color: var(--muted-4); }
+  .traces-empty { color: var(--muted-3); font-size: 11px; padding: 4px 0; }
+
+  /* --- Agents roster --- */
+  /* Fixed columns sum to 644px; Model / harness takes the rest. */
+  .agents-table { min-width: 720px; }
+  .agents-table td { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .agents-table th.num { text-align: right; }
+  .agents-table .agent-link { display: inline-flex; align-items: center; gap: 6px; }
+  .agents-table th.sortable { cursor: pointer; user-select: none; }
+  .agents-table th.sortable:hover { color: var(--ink); }
+  .agents-table th.sortable.sorted::after { content: " ▾"; color: var(--accent); }
+  .agents-table .muted2 { color: var(--muted-4); }
+  .presence {
+    display: inline-block; padding: 1px 6px; border-radius: 3px;
+    font-size: 10px; font-weight: 500; white-space: nowrap;
+  }
+  .presence.online { background: #dcfce7; color: #15803d; }
+  .presence.stale { background: #fef3c7; color: #b45309; }
