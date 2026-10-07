@@ -57,7 +57,9 @@
 #                  one you asked about; a watcher on another stream is
 #                  NO_WATCHER for this one (exit 11, naming the live stream on
 #                  stderr). LAST is the last loop status the watcher recorded.
-#                  BEHIND outranks every liveness verdict — act on it first.
+#                  BEHIND outranks every liveness verdict — act on it first;
+#                  stderr then names the command that reads the page now.
+
 #   --help         this text
 #
 # exit codes:
@@ -71,9 +73,9 @@
 #   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death; also a
 #       --max-wait run that found a live watcher parked for this handle on a
 #       stream that covers this one (see --max-wait above)
-#   4   gave up after 10 consecutive request failures, or --max-wait ran out
-#       mid-retry (also: --status could not reach the server); the heartbeat
-#       records status=gave_up
+#   4   gave up after COLLAB_WATCH_RETRY_BUDGET_S (20 min) of consecutive
+#       request failures, or --max-wait ran out mid-retry (also: --status could
+#       not reach the server); the heartbeat records status=gave_up
 #   5   another watcher already holds the lock for this handle. A --max-wait
 #       run exits 3 instead when that watcher covers this stream and is
 #       looping; it still exits 5 when it is on a stream that does not cover
@@ -100,6 +102,8 @@
 #   COLLAB_WATCH_BACKOFF  initial retry backoff seconds (2; doubles to 60). 0
 #                         makes retries instant — a test hook, not a production
 #                         setting. It does NOT shorten the idle pacing floor.
+#   COLLAB_WATCH_RETRY_BUDGET_S  seconds of consecutive request failures before
+#                         giving up with exit 4 (1200: outlasts a Space rebuild)
 #
 # state directory (one per host+handle, so running from another working
 # directory can never silently re-baseline and skip mail):
@@ -108,8 +112,10 @@
 #                      loop pass — including empty timeouts and the give-up —
 #                      so a stale heartbeat means exactly "no watcher process
 #                      has run recently", nothing else
-#   lock/              mkdir-based lock, lock/pid inside; a lock whose pid
-#                      fails `kill -0` is stale and is reclaimed
+#   lock/              mkdir-based lock; lock/pid holds the pid and its start
+#                      time. A lock whose pid fails `kill -0`, or now belongs
+#                      to a process started at another time (PID reuse,
+#                      another PID namespace), is stale and is reclaimed
 #   delivered.jsonl    every delivered page, appended BEFORE it is printed
 #   dead-letter.jsonl  pages a --exec handler kept refusing (see --exec below)
 # The cursor is per-STREAM; the lock and heartbeat are per-HANDLE, because one
@@ -168,12 +174,15 @@
 #   filtered. The number of items in the page IS the unread count. A wrapper
 #   that reads `matched` will happily report "up to date" with mail pending.
 #
-# NOTE (backoff tradeoff): HTTP 5xx, refused/unresolved connections, and the
-#   expected parked-connection drops when the Space restarts all share ONE
-#   small exponential backoff (2,4,8,...,60s) plus a 10-in-a-row streak that
-#   exits 4. Folding the normal drops in keeps this simple; the cost is that a
-#   Space restart reconnects after ~2s instead of instantly. 3xx and 4xx do NOT
-#   back off — they fail immediately (a 4xx with the server's error body),
+# NOTE (backoff tradeoff): HTTP 5xx (including the edge's 502/503/504 while a
+#   Space rebuilds), refused/unresolved connections, and the expected
+#   parked-connection drops when the Space restarts all share ONE small
+#   exponential backoff (2,4,8,...,60s, then every 60s) and ONE time budget:
+#   after COLLAB_WATCH_RETRY_BUDGET_S (20 min) of failures in a row it exits 4.
+#   The budget is time, not a count, so a watcher outlives a redeploy; under
+#   --max-wait the ceiling still wins. Folding the normal drops in keeps this
+#   simple; the cost is that a Space restart reconnects after ~2s instead of
+#   instantly. 3xx and 4xx (a 404 too, even mid-rebuild) do NOT back off — they fail immediately (a 4xx with the server's error body),
 #   because neither a typo'd handle nor a redirecting base URL is a transient
 #   condition. The routine idle path is not a failure at all: when the wait
 #   elapses the server answers 200 with an empty page, so an idle watcher never
@@ -189,7 +198,6 @@ export LC_ALL
 SELF=collab_watch
 LIMIT=10           # records per delivered page
 STATUS_LIMIT=100   # --status unread count saturates here
-FAIL_STREAK_MAX=10 # consecutive request failures before exit 4
 IDLE_FLOOR_S=2     # minimum seconds between two empty answers
 
 # Server-issued filename shape: <YYYYMMDD>-<HHMMSS>-<mmm>_<agent-id>.md, where
@@ -200,12 +208,16 @@ STAMP_RE='[0-9]{8}-[0-9]{6}(-[0-9]{3})?'
 WAIT="${COLLAB_WATCH_WAIT:-55}"
 EXEC_RETRIES="${COLLAB_WATCH_EXEC_RETRIES:-3}"
 BACKOFF_BASE="${COLLAB_WATCH_BACKOFF:-2}"
+RETRY_BUDGET="${COLLAB_WATCH_RETRY_BUDGET_S:-1200}"
 
 BODY=""
+CODE=""
+CHILD=""
 LOCK_HELD=""
 HTTP=000
 CURL_RC=0
 STREAK=0
+FAIL_SINCE=0
 BACKOFF=2
 CURSOR=""
 PAGE_CURSOR=""
@@ -362,6 +374,7 @@ esac
 is_num "$WAIT" || fatal "COLLAB_WATCH_WAIT must be a whole number of seconds, got '$WAIT'"
 is_num "$EXEC_RETRIES" || fatal "COLLAB_WATCH_EXEC_RETRIES must be a whole number, got '$EXEC_RETRIES'"
 is_num "$BACKOFF_BASE" || fatal "COLLAB_WATCH_BACKOFF must be a whole number of seconds, got '$BACKOFF_BASE'"
+is_num "$RETRY_BUDGET" || fatal "COLLAB_WATCH_RETRY_BUDGET_S must be a whole number of seconds, got '$RETRY_BUDGET'"
 BACKOFF="$BACKOFF_BASE"
 
 BASE="${BASE%/}"
@@ -409,11 +422,14 @@ case "$STREAM" in
 esac
 
 BODY=$(mktemp "$DIR/.body.XXXXXX") || fatal "could not create a temp file in '$DIR'"
+CODE=$(mktemp "$DIR/.code.XXXXXX") || fatal "could not create a temp file in '$DIR'"
 
 cleanup() {
-    if [ -n "$BODY" ]; then
-        rm -f "$BODY" 2>/dev/null || :
+    # A parked curl (or a backoff sleep) must not outlive us.
+    if [ -n "$CHILD" ]; then
+        kill "$CHILD" 2>/dev/null || :
     fi
+    rm -f "$BODY" "$CODE" 2>/dev/null || :
     # Release the lock only while it is still OURS: if the pid inside is no
     # longer $$, another watcher owns the directory (it reclaimed ours as stale)
     # and removing it would hand a third one the same cursor file.
@@ -424,11 +440,29 @@ cleanup() {
     :
 }
 # The signal traps exit explicitly so the EXIT trap runs and the lock is
-# released: a watcher killed by its harness must not leave a lock behind.
+# released: a watcher killed by its harness must not leave a lock behind. They
+# fire at once: curl and every sleep run through reap (below); only an --exec
+# handler still runs in the foreground.
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 trap 'exit 129' HUP
+
+# reap <pid>: wait for a background child and return its status. A shell runs
+# a trap only once its FOREGROUND child exits — up to a whole parked request —
+# but a trapped signal interrupts `wait` immediately, and cleanup kills $CHILD.
+reap() {
+    CHILD="$1"
+    reap_rc=0
+    wait "$CHILD" || reap_rc=$?
+    CHILD=""
+    return "$reap_rc"
+}
+
+nap() {
+    sleep "$1" &
+    reap "$!" || :
+}
 
 # ── state helpers ─────────────────────────────────────────────────────
 
@@ -464,11 +498,38 @@ lock_pid() {
     fi
 }
 
+lock_start() {
+    sed -n 2p "$LOCKDIR/pid" 2>/dev/null || :
+}
+
+# proc_start <pid>: an opaque start-time stamp, empty when unavailable. Linux
+# /proc field 22 (after the parenthesised comm, which may contain spaces), else
+# `ps -o lstart=` (macOS, procps). Busybox ps has neither -p nor lstart, but
+# busybox systems have /proc.
+proc_start() {
+    if [ -r "/proc/$1/stat" ]; then
+        sed 's/.*) //' "/proc/$1/stat" 2>/dev/null | cut -d' ' -f20
+    else
+        ps -o lstart= -p "$1" 2>/dev/null || :
+    fi
+}
+
+# lock_alive <pid> [start]: `kill -0` alone is fooled by PID reuse and by a pid
+# from another PID namespace, so a recorded start time must match too. A lock
+# without one (an older watcher) or a host where neither probe works falls back
+# to the pid alone.
 lock_alive() {
     la_pid="${1:-}"
     is_num "$la_pid" || return 1
     kill -0 "$la_pid" 2>/dev/null || return 1
-    return 0
+    [ -n "${2:-}" ] || return 0
+    la_start=$(proc_start "$la_pid")
+    [ -z "$la_start" ] || [ "$la_start" = "$2" ]
+}
+
+lock_write() {
+    LOCK_HELD=1
+    printf '%s\n%s\n' "$$" "$(proc_start "$$")" >"$LOCKDIR/pid"
 }
 
 # One watcher per HANDLE — not per handle+stream: two watchers under one handle
@@ -540,8 +601,7 @@ parked_watcher_covers() {
 
 lock_acquire() {
     if mkdir "$LOCKDIR" 2>/dev/null; then
-        LOCK_HELD=1
-        printf '%s\n' "$$" >"$LOCKDIR/pid"
+        lock_write
         return 0
     fi
     lk_pid=$(lock_pid)
@@ -552,10 +612,10 @@ lock_acquire() {
     # pid by then, while a crash mid-acquire leaves the file empty forever and
     # is still reclaimed on the second read.
     if [ -z "$lk_pid" ]; then
-        sleep 1
+        nap 1
         lk_pid=$(lock_pid)
     fi
-    if lock_alive "$lk_pid"; then
+    if lock_alive "$lk_pid" "$(lock_start)"; then
         if [ -n "$MAX_WAIT" ]; then
             # A bounded run is the safety net under a parked watcher: if that
             # watcher covers this stream and is looping, it will exit with the
@@ -568,7 +628,7 @@ lock_acquire() {
                 log "--after cannot run while a watcher (pid $lk_pid) is parked for this handle: stop it (kill $lk_pid), run this command again, then relaunch the background watcher; exiting 5"
                 exit 5
             fi
-            if parked_watcher_covers && lock_alive "$lk_pid"; then
+            if parked_watcher_covers && lock_alive "$lk_pid" "$(lock_start)"; then
                 log "a watcher is already parked for this handle (pid $lk_pid, stream $HB_STREAM); it delivers your mail the moment it arrives, so this check has nothing to do (if you did not launch pid $lk_pid, nobody is reading it: kill it and launch yours); exiting 3"
                 exit 3
             fi
@@ -578,12 +638,11 @@ lock_acquire() {
         log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
         exit 5
     fi
-    log "reclaiming stale lock $LOCKDIR (pid ${lk_pid:-unknown} is gone)"
+    log "reclaiming stale lock $LOCKDIR (pid ${lk_pid:-unknown} is gone or was reused)"
     rm -f "$LOCKDIR/pid" 2>/dev/null || :
     rmdir "$LOCKDIR" 2>/dev/null || :
     if mkdir "$LOCKDIR" 2>/dev/null; then
-        LOCK_HELD=1
-        printf '%s\n' "$$" >"$LOCKDIR/pid"
+        lock_write
         return 0
     fi
     lk_pid=$(lock_pid)
@@ -648,7 +707,9 @@ watch_status() {
 # minutes and died with an opaque `curl rc=22`.
 do_request() {
     CURL_RC=0
-    HTTP=$(curl -sS -o "$BODY" -w '%{http_code}' --max-time "$2" "$1") || CURL_RC=$?
+    curl -sS -o "$BODY" -w '%{http_code}' --max-time "$2" "$1" >"$CODE" &
+    reap "$!" || CURL_RC=$?
+    HTTP=$(cat "$CODE")
     [ -n "$HTTP" ] || HTTP=000
 }
 
@@ -658,7 +719,7 @@ do_request() {
 # blindly would let the server move a watcher to another host, scheme or handle —
 # so a redirecting base URL can never succeed, no matter how long we retry:
 # `http://<org>.hf.space` (which redirects to https) would otherwise walk the
-# whole backoff ladder for ~5 minutes and then exit 4, reporting an outage
+# whole backoff ladder for 20 minutes and then exit 4, reporting an outage
 # instead of the one-word fix.
 classify() {
     [ "$CURL_RC" -eq 0 ] || return 1
@@ -687,14 +748,20 @@ fail_http() {
     exit 1
 }
 
-# One shared exponential backoff for every retryable failure. Bumps the streak
-# and gives up (exit 4) at FAIL_STREAK_MAX, stamping the heartbeat first so
-# --status can report the give-up after this process is gone.
+# One shared exponential backoff for every retryable failure. Gives up (exit
+# 4) once the failures in a row span RETRY_BUDGET seconds — a time budget, not
+# a count, because the outage it must outlast (a Space rebuild) is measured in
+# minutes — stamping the heartbeat first so --status can report the give-up
+# after this process is gone.
 on_retryable() {
+    if [ "$STREAK" -eq 0 ]; then
+        FAIL_SINCE=$(now)
+    fi
     STREAK=$((STREAK + 1))
-    if [ "$STREAK" -ge "$FAIL_STREAK_MAX" ]; then
+    or_failing=$(($(now) - FAIL_SINCE))
+    if [ "$or_failing" -ge "$RETRY_BUDGET" ]; then
         hb gave_up
-        log "giving up after $STREAK consecutive request failures (last: HTTP $HTTP, curl rc=$CURL_RC)"
+        log "giving up after $STREAK consecutive request failures over ${or_failing}s (last: HTTP $HTTP, curl rc=$CURL_RC)"
         exit 4
     fi
     if [ -n "$DEADLINE" ] && [ $((DEADLINE - $(now))) -le "$BACKOFF" ]; then
@@ -703,9 +770,10 @@ on_retryable() {
         exit 4
     fi
     hb retrying
-    log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK/$FAIL_STREAK_MAX in ${BACKOFF}s"
+    log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK in ${BACKOFF}s (failing for ${or_failing}s of ${RETRY_BUDGET}s)"
+
     if [ "$BACKOFF" -gt 0 ]; then
-        sleep "$BACKOFF"
+        nap "$BACKOFF"
     fi
     BACKOFF=$((BACKOFF * 2))
     if [ "$BACKOFF" -gt 60 ]; then
@@ -909,7 +977,7 @@ idle_pace() {
             ;;
     esac
     if [ "$ip_elapsed" -lt "$IDLE_FLOOR_S" ]; then
-        sleep "$IDLE_FLOOR_S"
+        nap "$IDLE_FLOOR_S"
     fi
 }
 
@@ -1010,8 +1078,9 @@ run_exec() {
         hb exec_failed
         log "handler exited $re_rc on the page after '${re_page#start:}'; NOT advancing the cursor, re-delivering in ${re_backoff}s (failure $re_fails/$EXEC_RETRIES)"
         if [ "$re_backoff" -gt 0 ]; then
-            sleep "$re_backoff"
+            nap "$re_backoff"
         fi
+
         re_backoff=$((re_backoff * 2))
         if [ "$re_backoff" -gt 60 ]; then
             re_backoff=60
@@ -1063,7 +1132,8 @@ run_peek() {
 run_status() {
     rs_pid=$(lock_pid)
     rs_alive=0
-    if lock_alive "$rs_pid"; then
+    if lock_alive "$rs_pid" "$(lock_start)"; then
+
         rs_alive=1
     else
         rs_pid="-"
@@ -1137,6 +1207,13 @@ run_status() {
         rs_rc=0
     fi
 
+    if [ "$rs_rc" -eq 10 ]; then
+        # The same command rearm_cmd prints, so a status run invoked with
+        # inline COLLAB_WATCH_DIR/STATE/WAIT names a read that lands in the
+        # SAME state dir: the default one would cold-baseline at the newest
+        # message and skip exactly the mail this line just reported.
+        log "read it now: $(rearm_cmd) --max-wait 5"
+    fi
     if [ "$rs_wrong_stream" -eq 1 ]; then
         log "a watcher IS alive for this handle (pid $rs_pid) but it is watching '$rs_stream', not '$STREAM': nothing is advancing cursor.$STREAM"
     fi
