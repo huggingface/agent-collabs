@@ -49,6 +49,8 @@ from huggingface_hub import (
     batch_bucket_files,
     create_bucket,
     create_repo,
+    SpaceStage,
+    get_space_runtime,
     get_token,
     list_bucket_tree,
     space_info,
@@ -61,6 +63,12 @@ PLACEHOLDER_ORG = "my-collab-org"  # the template's challenge.yaml ships with it
 
 
 # ───────────────────────── config ─────────────────────────
+
+
+def _in_org(repo_id: str, org: str) -> bool:
+    """Whether `repo_id` lives in `org`. Hub namespaces are case-insensitive
+    (`Acme/x` is `acme/x`), so a case difference must not hide an exposure."""
+    return repo_id.split("/")[0].casefold() == org.casefold()
 
 
 def load_config(path: Path) -> dict:
@@ -105,9 +113,9 @@ def load_config(path: Path) -> dict:
     # already drops caller IPs from audit rows in that case; what remains
     # sensitive is a private eval set (jobs mode) or the evaluator's code.
     exposed = []
-    if mode == "jobs" and st["audit_bucket"].split("/")[0] == ch["org"]:
+    if mode == "jobs" and _in_org(st["audit_bucket"], ch["org"]):
         exposed.append(f"storage.audit_bucket ({st['audit_bucket']}, holds the private eval set)")
-    if mode == "eval-space" and sp["eval"].split("/")[0] == ch["org"]:
+    if mode == "eval-space" and _in_org(sp["eval"], ch["org"]):
         exposed.append(f"spaces.eval ({sp['eval']}, evaluator code)")
     for what in exposed:
         print(
@@ -312,11 +320,30 @@ def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
         upload_folder(repo_id=repo_id, repo_type="space", folder_path=str(dst), token=token)
 
 
-def wait_healthy(url: str, path: str, *, token: str | None = None, timeout_s: int = 600) -> bool:
-    # `token` is needed for PRIVATE Spaces (the eval space): their *.hf.space
-    # endpoint requires bearer auth.
+# Stages a Space can never recover from on its own — no point polling further.
+DEAD_SPACE_STAGES = {
+    SpaceStage.PAUSED, SpaceStage.BUILD_ERROR, SpaceStage.RUNTIME_ERROR,
+    SpaceStage.CONFIG_ERROR, SpaceStage.DELETING, SpaceStage.NO_APP_FILE,
+}
+# Right after an upload a Space can still report its previous stage (say, the
+# BUILD_ERROR being fixed) until the rebuild starts, so a dead stage only
+# counts once it has held for this many consecutive polls.
+DEAD_STAGE_POLLS = 3
+
+
+def wait_healthy(url: str, path: str, repo_id: str, *, token: str | None = None,
+                 hub_token: str | None = None, timeout_s: int = 600, poll_s: float = 10) -> bool:
+    """Poll `url+path` until it answers 200. Gives up early, printing the
+    Space's own error, when the Space sits in a stage it cannot leave on its
+    own (paused, build/runtime/config error, ...), with a hint when the cause
+    is the org's Space quota.
+
+    `token` is sent to the endpoint and only needed for PRIVATE Spaces (the
+    eval Space: its *.hf.space URL requires bearer auth); `hub_token` reads
+    the Space's runtime from the Hub API."""
     headers = {"Authorization": f"Bearer {token}"} if token else {}
     deadline = time.time() + timeout_s
+    dead_polls = 0
     while time.time() < deadline:
         try:
             r = httpx.get(f"{url}{path}", timeout=10, follow_redirects=True, headers=headers)
@@ -324,7 +351,23 @@ def wait_healthy(url: str, path: str, *, token: str | None = None, timeout_s: in
                 return True
         except Exception:
             pass
-        time.sleep(10)
+        try:
+            runtime = get_space_runtime(repo_id, token=hub_token or token)
+        except Exception:
+            runtime = None
+        if runtime is not None and runtime.stage in DEAD_SPACE_STAGES:
+            dead_polls += 1
+            if dead_polls >= DEAD_STAGE_POLLS:
+                err = (runtime.raw or {}).get("errorMessage") or "see the Space logs"
+                print(f"  {repo_id} ✗ {runtime.stage}: {err}")
+                if "quota" in err.lower():
+                    print("    the org has no Space quota for this hardware — add a payment "
+                          "method / check the org's Spaces settings, then re-run (the bootstrap "
+                          "is idempotent)")
+                return False
+        else:
+            dead_polls = 0
+        time.sleep(poll_s)
     return False
 
 
@@ -515,13 +558,13 @@ def main() -> int:
         print(f"eval space: https://huggingface.co/spaces/{sp['eval']} (private)")
     if not args.skip_wait:
         print("waiting for the Spaces to build (first build takes a few minutes)…")
-        checks = [("backend", backend_url, "/v1/healthz", None),
-                  ("dashboard", dashboard_url, "/api/health", None)]
+        checks = [("backend", backend_url, "/v1/healthz", None, sp["backend"]),
+                  ("dashboard", dashboard_url, "/api/health", None, sp["dashboard"])]
         if ver["mode"] == "eval-space":
-            checks.append(("eval", space_url(sp["eval"], token), "/healthz", token))
+            checks.append(("eval", space_url(sp["eval"], token), "/healthz", token, sp["eval"]))
         ok = True
-        for name, url, path, tok in checks:
-            healthy = wait_healthy(url, path, token=tok)
+        for name, url, path, tok, repo_id in checks:
+            healthy = wait_healthy(url, path, repo_id, token=tok, hub_token=token)
             print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ not healthy — see above or check the Space logs'}")
             ok = ok and healthy
         if not ok:

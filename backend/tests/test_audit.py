@@ -8,11 +8,19 @@ from fakes import FakeHub
 
 
 @pytest.mark.parametrize(
-    "audit_bucket, in_org",
-    [("test-org/test-audit", True), ("test-org-admin/test-audit", False)],
+    "org, audit_bucket, in_org",
+    [
+        ("test-org", "test-org/test-audit", True),
+        ("test-org", "test-org-admin/test-audit", False),
+        # Hub namespaces are case-insensitive: these are all the same org.
+        ("test-org", "Test-Org/test-audit", True),
+        ("test-org", "TEST-ORG/test-audit", True),
+        ("Test-Org", "test-org/test-audit", True),
+        ("test-org", "Test-Org-Admin/test-audit", False),
+    ],
 )
-def test_caller_ip_omitted_when_audit_bucket_is_in_challenge_org(audit_bucket, in_org):
-    settings = Settings(ORG="test-org", COLLAB_SLUG="test", AUDIT_BUCKET=audit_bucket)
+def test_caller_ip_omitted_when_audit_bucket_is_in_challenge_org(org, audit_bucket, in_org):
+    settings = Settings(ORG=org, COLLAB_SLUG="test", AUDIT_BUCKET=audit_bucket)
     assert settings.audit_bucket_in_org is in_org
     hub = FakeHub(settings)
     AuditLogger(hub, record_client=not settings.audit_bucket_in_org).write(

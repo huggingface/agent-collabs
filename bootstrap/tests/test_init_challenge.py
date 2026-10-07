@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import httpx
 import pytest
 import yaml
 
@@ -121,3 +122,116 @@ def test_listing_that_fails_midway_aborts_instead_of_guessing():
     with patch.object(b, "list_bucket_tree", side_effect=listing):
         with pytest.raises(SystemExit):
             b.bucket_has("org/bucket", "README.md", "tok")
+
+
+# ── org namespace comparisons ────────────────────────────────────────────────
+
+@pytest.mark.parametrize("repo_id, org, expected", [
+    ("acme/x-audit", "acme", True),
+    ("Acme/x-audit", "acme", True),
+    ("acme/x-audit", "ACME", True),
+    ("acme-admin/x-audit", "acme", False),
+    ("Acme-Admin/x-eval", "acme", False),
+])
+def test_in_org_ignores_case(repo_id, org, expected):
+    assert b._in_org(repo_id, org) is expected
+
+
+@pytest.mark.parametrize("audit_bucket, warned", [
+    ("Acme/x-audit", True), ("acme/x-audit", True), ("acme-admin/x-audit", False),
+])
+def test_private_eval_set_in_challenge_org_is_flagged_whatever_the_case(tmp_path, capsys, audit_bucket, warned):
+    cfg = {
+        "challenge": {"org": "acme", "slug": "x", "title": "X"},
+        "jobs": {"enabled": True},
+        "verification": {"mode": "jobs"},
+        "storage": {"audit_bucket": audit_bucket},
+    }
+    path = tmp_path / "challenge.yaml"
+    path.write_text(yaml.safe_dump(cfg))
+    b.load_config(path)
+    assert ("storage.audit_bucket" in capsys.readouterr().out) is warned
+
+
+# ── wait_healthy ─────────────────────────────────────────────────────────────
+
+class _Clock:
+    def __init__(self):
+        self.now = 1_000_000.0
+
+    def time(self):
+        return self.now
+
+    def sleep(self, s):
+        self.now += s
+
+
+def _wait(monkeypatch, health, stages, *, token=None, hub_token="hf_bootstrap", errmsg=None):
+    """Run wait_healthy on a fake clock. `health`/`stages` are lists consumed
+    one per poll (the last value repeats); a stage of Exception means the
+    runtime lookup fails. Returns (result, http_calls, runtime_tokens, out)."""
+    clock = _Clock()
+    monkeypatch.setattr(b.time, "time", clock.time)
+    monkeypatch.setattr(b.time, "sleep", clock.sleep)
+    http_calls, runtime_tokens = [], []
+
+    def fake_get(url, **kw):
+        http_calls.append(kw.get("headers"))
+        status = health[min(len(http_calls) - 1, len(health) - 1)]
+        if status is Exception:
+            raise httpx.ConnectError("down")
+        return SimpleNamespace(status_code=status)
+
+    def fake_runtime(repo_id, token=None):
+        runtime_tokens.append(token)
+        stage = stages[min(len(runtime_tokens) - 1, len(stages) - 1)]
+        if stage is Exception:
+            raise RuntimeError("runtime lookup failed")
+        return SimpleNamespace(stage=stage, raw={"errorMessage": errmsg} if errmsg else {})
+
+    monkeypatch.setattr(b.httpx, "get", fake_get)
+    monkeypatch.setattr(b, "get_space_runtime", fake_runtime)
+    result = b.wait_healthy("https://x.hf.space", "/health", "acme/x-backend",
+                            token=token, hub_token=hub_token, timeout_s=600, poll_s=10)
+    return result, http_calls, runtime_tokens
+
+
+def test_ordinary_startup_becomes_healthy(monkeypatch):
+    S = b.SpaceStage
+    ok, calls, _ = _wait(monkeypatch, [503, 503, 503, 200], [S.BUILDING, S.RUNNING_BUILDING, S.APP_STARTING])
+    assert ok and len(calls) == 4
+
+
+def test_paused_for_quota_stops_early_with_a_hint(monkeypatch, capsys):
+    ok, calls, tokens = _wait(monkeypatch, [503], [b.SpaceStage.PAUSED],
+                              errmsg="Quota exceeded for flavor cpu-basic: limit=0")
+    out = capsys.readouterr().out
+    assert not ok
+    assert len(calls) == b.DEAD_STAGE_POLLS          # ~30 s, not the full 600 s
+    assert "Quota exceeded" in out and "no Space quota" in out
+    assert tokens and all(t == "hf_bootstrap" for t in tokens)
+
+
+def test_build_error_stops_early_without_a_quota_hint(monkeypatch, capsys):
+    ok, calls, _ = _wait(monkeypatch, [Exception], [b.SpaceStage.BUILD_ERROR])
+    out = capsys.readouterr().out
+    assert not ok and len(calls) == b.DEAD_STAGE_POLLS
+    assert "BUILD_ERROR" in out and "see the Space logs" in out and "quota" not in out
+
+
+def test_stale_error_stage_right_after_upload_is_not_fatal(monkeypatch):
+    # The previous BUILD_ERROR lingers for two polls, then the rebuild starts.
+    S = b.SpaceStage
+    ok, calls, _ = _wait(monkeypatch, [503, 503, 503, 503, 200],
+                         [S.BUILD_ERROR, S.BUILD_ERROR, S.BUILDING, S.APP_STARTING, S.RUNNING])
+    assert ok and len(calls) == 5
+
+
+def test_runtime_lookup_failures_fall_back_to_the_timeout(monkeypatch):
+    ok, calls, _ = _wait(monkeypatch, [503], [Exception])
+    assert not ok and len(calls) == 60
+
+
+def test_private_space_gets_the_bearer_token_on_its_endpoint(monkeypatch):
+    ok, calls, tokens = _wait(monkeypatch, [200], [b.SpaceStage.RUNNING], token="hf_eval", hub_token="hf_bootstrap")
+    assert ok and calls[0] == {"Authorization": "Bearer hf_eval"}

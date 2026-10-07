@@ -163,8 +163,10 @@ class Settings(BaseSettings):
 
     @property
     def audit_bucket_in_org(self) -> bool:
-        """True when participants (challenge-org members) can read the audit bucket."""
-        return self.audit_bucket.split("/")[0] == self.org
+        """True when participants (challenge-org members) can read the audit
+        bucket. Hub namespaces are case-insensitive (`Test-Org/audit` is the
+        bucket `test-org/audit`), so compare them case-folded."""
+        return self.audit_bucket.split("/")[0].casefold() == self.org.casefold()
 
     @property
     def agent_bucket_prefix(self) -> str:
