@@ -213,9 +213,42 @@ app.add_middleware(GZipMiddleware, minimum_size=1024)
 # ──────────────────────────────────────────────────────────────
 # Health & config
 # ──────────────────────────────────────────────────────────────
+# /api/health used to return 200 just for the process being up, even in "hub"
+# mode with a dead/unscoped HF_TOKEN — bootstrap's health poll would then call
+# the dashboard "ready" while every /api/* call 401s. This does one cheap real
+# Hub read (a tree listing, no file contents) so health reflects whether the
+# token can actually read the bucket. Cached briefly since bootstrap (and any
+# uptime monitor) may poll every few seconds.
+_HEALTH_CACHE_TTL = 15.0
+_health_cache: dict[str, Any] = {"ts": 0.0, "detail": None}
+
+
+async def _check_bucket_reachable() -> str | None:
+    """None when the token can list the bucket, else why not. Any non-2xx is
+    a failure: a missing prefix in an existing bucket lists as 200 [], so a
+    404 means the bucket itself is missing or misconfigured."""
+    if time.monotonic() - _health_cache["ts"] < _HEALTH_CACHE_TTL:
+        return _health_cache["detail"]
+    try:
+        client: httpx.AsyncClient = app.state.client
+        r = await client.get(f"{HUB}/api/buckets/{BUCKET}/tree/{AGENTS_PREFIX}")
+        detail = None if r.is_success else f"HTTP {r.status_code}"
+    except Exception as exc:
+        # Some exceptions (httpx.ReadTimeout("")) have an empty message;
+        # failure is "detail is not None", never the message's truthiness.
+        detail = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    _health_cache["ts"] = time.monotonic()
+    _health_cache["detail"] = detail
+    return detail
+
+
 @app.get("/api/health")
 async def health() -> dict[str, Any]:
     mode = "local" if LOCAL_BUCKET_DIR else ("hub" if HF_TOKEN else "unconfigured")
+    if mode == "hub":
+        detail = await _check_bucket_reachable()
+        if detail is not None:
+            raise HTTPException(503, f"HF_TOKEN cannot read {BUCKET}: {detail}")
     return {
         "ok": True,
         "mode": mode,

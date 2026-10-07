@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 import tempfile
@@ -119,7 +120,16 @@ def resolve_token() -> str:
             for line in env_file.read_text().splitlines():
                 key, sep, value = line.strip().partition("=")
                 if sep and key.strip() == "HF_TOKEN":
-                    token = value.strip().strip("'\"")
+                    value = value.strip()
+                    # Quoted value: take up to the matching close quote (so a
+                    # trailing `# comment` inside/after the quotes is dropped
+                    # with it). Unquoted: an inline comment starts at `#`.
+                    # (`"" in "'\""` is True, so an empty value needs its own check.)
+                    if value and value[0] in "'\"":
+                        value = value[1:].split(value[0], 1)[0]
+                    else:
+                        value = value.split("#", 1)[0].strip()
+                    token = value
                     break
     if not token:
         token = get_token()
@@ -214,13 +224,22 @@ def dashboard_variables(cfg: dict, backend_url: str) -> dict[str, str]:
 
 
 def bucket_has(bucket: str, path: str, token: str) -> bool:
+    """True if `path` exists in `bucket`. A genuinely missing path is just an
+    empty listing, not an exception — list_bucket_tree only raises on a real
+    problem (bad bucket id, rate limit, 5xx). Treating that the same as
+    "absent" would let a transient Hub error make the caller silently
+    overwrite the organizer's hand-edited README or reset every verification
+    verdict, so any such error aborts the run instead."""
     try:
-        for e in list_bucket_tree(bucket_id=bucket, prefix=path, token=token):
-            if getattr(e, "path", None) == path:
-                return True
-    except Exception:
-        pass
-    return False
+        entries = list(list_bucket_tree(bucket_id=bucket, prefix=path, token=token))
+    except Exception as exc:
+        sys.exit(
+            f"could not check whether {bucket}/{path} exists: {exc}\n"
+            "→ this may be a transient Hub error (rate limit, 5xx) — re-run "
+            "once it clears; refusing to guess, since a wrong guess here "
+            "would overwrite existing data."
+        )
+    return any(getattr(e, "path", None) == path for e in entries)
 
 
 def space_url(repo_id: str, token: str) -> str:
@@ -233,13 +252,31 @@ def space_url(repo_id: str, token: str) -> str:
     return "https://" + repo_id.replace("/", "-").replace("_", "-").replace(".", "-").lower() + ".hf.space"
 
 
+def _stamp(text: str, key: str, value: str) -> str:
+    """Replace a `key: ...` line in the Space card frontmatter, matching on
+    the key alone (not a specific placeholder value) so an already-edited
+    line still gets stamped. Fails loudly unless the key is in the
+    frontmatter exactly once: a missing key would ship the Space with the
+    wrong oauth org, title, or description, and a duplicate would leave the
+    other copy, which a YAML parser may pick, unstamped. Lines in the
+    Markdown body never count."""
+    m = re.match(r"---[ \t]*\n(.*?\n)---[ \t]*(?:\n|$)", text, flags=re.S)
+    if not m:
+        sys.exit("dashboard README.md: no `---` frontmatter block at the top")
+    front = m.group(1)
+    line_re = re.compile(rf"^{re.escape(key)}[ \t]*:.*$", flags=re.M)
+    n = len(line_re.findall(front))
+    if n != 1:
+        sys.exit(f"dashboard README.md: expected exactly one '{key}:' line in the frontmatter, found {n}")
+    new_front = line_re.sub(lambda _: f"{key}: {value}", front)
+    return text[: m.start(1)] + new_front + text[m.end(1):]
+
+
 def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
     """Upload dashboard/ with a challenge-specific Space card: OAuth gated to
     the challenge org, and title/short_description from challenge.yaml — the
     dashboard is the one Space carrying the `agent-collab` discovery tag, so
     its card is what directories/meta-spaces display."""
-    import re
-
     ch = cfg["challenge"]
     title = ch["title"]
     short = str(ch.get("short_description") or "")[:60] or f"Agent collab: {title}"[:60]
@@ -254,16 +291,10 @@ def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".venv", "venv", "tests", "node_modules"),
         )
         card = dst / "README.md"
-        text = card.read_text().replace(
-            "hf_oauth_authorized_org: REPLACED_BY_BOOTSTRAP",
-            f"hf_oauth_authorized_org: {ch['org']}",
-        )
-        text = re.sub(r"^title: .*$", f"title: {json.dumps(title)}", text, count=1, flags=re.M)
-        text = re.sub(
-            r"^short_description: .*$",
-            f"short_description: {json.dumps(short)}",
-            text, count=1, flags=re.M,
-        )
+        text = card.read_text()
+        text = _stamp(text, "hf_oauth_authorized_org", ch["org"])
+        text = _stamp(text, "title", json.dumps(title))
+        text = _stamp(text, "short_description", json.dumps(short))
         card.write_text(text)
         upload_folder(repo_id=repo_id, repo_type="space", folder_path=str(dst), token=token)
 
@@ -430,25 +461,9 @@ def main() -> int:
         print(f"seeding central bucket: {', '.join(p for _, p in seeds)}")
         batch_bucket_files(st["central_bucket"], add=seeds, token=token)
 
-    # 5 ── health checks
-    print(f"\nbackend:    {backend_url}")
-    print(f"dashboard:  {dashboard_url}")
-    if ver["mode"] == "eval-space":
-        print(f"eval space: https://huggingface.co/spaces/{sp['eval']} (private)")
-    if not args.skip_wait:
-        print("waiting for the Spaces to build (first build takes a few minutes)…")
-        checks = [("backend", backend_url, "/v1/healthz", None),
-                  ("dashboard", dashboard_url, "/api/health", None)]
-        if ver["mode"] == "eval-space":
-            checks.append(("eval", space_url(sp["eval"], token), "/healthz", token))
-        ok = True
-        for name, url, path, tok in checks:
-            healthy = wait_healthy(url, path, token=tok)
-            print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ TIMED OUT — check the Space logs'}")
-            ok = ok and healthy
-        if not ok:
-            return 1
-
+    # Manual steps left after this run — computed up front (not just on
+    # success) so a health-check timeout below still tells the user what's
+    # left, instead of returning before they ever see the list.
     remaining = []
     if not (cfg.get("dashboard") or {}).get("invite_url"):
         remaining.append(
@@ -473,11 +488,36 @@ def main() -> int:
             "implement evaluate() in eval-space/evaluator.py and re-run this "
             "script to deploy it (until then, all results stay pending)"
         )
+
+    def print_remaining() -> None:
+        if remaining:
+            print(f"remaining manual steps (org settings on huggingface.co/{ch['org']}):")
+            for step in remaining:
+                print(f"  - {step}")
+
+    # 5 ── health checks
+    print(f"\nbackend:    {backend_url}")
+    print(f"dashboard:  {dashboard_url}")
+    if ver["mode"] == "eval-space":
+        print(f"eval space: https://huggingface.co/spaces/{sp['eval']} (private)")
+    if not args.skip_wait:
+        print("waiting for the Spaces to build (first build takes a few minutes)…")
+        checks = [("backend", backend_url, "/v1/healthz", None),
+                  ("dashboard", dashboard_url, "/api/health", None)]
+        if ver["mode"] == "eval-space":
+            checks.append(("eval", space_url(sp["eval"], token), "/healthz", token))
+        ok = True
+        for name, url, path, tok in checks:
+            healthy = wait_healthy(url, path, token=tok)
+            print(f"  {name:9s} {path:12s} {'✓ ok' if healthy else '✗ TIMED OUT — check the Space logs'}")
+            ok = ok and healthy
+        if not ok:
+            print()
+            print_remaining()
+            return 1
+
     print("\ndone.")
-    if remaining:
-        print(f"remaining manual steps (org settings on huggingface.co/{ch['org']}):")
-        for step in remaining:
-            print(f"  - {step}")
+    print_remaining()
     return 0
 
 
