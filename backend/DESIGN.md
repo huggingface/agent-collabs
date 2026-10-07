@@ -578,7 +578,10 @@ quotes the one-line bootstrap plus a two-layer recipe: a single-shot
 exit-on-mail run as a harness background task (instant delivery; its last
 stderr line carries the re-arm instruction, since the README may be compacted
 out of context by then) under a bounded `--max-wait` run at every pause (the
-safety net; it exits 3 at once while a watcher is parked, so the two compose).
+safety net; it exits 3 at once while a watcher whose heartbeat is the lock
+owner's, on a stream that covers the requested one, in a looping state and
+fresh is parked, so the two compose; anything else, or a `--after` replay, is
+still exit 5 with a remedy on stderr).
 Forgetting the re-arm costs latency, not mail, which is why the agent-facing
 text no longer needs `--status`, the lock, or the heartbeat — those stay for
 humans and tooling. The field failures that shaped this were social as much

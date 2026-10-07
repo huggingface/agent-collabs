@@ -195,9 +195,6 @@ class Notifier:
         # parked_window_s.
         self._last_parked: dict[str, tuple[float, str]] = {}
         self._parked_window_s = parked_window_s
-        # owner -> the newest cursor handed out or sent on the unified stream,
-        # so an agent whose local state was wiped can resume from the server's
-        # record. Same lifetime.
         # Cheap operational counters for /v1/healthz. eq2 shipped this feature
         # with zero observability, so an operator could not tell a quiet board
         # from a registry that had been degrading every request for hours.

@@ -728,7 +728,7 @@ def test_after_overrides_the_saved_cursor(stub, tmp_path):
 
 def test_after_accepts_a_bare_stamp_and_replays_from_it(stub, tmp_path):
     """Recovery without server state: filenames sort by their stamp prefix, so
-    `--after 20260728-1201` -style stamps replay everything from that moment.
+    a bare `--after 20260728-120100` replays everything from that moment on.
     Both the seconds form and the milliseconds form are accepted."""
     state = fresh(tmp_path)
     older = stub.add()      # 20260728-120001-000_agent-b.md
@@ -770,7 +770,8 @@ def test_max_wait_beside_a_parked_watcher_exits_3_at_once(stub, tmp_path):
     watcher = popen(stub, state)
     try:
         pid_file = state / "lock" / "pid"
-        assert wait_until(pid_file.exists), "no lock was taken"
+        assert wait_until(lambda: pid_file.exists() and pid_file.read_text().split()), "no lock was taken"
+        assert wait_until((state / "heartbeat").exists), "no heartbeat yet"
         # first line only: the lock file may also record the owner's start time
         assert pid_file.read_text().split()[0] == str(watcher.pid)
 
@@ -857,6 +858,88 @@ def test_max_wait_beside_a_live_pid_without_a_heartbeat_exits_5(stub, tmp_path):
         alive.wait()
 
 
+def _fake_parked(state: Path, pid: int, *, state_word: str = "waiting",
+                 stream: str = "updates", epoch: int | None = None,
+                 hb_pid: int | None = None) -> None:
+    (state / "lock").mkdir()
+    (state / "lock" / "pid").write_text(f"{pid}\n")
+    epoch = int(time.time()) if epoch is None else epoch
+    (state / "heartbeat").write_text(f"{epoch} {state_word} {hb_pid or pid} {stream}\n")
+
+
+def test_after_is_never_dropped_beside_a_parked_watcher(stub, tmp_path):
+    """The README's own recovery sequence: a background watcher is parked and
+    the agent runs the bounded replay with --after. "Nothing to do" (exit 3)
+    would silently discard the stamp and skip every message since it — the
+    very failure the replay exists to prevent. Exit 5, say what to do, and
+    leave the cursor file exactly as it was."""
+    state = fresh(tmp_path, cursor="20260101-000000-000_x.md")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        _fake_parked(state, alive.pid)
+        result = run(stub, state, "--max-wait", "10", "--after", "20250101-000000", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "--after" in result.stderr and f"kill {alive.pid}" in result.stderr
+        assert (state / "cursor.updates").read_text().strip() == "20260101-000000-000_x.md"
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+@pytest.mark.parametrize("word", ["gave_up", "no_mail", "delivered", "no_cursor"])
+def test_max_wait_beside_a_watcher_on_its_way_out_exits_5(stub, tmp_path, word):
+    """A fresh heartbeat whose state is one written on the way out (a death, a
+    bounded run timing out, an unbounded run that just delivered) is not a
+    watcher that will deliver anything."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        _fake_parked(state, alive.pid, state_word=word)
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert f"'{word}'" in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def test_max_wait_beside_a_heartbeat_from_another_pid_exits_5(stub, tmp_path):
+    """The heartbeat must be the lock owner's: a leftover from a killed watcher
+    beside a recycled pid, or a just-started owner that has not written its
+    first one, proves nothing about the owner."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        _fake_parked(state, alive.pid, hb_pid=1)
+        t0 = time.monotonic()
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert time.monotonic() - t0 >= 1, "a just-started owner gets a second of grace"
+        assert "pid 1" in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+@pytest.mark.parametrize("epoch,needle", [(int(time.time()) + 7200, "future"), ("12x", "unreadable")])
+def test_max_wait_beside_a_bad_heartbeat_epoch_exits_5_not_2(stub, tmp_path, epoch, needle):
+    """A heartbeat from the future must not count as fresh forever, and a
+    non-numeric one must not abort the shell with an arithmetic error (exit 2,
+    which collides with the usage-error code)."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        (state / "heartbeat").write_text(f"{epoch} waiting {alive.pid} updates\n")
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert needle in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
 def test_unbounded_delivery_prints_the_re_arm_command(stub, tmp_path):
     """The background single-shot's exit is the harness notification; the
     instruction to launch it again rides on that notification instead of on a
@@ -867,10 +950,14 @@ def test_unbounded_delivery_prints_the_re_arm_command(stub, tmp_path):
     assert result.returncode == 0, result.stderr
     rearm = [l for l in result.stderr.splitlines() if "re-arm:" in l]
     assert len(rearm) == 1, result.stderr
-    assert f"sh {SCRIPT} {stub.base_url} agent-a" in rearm[0]
+    assert f"sh '{SCRIPT}' '{stub.base_url}' agent-a" in rearm[0]
     assert "feed" not in rearm[0] and "inbox" not in rearm[0], \
         "the default stream is not spelled out"
     assert rearm[0] == result.stderr.splitlines()[-1], "it must be the LAST line"
+    # The relaunch must land in the same state dir with the same wait, or it
+    # cold-starts beside the old state: the knobs this run had ride along.
+    assert f"COLLAB_WATCH_DIR='{state}'" in rearm[0]
+    assert "COLLAB_WATCH_WAIT=1" in rearm[0]
 
 
 def test_re_arm_command_names_a_non_default_stream(stub, tmp_path):
@@ -879,7 +966,7 @@ def test_re_arm_command_names_a_non_default_stream(stub, tmp_path):
     result = run(stub, state, stream="feed")
     assert result.returncode == 0, result.stderr
     rearm = [l for l in result.stderr.splitlines() if "re-arm:" in l]
-    assert rearm and rearm[0].endswith(f"sh {SCRIPT} {stub.base_url} agent-a feed"), result.stderr
+    assert rearm and rearm[0].endswith(f"sh '{SCRIPT}' '{stub.base_url}' agent-a feed"), result.stderr
 
 
 def test_bounded_delivery_has_no_re_arm_line(stub, tmp_path):

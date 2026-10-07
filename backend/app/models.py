@@ -487,8 +487,9 @@ class DigestInbox(BaseModel):
 
 class DigestUpdates(BaseModel):
     """Cursor-aware "am I behind?" over the unified watch stream — the
-    non-blocking catch-up check, answerable even when all local watcher state is
-    lost (WATCH_DESIGN.md §4.5)."""
+    non-blocking catch-up check (WATCH_DESIGN.md §4.5). It is only as
+    cursor-aware as the `after=` the caller sends: without one it is the size
+    of the whole stream."""
     # Items newer than the digest's `after=` cursor; the whole stream without
     # one. The server keeps no cursor for a handle (see DigestWatching).
     unread: int

@@ -68,14 +68,19 @@
 #       redirecting base URL is a permanent condition, not a transient one), bad
 #       config, or a server that does not implement the watch API
 #   2   usage error
-#   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death
+#   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death; also a
+#       --max-wait run that found a live watcher parked for this handle on a
+#       stream that covers this one (see --max-wait above)
 #   4   gave up after 10 consecutive request failures, or --max-wait ran out
 #       mid-retry (also: --status could not reach the server); the heartbeat
 #       records status=gave_up
-#   5   another watcher already holds the lock for this handle (unbounded and
-#       --exec runs only; a --max-wait run exits 3 instead). The lock is
-#       per-HANDLE, not per-stream: one watcher covers an agent, which is what
-#       the unified `updates` stream is for
+#   5   another watcher already holds the lock for this handle. A --max-wait
+#       run exits 3 instead when that watcher covers this stream and is
+#       looping; it still exits 5 when it is on a stream that does not cover
+#       this one, looks stuck, or when --after was given (a replay cannot run
+#       beside a parked watcher — stop it first). The lock is per-HANDLE, not
+#       per-stream: one watcher covers an agent, which is what the unified
+#       `updates` stream is for
 #   10  BEHIND: items are pending (--status, --peek)
 #   11  no watcher process is running for the queried stream (--status) —
 #       including "one is running, but on a different stream"
@@ -132,8 +137,10 @@
 #     (Claude Code: run_in_background); it exits with the mail the moment it
 #     arrives and its last stderr line tells you to launch it again. Safety
 #     net: one synchronous `--max-wait N` run at every pause. The two share
-#     the cursor; a bounded run that finds a watcher parked exits 3 at once.
-#     Forgetting to re-launch the fast path costs latency, never mail.
+#     the cursor; a bounded run that finds a covering, looping watcher parked
+#     exits 3 at once (stderr names its pid — if you did not launch it, nobody
+#     is reading it: kill it and launch yours). Forgetting to re-launch the
+#     fast path costs latency, never mail.
 #   * Harness with no background completion push (Codex CLI): the safety net
 #     alone is the whole loop.
 #   * Foreground handler loop (a harness that can hold a child process):
@@ -317,6 +324,20 @@ done
 STREAM_ARG=""
 [ "$STREAM" = updates ] || STREAM_ARG=" $STREAM"
 
+# rearm_cmd: the exact command that relaunches this watcher — same script
+# (or `watch.sh` when this run came through a pipe and $0 is not a file),
+# same base, handle and stream, and the same state knobs, so the relaunch
+# lands in the same state directory and lock instead of cold-starting.
+rearm_cmd() {
+    rc_script="$0"
+    [ -f "$rc_script" ] || rc_script="watch.sh"
+    rc_env=""
+    [ -z "${COLLAB_WATCH_DIR:-}" ] || rc_env="COLLAB_WATCH_DIR='$COLLAB_WATCH_DIR' "
+    [ -z "${COLLAB_WATCH_STATE:-}" ] || rc_env="${rc_env}COLLAB_WATCH_STATE='$COLLAB_WATCH_STATE' "
+    [ -z "${COLLAB_WATCH_WAIT:-}" ] || rc_env="${rc_env}COLLAB_WATCH_WAIT=$WAIT "
+    printf "%ssh '%s' '%s' %s%s" "$rc_env" "$rc_script" "$BASE" "$HANDLE" "$STREAM_ARG"
+}
+
 case "$STREAM" in
     updates | inbox | feed) ;;
     *) usage "stream must be 'updates', 'inbox' or 'feed', got '$STREAM'" ;;
@@ -455,34 +476,63 @@ lock_alive() {
 # which is the eq2 failure this prevents (double delivery plus last-write-wins
 # cursor rollback). Needing only one watcher is what the unified `updates`
 # stream is for.
-# parked_watcher_covers: does the live lock owner's heartbeat say it is
-# looping on a stream that includes $STREAM? `updates` is inbox + notify:all
-# channels, so it covers `inbox`; nothing else covers anything else (`feed`
-# has no board mail, `inbox` has no channel traffic). Fresh = within 3x the
-# wait window (floored at 10 s), the same threshold --status uses. Sets
-# HB_STREAM, and PW_WHY with the reason when it answers no.
+# parked_watcher_covers: does the live lock owner's heartbeat say it is a
+# watcher that will deliver $STREAM's mail? Four things must hold. The
+# heartbeat is the lock owner's (pid matches; a watcher that has just taken
+# the lock gets one second to write its first one). Its stream includes
+# $STREAM: `updates` is inbox + notify:all channels, so it covers `inbox`;
+# nothing else covers anything else (`feed` has no board mail, `inbox` has no
+# channel traffic). Its state is one a looping watcher writes, not one written
+# on the way out (`delivered` is an unbounded run exiting, `no_mail` a bounded
+# one, `gave_up`/`no_cursor` a death). And it is fresh: within 3x the wait
+# window (floored at 10 s), the --status threshold, and not from the future.
+# Sets HB_STREAM, and PW_WHY with the reason and a remedy when it answers no.
 HB_STREAM=""
 PW_WHY=""
-parked_watcher_covers() {
-    HB_STREAM=""
-    PW_WHY="it left no heartbeat (not a watcher, or an older one); kill $lk_pid and relaunch"
-    [ -f "$HEARTBEAT" ] || return 1
+pw_read_hb() {
     pw_epoch=""
     pw_state=""
-    _pw_pid=""
+    pw_pid=""
     pw_stream=""
-    read -r pw_epoch pw_state _pw_pid pw_stream <"$HEARTBEAT" || :
+    read -r pw_epoch pw_state pw_pid pw_stream <"$HEARTBEAT" 2>/dev/null || :
+}
+parked_watcher_covers() {
+    HB_STREAM=""
+    PW_WHY="it left no heartbeat (not a watcher, or an older one); if it is still there next time, kill $lk_pid and relaunch"
+    [ -f "$HEARTBEAT" ] || return 1
+    pw_read_hb
+    if [ "$pw_pid" != "$lk_pid" ]; then
+        sleep 1
+        pw_read_hb
+        if [ "$pw_pid" != "$lk_pid" ]; then
+            PW_WHY="its heartbeat belongs to pid ${pw_pid:-?}, not to the lock owner (a watcher that has only just started, or a leftover from one that was killed); run this check again"
+            return 1
+        fi
+    fi
     HB_STREAM="${pw_stream:--}"
     case "$pw_stream" in
         "$STREAM") ;;
-        updates) [ "$STREAM" = inbox ] || { PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'"; return 1; } ;;
+        updates) [ "$STREAM" = inbox ] || { PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'; stop it (kill $lk_pid) and relaunch it on 'updates', which covers everything"; return 1; } ;;
         "") PW_WHY="its heartbeat names no stream (an older watcher); kill $lk_pid and relaunch"; return 1 ;;
-        *) PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'"; return 1 ;;
+        *) PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'; stop it (kill $lk_pid) and relaunch it on 'updates', which covers everything"; return 1 ;;
     esac
+    case "$pw_state" in
+        starting | baselined | waiting | acked | retrying | timeout | empty | exec_failed | dead_lettered | http_*) ;;
+        *) PW_WHY="its last heartbeat says '${pw_state:-?}', a watcher on its way out, not one that will deliver; run this check again"; return 1 ;;
+    esac
+    if ! is_num "${pw_epoch:-}"; then
+        PW_WHY="its heartbeat is unreadable; kill $lk_pid and relaunch"
+        return 1
+    fi
+    pw_age=$(($(now) - pw_epoch))
+    if [ "$pw_age" -lt 0 ]; then
+        PW_WHY="its heartbeat is ${pw_age#-}s in the future (clock skew?); kill $lk_pid and relaunch"
+        return 1
+    fi
     pw_stale_after=$((WAIT * 3))
     [ "$pw_stale_after" -ge 10 ] || pw_stale_after=10
-    if ! is_num "${pw_epoch:-}" || [ $(($(now) - pw_epoch)) -gt "$pw_stale_after" ]; then
-        PW_WHY="its heartbeat is $(( $(now) - ${pw_epoch:-0} ))s old (last: ${pw_state:-?}), so it looks stuck; kill $lk_pid and relaunch"
+    if [ "$pw_age" -gt "$pw_stale_after" ]; then
+        PW_WHY="its heartbeat is ${pw_age}s old (last: $pw_state), so it may be stuck; if it still looks stuck next time, kill $lk_pid and relaunch"
         return 1
     fi
     return 0
@@ -511,12 +561,18 @@ lock_acquire() {
             # watcher covers this stream and is looping, it will exit with the
             # mail the moment it arrives, so there is nothing for this run to
             # do. Not an error. A live pid alone proves nothing: it may be on
-            # a stream that does not include this one, or stuck.
-            if parked_watcher_covers; then
-                log "a watcher is already parked for this handle (pid $lk_pid, stream $HB_STREAM); it delivers your mail the moment it arrives, so this check has nothing to do; exiting 3"
+            # a stream that does not include this one, or stuck. And a replay
+            # (--after) can never be "nothing to do": the cursor it asks for
+            # would be silently dropped.
+            if [ -n "$AFTER" ]; then
+                log "--after cannot run while a watcher (pid $lk_pid) is parked for this handle: stop it (kill $lk_pid), run this command again, then relaunch the background watcher; exiting 5"
+                exit 5
+            fi
+            if parked_watcher_covers && lock_alive "$lk_pid"; then
+                log "a watcher is already parked for this handle (pid $lk_pid, stream $HB_STREAM); it delivers your mail the moment it arrives, so this check has nothing to do (if you did not launch pid $lk_pid, nobody is reading it: kill it and launch yours); exiting 3"
                 exit 3
             fi
-            log "a watcher holds this handle's lock (pid $lk_pid) but $PW_WHY; it will not deliver this stream's mail, and the lock is per-handle; exiting 5"
+            log "a watcher holds this handle's lock (pid $lk_pid) but $PW_WHY; the lock is per-handle; exiting 5"
             exit 5
         fi
         log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
@@ -806,7 +862,7 @@ run_wait() {
                 # An unbounded run is the background single-shot. The README
                 # that said "re-arm" may be long compacted out of the agent's
                 # context; this line arrives with the mail itself.
-                log "re-arm: this watcher has exited. Launch it again as a background task so the next message reaches you at once: sh $0 $BASE $HANDLE${STREAM_ARG}"
+                log "re-arm: this watcher has exited. Launch it again as a background task so the next message reaches you at once: $(rearm_cmd)"
             fi
             exit 0
         fi

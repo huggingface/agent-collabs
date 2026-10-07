@@ -167,6 +167,31 @@ def test_updates_reasons_list_every_channel_a_message_came_from(env):
     assert items[b]["reasons"] == ["channel:beta"]
 
 
+def test_updates_after_accepts_a_bare_stamp_prefix(env):
+    """The client's recovery path is `--after <YYYYMMDD-HHMMSS[-mmm]>`: a bare
+    stamp is a prefix of every filename at that stamp, and the server compares
+    strings, so it replays from that moment on (inclusive) with no validation
+    error. Nothing on the server may reject or reinterpret it."""
+    seed_agent(env.hub, "watcher")
+    seed_agent(env.hub, "poster")
+    names = []
+    for i in range(3):
+        r = env.client.post("/v1/messages", json={"agent_id": "poster", "body": f"@watcher {i}"})
+        assert r.status_code == 201, r.text
+        names.append(r.json()["filename"])
+    names.sort()
+    stamp_ms = names[0].split("_")[0]        # 20260728-120000-000: inclusive at ms granularity
+    stamp_s = stamp_ms.rsplit("-", 1)[0]     # 20260728-120000: inclusive at second granularity
+
+    for stamp in (stamp_ms, stamp_s):
+        r = env.client.get(f"/v1/updates?as=watcher&order=asc&after={stamp}")
+        assert r.status_code == 200, r.text
+        assert r.json()["items"] == names, (stamp, r.json())
+
+    r = env.client.get("/v1/updates?as=watcher&order=asc&after=99991231-235959")
+    assert r.status_code == 200 and r.json()["items"] == []
+
+
 def test_updates_cursor_advances_over_the_whole_union(env):
     """One cursor covers everything: after= drains the merged stream regardless
     of which folder each item came from."""
