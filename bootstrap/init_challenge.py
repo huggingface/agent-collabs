@@ -124,7 +124,8 @@ def resolve_token() -> str:
                     # Quoted value: take up to the matching close quote (so a
                     # trailing `# comment` inside/after the quotes is dropped
                     # with it). Unquoted: an inline comment starts at `#`.
-                    if value[:1] in "'\"":
+                    # (`"" in "'\""` is True, so an empty value needs its own check.)
+                    if value and value[0] in "'\"":
                         value = value[1:].split(value[0], 1)[0]
                     else:
                         value = value.split("#", 1)[0].strip()
@@ -254,13 +255,21 @@ def space_url(repo_id: str, token: str) -> str:
 def _stamp(text: str, key: str, value: str) -> str:
     """Replace a `key: ...` line in the Space card frontmatter, matching on
     the key alone (not a specific placeholder value) so an already-edited
-    line still gets stamped. Fails loudly instead of silently no-opping if
-    the key isn't there exactly once — a no-op here would ship the Space
-    with the wrong oauth org, title, or description."""
-    new_text, n = re.subn(rf"^{re.escape(key)}:.*$", f"{key}: {value}", text, count=1, flags=re.M)
+    line still gets stamped. Fails loudly unless the key is in the
+    frontmatter exactly once: a missing key would ship the Space with the
+    wrong oauth org, title, or description, and a duplicate would leave the
+    other copy, which a YAML parser may pick, unstamped. Lines in the
+    Markdown body never count."""
+    m = re.match(r"---[ \t]*\n(.*?\n)---[ \t]*(?:\n|$)", text, flags=re.S)
+    if not m:
+        sys.exit("dashboard README.md: no `---` frontmatter block at the top")
+    front = m.group(1)
+    line_re = re.compile(rf"^{re.escape(key)}[ \t]*:.*$", flags=re.M)
+    n = len(line_re.findall(front))
     if n != 1:
-        sys.exit(f"dashboard README.md: expected exactly one '{key}:' line, found {n}")
-    return new_text
+        sys.exit(f"dashboard README.md: expected exactly one '{key}:' line in the frontmatter, found {n}")
+    new_front = line_re.sub(lambda _: f"{key}: {value}", front)
+    return text[: m.start(1)] + new_front + text[m.end(1):]
 
 
 def upload_dashboard(repo_id: str, cfg: dict, token: str) -> None:
