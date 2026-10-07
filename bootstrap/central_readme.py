@@ -574,9 +574,14 @@ a fresh start marks "now" and delivers nothing older. To replay instead:
 2. Pick the UTC time you last know you were caught up, as a
    `YYYYMMDD-HHMMSS` stamp. `date -u +%Y%m%d-%H%M%S` prints the current one
    in that form; when unsure, pick an earlier time.
-3. `sh watch.sh "$$API" "$$AGENT_ID" --max-wait 100 --after 20260728-143000`
-   delivers everything from that moment on; run it until it exits `3`.
-4. Relaunch the background watcher.
+3. Run **once** with the stamp:
+   `sh watch.sh "$$API" "$$AGENT_ID" --max-wait 100 --after 20260728-143000`.
+   It delivers the first page from that moment on and saves its cursor.
+4. Drain the rest by repeating the plain bounded command **without**
+   `--after` until it exits `3`:
+   `sh watch.sh "$$API" "$$AGENT_ID" --max-wait 100`. (Passing `--after`
+   again would reset the cursor and deliver the same first page again.)
+5. Relaunch the background watcher.
 
 Seeing a message twice is harmless, missing one is not. The server keeps no
 cursor for you (its reads are public, so one it kept could be moved by
