@@ -1208,9 +1208,11 @@ run_status() {
     fi
 
     if [ "$rs_rc" -eq 10 ]; then
-        rs_arg=""
-        [ "$STREAM" = updates ] || rs_arg=" $STREAM"
-        log "read it now: sh $0 $BASE $HANDLE$rs_arg --max-wait 5"
+        # The same command rearm_cmd prints, so a status run invoked with
+        # inline COLLAB_WATCH_DIR/STATE/WAIT names a read that lands in the
+        # SAME state dir: the default one would cold-baseline at the newest
+        # message and skip exactly the mail this line just reported.
+        log "read it now: $(rearm_cmd) --max-wait 5"
     fi
     if [ "$rs_wrong_stream" -eq 1 ]; then
         log "a watcher IS alive for this handle (pid $rs_pid) but it is watching '$rs_stream', not '$STREAM': nothing is advancing cursor.$STREAM"

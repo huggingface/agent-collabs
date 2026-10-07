@@ -1331,6 +1331,7 @@ def test_status_10_outranks_a_watcher_on_another_stream(stub, tmp_path):
         assert fields["STATUS"] == "BEHIND" and fields["UNREAD"] == "1"
         assert fields["STREAM"] == "updates"
         assert "agent-a feed --max-wait 5" in result.stderr
+        assert f"COLLAB_WATCH_DIR='{state}'" in result.stderr, "the hint must keep the state dir"
 
     finally:
         alive.terminate()
@@ -1480,12 +1481,23 @@ def test_status_10_when_behind_outranks_liveness(stub, tmp_path):
     assert fields["PID"] == "-"
     assert fields["LAST"] == "gave_up", "the give-up must survive the process"
     assert int(fields["HEARTBEAT_AGE"].rstrip("s")) >= 412
-    command = f"sh {SCRIPT} {stub.base_url} agent-a --max-wait 5"
-    assert command in result.stderr, "BEHIND must name the command that reads it"
+    hint = [l for l in result.stderr.splitlines() if "read it now: " in l]
+    assert len(hint) == 1, "BEHIND must name the command that reads it"
+    command = hint[0].split("read it now: ", 1)[1]
+    assert command.endswith(f"sh '{SCRIPT}' '{stub.base_url}' agent-a --max-wait 5"), command
+
+    # Execute the LITERAL printed command, as an agent copying it would: a
+    # clean environment (no COLLAB_WATCH_* inherited, a throwaway HOME) so the
+    # only way it can find the state dir is through what it printed. Before
+    # the fix it cold-baselined in the default dir and said "no mail".
+    clean = {"PATH": os.environ["PATH"], "HOME": str(tmp_path / "home"), "no_proxy": "*", "NO_PROXY": "*"}
+    (tmp_path / "home").mkdir()
     t0 = time.monotonic()
-    read = run(stub, state, "--max-wait", "5")
-    assert read.returncode == 0 and len(json.loads(read.stdout)["items"]) == 3
+    read = subprocess.run(["sh", "-c", command], capture_output=True, text=True, env=clean, timeout=30)
+    assert read.returncode == 0, read.stderr
+    assert len(json.loads(read.stdout)["items"]) == 3
     assert time.monotonic() - t0 < 3, "pending mail must come back at once"
+    assert not (tmp_path / "home" / ".collab-watch").exists(), "it must not touch the default state dir"
 
 
 def test_status_12_when_the_lock_is_live_but_the_heartbeat_is_stale(stub, tmp_path):
