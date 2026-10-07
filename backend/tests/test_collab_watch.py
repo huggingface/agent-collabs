@@ -669,24 +669,89 @@ def test_non_numeric_wait_is_rejected_at_startup(stub, tmp_path):
 
 def test_max_wait_exits_3_on_a_clean_no_mail_timeout(stub, tmp_path):
     """Exit 3 exists so a bounded wait that found nothing is distinguishable
-    from a watcher that was killed.
-
-    The elapsed assertion is the contract, not a tolerance: N is a FLOOR, so
-    exit 3 must never fire before it. `date +%s` truncates to whole seconds, so
-    a deadline computed naively from it lands up to a second early — which this
-    assertion caught intermittently before the script padded for it."""
+    from a watcher that was killed."""
     state = fresh(tmp_path, cursor="")
-    t0 = time.monotonic()
-
     result = run(stub, state, "--max-wait", "2", timeout=60)
-    elapsed = time.monotonic() - t0
 
     assert result.returncode == 3
     assert result.stdout.strip() == ""
-    assert elapsed >= 2.0, f"gave up after {elapsed:.2f}s of a 2s floor"
-    assert elapsed < 12, f"overshot the bound by too much ({elapsed:.2f}s)"
     assert "clean timeout" in result.stderr
     assert heartbeat(state)[1] == "no_mail"
+
+
+def test_max_wait_is_a_ceiling_not_a_floor(stub, tmp_path):
+    """N is sized to fit a shell tool's timeout, so the run must end within N
+    even when the per-request wait window (55s here) is longer than N: each
+    request is clamped to the time left instead of overshooting by a window."""
+    state = fresh(tmp_path, cursor="")
+    t0 = time.monotonic()
+
+    result = run(stub, state, "--max-wait", "3", wait="55", timeout=60)
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 3, result.stderr
+    assert elapsed < 3 + 1.5, f"overshot a 3s ceiling ({elapsed:.2f}s)"
+    assert elapsed >= 1.5, f"gave up far too early ({elapsed:.2f}s)"
+    assert all(float(q["wait"]) <= 3 for _p, q in stub.requests)
+
+
+def test_max_wait_ceiling_holds_while_the_server_is_down(tmp_path):
+    """Retry backoff must not carry a bounded run past N either; running out
+    of time mid-retry is exit 4 (unreachable), never a false "no mail"."""
+    state = tmp_path / "state"
+    t0 = time.monotonic()
+    result = subprocess.run(
+        ["sh", SCRIPT, "http://127.0.0.1:1", "agent-a", "--max-wait", "3"],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env=script_env(state, backoff="2"), timeout=60,
+    )
+    elapsed = time.monotonic() - t0
+
+    assert result.returncode == 4, result.stderr
+    assert elapsed < 3 + 1.5, f"overshot a 3s ceiling ({elapsed:.2f}s)"
+    assert "--max-wait 3s is up" in result.stderr
+
+
+def test_after_overrides_the_saved_cursor(stub, tmp_path):
+    """--after resumes from a cursor the agent got elsewhere — e.g. after its
+    state directory was wiped."""
+    state = fresh(tmp_path)  # no cursor file: would otherwise baseline
+    first = stub.add()
+    second = stub.add()
+
+    result = run(stub, state, "--after", first, "--max-wait", "5")
+
+    assert result.returncode == 0, result.stderr
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [second]
+    assert (state / "cursor.updates").read_text().strip() == second
+
+
+def test_after_accepts_a_bare_stamp_and_replays_from_it(stub, tmp_path):
+    """Recovery without server state: filenames sort by their stamp prefix, so
+    a bare `--after 20260728-120100` replays everything from that moment on.
+    Both the seconds form and the milliseconds form are accepted."""
+    state = fresh(tmp_path)
+    older = stub.add()      # 20260728-120001-000_agent-b.md
+    newer = stub.add()      # 20260728-120002-000_agent-b.md
+    stamp = newer.split("_")[0].rsplit("-", 1)[0]  # 20260728-120002
+
+    result = run(stub, state, "--after", stamp, "--max-wait", "5")
+    assert result.returncode == 0, result.stderr
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [newer]
+
+    # The milliseconds form is a prefix of the filename at that very stamp, so
+    # "from that moment on" includes it: replay, not skip.
+    (tmp_path / "b").mkdir()
+    result = run(stub, fresh(tmp_path / "b"), "--after", older.split("_")[0], "--max-wait", "5")
+    assert result.returncode == 0, result.stderr
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [older, newer]
+
+
+def test_after_rejects_a_non_stamp(tmp_path):
+    result = subprocess.run(["sh", SCRIPT, "http://127.0.0.1:9", "agent-a", "--after", "yesterday"],
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "stamp" in result.stderr
 
 
 def test_max_wait_still_delivers_when_mail_arrives(stub, tmp_path):
@@ -695,6 +760,223 @@ def test_max_wait_still_delivers_when_mail_arrives(stub, tmp_path):
     result = run(stub, state, "--max-wait", "10", timeout=30)
     assert result.returncode == 0, result.stderr
     assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [filename]
+
+
+def test_max_wait_beside_a_parked_watcher_exits_3_at_once(stub, tmp_path):
+    """The bounded run is the safety net under the background single-shot. If
+    that watcher is parked it WILL deliver, so the check has nothing to do:
+    exit 3 immediately (not 5, not a 100 s park), and never touch the lock."""
+    state = fresh(tmp_path, cursor="")
+    watcher = popen(stub, state)
+    try:
+        pid_file = state / "lock" / "pid"
+        assert wait_until(lambda: pid_file.exists() and pid_file.read_text().split()), "no lock was taken"
+        assert wait_until((state / "heartbeat").exists), "no heartbeat yet"
+        # first line only: the lock file may also record the owner's start time
+        assert pid_file.read_text().split()[0] == str(watcher.pid)
+
+        t0 = time.monotonic()
+        result = run(stub, state, "--max-wait", "30", timeout=20)
+        elapsed = time.monotonic() - t0
+
+        assert result.returncode == 3, result.stderr
+        assert elapsed < 5, f"a parked-watcher check must not park itself ({elapsed:.1f}s)"
+        assert result.stdout == ""
+        assert str(watcher.pid) in result.stderr
+        assert "parked" in result.stderr
+        assert pid_file.read_text().split()[0] == str(watcher.pid), \
+            "the bounded run must leave the parked watcher's lock alone"
+        assert watcher.poll() is None, "the parked watcher must still be running"
+    finally:
+        stop(watcher)
+
+
+def test_max_wait_beside_a_watcher_on_a_stream_that_does_not_cover_it_exits_5(stub, tmp_path):
+    """An `inbox` watcher does not see notify:all channel traffic, so it does
+    not cover a bounded `updates` check: that check must not call itself done.
+    It cannot take the per-handle lock either, so it is exit 5, and stderr
+    names the stream mismatch."""
+    state = fresh(tmp_path, cursor="", stream="inbox")
+    (state / "cursor.updates").write_text("\n")
+    watcher = popen(stub, state, stream="inbox")
+    try:
+        assert wait_until((state / "heartbeat").exists)
+        result = run(stub, state, "--max-wait", "3", stream="updates", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "'inbox'" in result.stderr and "'updates'" in result.stderr
+        assert watcher.poll() is None
+    finally:
+        stop(watcher)
+
+
+def test_max_wait_on_inbox_beside_an_updates_watcher_exits_3(stub, tmp_path):
+    """`updates` is inbox + notify:all channels, so it covers an `inbox` check."""
+    state = fresh(tmp_path, cursor="", stream="updates")
+    (state / "cursor.inbox").write_text("\n")
+    watcher = popen(stub, state)
+    try:
+        assert wait_until((state / "heartbeat").exists)
+        result = run(stub, state, "--max-wait", "3", stream="inbox", timeout=10)
+        assert result.returncode == 3, (result.returncode, result.stderr)
+        assert "stream updates" in result.stderr
+    finally:
+        stop(watcher)
+
+
+def test_max_wait_beside_a_live_pid_with_a_stale_heartbeat_exits_5(stub, tmp_path):
+    """A live pid is not a healthy watcher: one that stopped looping (stuck
+    handler, hung curl) must not make the safety net report nothing to do.
+    Exit 5, say it looks stuck, and leave its lock alone."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        (state / "heartbeat").write_text(f"{int(time.time()) - 3600} waiting {alive.pid} updates\n")
+
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "stuck" in result.stderr and str(alive.pid) in result.stderr
+        assert (state / "lock" / "pid").read_text().split()[0] == str(alive.pid)
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def test_max_wait_beside_a_live_pid_without_a_heartbeat_exits_5(stub, tmp_path):
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "heartbeat" in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def _fake_parked(state: Path, pid: int, *, state_word: str = "waiting",
+                 stream: str = "updates", epoch: int | None = None,
+                 hb_pid: int | None = None) -> None:
+    (state / "lock").mkdir()
+    (state / "lock" / "pid").write_text(f"{pid}\n")
+    epoch = int(time.time()) if epoch is None else epoch
+    (state / "heartbeat").write_text(f"{epoch} {state_word} {hb_pid or pid} {stream}\n")
+
+
+def test_after_is_never_dropped_beside_a_parked_watcher(stub, tmp_path):
+    """The README's own recovery sequence: a background watcher is parked and
+    the agent runs the bounded replay with --after. "Nothing to do" (exit 3)
+    would silently discard the stamp and skip every message since it — the
+    very failure the replay exists to prevent. Exit 5, say what to do, and
+    leave the cursor file exactly as it was."""
+    state = fresh(tmp_path, cursor="20260101-000000-000_x.md")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        _fake_parked(state, alive.pid)
+        result = run(stub, state, "--max-wait", "10", "--after", "20250101-000000", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "--after" in result.stderr and f"kill {alive.pid}" in result.stderr
+        assert (state / "cursor.updates").read_text().strip() == "20260101-000000-000_x.md"
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+@pytest.mark.parametrize("word", ["gave_up", "no_mail", "delivered", "no_cursor"])
+def test_max_wait_beside_a_watcher_on_its_way_out_exits_5(stub, tmp_path, word):
+    """A fresh heartbeat whose state is one written on the way out (a death, a
+    bounded run timing out, an unbounded run that just delivered) is not a
+    watcher that will deliver anything."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        _fake_parked(state, alive.pid, state_word=word)
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert f"'{word}'" in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def test_max_wait_beside_a_heartbeat_from_another_pid_exits_5(stub, tmp_path):
+    """The heartbeat must be the lock owner's: a leftover from a killed watcher
+    beside a recycled pid, or a just-started owner that has not written its
+    first one, proves nothing about the owner."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        _fake_parked(state, alive.pid, hb_pid=1)
+        t0 = time.monotonic()
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert time.monotonic() - t0 >= 1, "a just-started owner gets a second of grace"
+        assert "pid 1" in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+@pytest.mark.parametrize("epoch,needle", [(int(time.time()) + 7200, "future"), ("12x", "unreadable")])
+def test_max_wait_beside_a_bad_heartbeat_epoch_exits_5_not_2(stub, tmp_path, epoch, needle):
+    """A heartbeat from the future must not count as fresh forever, and a
+    non-numeric one must not abort the shell with an arithmetic error (exit 2,
+    which collides with the usage-error code)."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        (state / "heartbeat").write_text(f"{epoch} waiting {alive.pid} updates\n")
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert needle in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def test_unbounded_delivery_prints_the_re_arm_command(stub, tmp_path):
+    """The background single-shot's exit is the harness notification; the
+    instruction to launch it again rides on that notification instead of on a
+    README that may have been compacted out of the agent's context."""
+    state = fresh(tmp_path, cursor="")
+    stub.add()
+    result = run(stub, state)
+    assert result.returncode == 0, result.stderr
+    rearm = [l for l in result.stderr.splitlines() if "re-arm:" in l]
+    assert len(rearm) == 1, result.stderr
+    assert f"sh '{SCRIPT}' '{stub.base_url}' agent-a" in rearm[0]
+    assert "feed" not in rearm[0] and "inbox" not in rearm[0], \
+        "the default stream is not spelled out"
+    assert rearm[0] == result.stderr.splitlines()[-1], "it must be the LAST line"
+    # The relaunch must land in the same state dir with the same wait, or it
+    # cold-starts beside the old state: the knobs this run had ride along.
+    assert f"COLLAB_WATCH_DIR='{state}'" in rearm[0]
+    assert "COLLAB_WATCH_WAIT=1" in rearm[0]
+
+
+def test_re_arm_command_names_a_non_default_stream(stub, tmp_path):
+    state = fresh(tmp_path, cursor="", stream="feed")
+    stub.add()
+    result = run(stub, state, stream="feed")
+    assert result.returncode == 0, result.stderr
+    rearm = [l for l in result.stderr.splitlines() if "re-arm:" in l]
+    assert rearm and rearm[0].endswith(f"sh '{SCRIPT}' '{stub.base_url}' agent-a feed"), result.stderr
+
+
+def test_bounded_delivery_has_no_re_arm_line(stub, tmp_path):
+    """A --max-wait run is the pause check, not the background watcher; telling
+    the agent to re-arm there would send it chasing a process it never had."""
+    state = fresh(tmp_path, cursor="")
+    stub.add()
+    result = run(stub, state, "--max-wait", "10", timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "re-arm:" not in result.stderr
 
 
 # ── 7. --peek ─────────────────────────────────────────────────────────
@@ -1223,6 +1505,9 @@ def test_behaviour_is_locale_independent(stub, tmp_path):
         (["http://127.0.0.1:1", "agent-a", "--max-wait"], "--max-wait needs"),
         (["http://127.0.0.1:1", "agent-a", "--exec"], "--exec needs"),
         (["http://127.0.0.1:1", "agent-a", "--peek", "--max-wait", "5"], "wait mode only"),
+        (["http://127.0.0.1:1", "agent-a", "--after", "latest"], "--after must be"),
+        (["http://127.0.0.1:1", "agent-a", "--status", "--after",
+          "20260728-120000-000_agent-b.md"], "wait and --exec modes only"),
         (["http://127.0.0.1:1", "agent-a", "extra", "updates", "x"], "unexpected argument"),
         (["ftp://nope", "agent-a"], "must start with http"),
         (["http://127.0.0.1:1", "../etc/passwd"], "characters outside"),
@@ -1247,7 +1532,7 @@ def test_help_exits_0_on_stdout():
                             stderr=subprocess.PIPE, text=True, timeout=20)
     assert result.returncode == 0
     assert "exit codes:" in result.stdout
-    for flag in ("--max-wait", "--exec", "--peek", "--status"):
+    for flag in ("--max-wait", "--after", "--exec", "--peek", "--status"):
         assert flag in result.stdout
     for warning in ("do NOT wrap", "do NOT detach", "AT-LEAST-ONCE"):
         assert warning in result.stdout, f"the header must keep documenting: {warning}"

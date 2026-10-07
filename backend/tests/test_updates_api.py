@@ -167,6 +167,31 @@ def test_updates_reasons_list_every_channel_a_message_came_from(env):
     assert items[b]["reasons"] == ["channel:beta"]
 
 
+def test_updates_after_accepts_a_bare_stamp_prefix(env):
+    """The client's recovery path is `--after <YYYYMMDD-HHMMSS[-mmm]>`: a bare
+    stamp is a prefix of every filename at that stamp, and the server compares
+    strings, so it replays from that moment on (inclusive) with no validation
+    error. Nothing on the server may reject or reinterpret it."""
+    seed_agent(env.hub, "watcher")
+    seed_agent(env.hub, "poster")
+    names = []
+    for i in range(3):
+        r = env.client.post("/v1/messages", json={"agent_id": "poster", "body": f"@watcher {i}"})
+        assert r.status_code == 201, r.text
+        names.append(r.json()["filename"])
+    names.sort()
+    stamp_ms = names[0].split("_")[0]        # 20260728-120000-000: inclusive at ms granularity
+    stamp_s = stamp_ms.rsplit("-", 1)[0]     # 20260728-120000: inclusive at second granularity
+
+    for stamp in (stamp_ms, stamp_s):
+        r = env.client.get(f"/v1/updates?as=watcher&order=asc&after={stamp}")
+        assert r.status_code == 200, r.text
+        assert r.json()["items"] == names, (stamp, r.json())
+
+    r = env.client.get("/v1/updates?as=watcher&order=asc&after=99991231-235959")
+    assert r.status_code == 200 and r.json()["items"] == []
+
+
 def test_updates_cursor_advances_over_the_whole_union(env):
     """One cursor covers everything: after= drains the merged stream regardless
     of which folder each item came from."""
@@ -411,9 +436,9 @@ def test_watching_is_empty_before_anyone_parks(env):
 
     assert data["watching"] == {}
     assert data["max_wait_s"] == env.settings.longpoll_max_wait_s
-    # 2× the ceiling: a watcher re-arms at most one wait window after the last
-    # one ended, so this is the youngest age that can still be stale.
-    assert data["fresh_s"] == 2 * env.settings.longpoll_max_wait_s
+    # Generous (240s by default): a synchronous `--max-wait 100` poller calls
+    # once per work step, not once per wait window.
+    assert data["fresh_s"] == env.settings.watch_fresh_s == 240.0
     # The waiter counters ride along (§10.4), same shape as /v1/healthz.
     assert data["longpoll"] == env.client.get("/v1/healthz").json()["longpoll"]
 
@@ -432,7 +457,7 @@ def test_watching_reports_a_parked_handle_with_its_mode(env):
     live = env.client.get("/v1/watching").json()
     assert set(live["watching"]) == {"watcher"}
     entry = live["watching"]["watcher"]
-    assert entry["mode"] == "updates"
+    assert (entry["mode"], entry["stream"]) == ("parked", "updates")
     assert 0 <= entry["last_poll_age_s"] <= 5
     assert live["longpoll"]["waiters"] == 1
 
@@ -445,11 +470,12 @@ def test_watching_reports_a_parked_handle_with_its_mode(env):
     assert after["longpoll"]["waiters"] == 0
 
 
-def test_watching_covers_every_handle_and_only_wait_pollers(env):
+def test_watching_covers_every_handle_and_only_watch_reads(env):
     """One call, every watcher — the whole reason this exists next to the
-    digest's per-handle block. A plain (wait=0) poll is not watching, so it must
-    not earn a presence entry that would read as "reachable in seconds"."""
-    for handle in ("alpha", "beta", "plain"):
+    digest's per-handle block. A plain inbox read is not the watch stream, so it
+    must not earn a presence entry; a plain /v1/updates read is (that is the
+    synchronous `watch.sh --max-wait` recipe) and does."""
+    for handle in ("alpha", "beta", "plain", "sync"):
         seed_agent(env.hub, handle)
 
     stores: dict = {}
@@ -459,21 +485,23 @@ def test_watching_covers_every_handle_and_only_wait_pollers(env):
     for h in ("alpha", "beta"):
         assert _wait_until(lambda h=h: len(_subs_for(env.notifier, f"inbox:{h}")) >= 1)
     env.client.get("/v1/inbox/plain")  # no wait= : a plain read, not a watch
+    env.client.get("/v1/updates?as=sync")  # wait=0 on the watch stream: present
 
     data = env.client.get("/v1/watching").json()
-    assert set(data["watching"]) == {"alpha", "beta"}
+    assert set(data["watching"]) == {"alpha", "beta", "sync"}
+    assert data["watching"]["sync"]["mode"] == "poll"
 
     broadcast(env, "all hands — releases both parks")  # wake_all, so no sleeping
     for t in threads:
         t.join(timeout=5)
 
 
-def test_watching_records_the_inbox_and_feed_modes_too(env):
-    """`mode` names the stream, so an operator can tell a unified watcher from
+def test_watching_records_the_inbox_and_feed_streams_too(env):
+    """`stream` names the stream, so an operator can tell a unified watcher from
     an agent still polling the inbox endpoint directly."""
     seed_agent(env.hub, "watcher")
     env.client.get("/v1/inbox/watcher?wait=0.05")
-    assert env.client.get("/v1/watching").json()["watching"]["watcher"]["mode"] == "inbox"
+    assert env.client.get("/v1/watching").json()["watching"]["watcher"]["stream"] == "inbox"
 
     env.client.get("/v1/channels/feed?as=watcher&wait=0.05")
-    assert env.client.get("/v1/watching").json()["watching"]["watcher"]["mode"] == "feed"
+    assert env.client.get("/v1/watching").json()["watching"]["watcher"]["stream"] == "feed"

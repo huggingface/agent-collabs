@@ -136,12 +136,49 @@ def test_digest_updates_is_cursor_aware_via_after(env):
     cursor = env.client.get("/v1/updates?as=watcher").json()["cursor"]
     env.client.post("/v1/messages", json={"agent_id": "poster", "body": "two @watcher"})
 
-    assert env.client.get("/v1/digest?as=watcher").json()["updates"]["unread"] == 2
+    assert env.client.get("/v1/digest?as=watcher&after=").json()["updates"]["unread"] == 2
     caught_up = env.client.get(f"/v1/digest?as=watcher&after={cursor}").json()
     assert caught_up["updates"]["unread"] == 1
     # Fully drained.
     newest = caught_up["updates"]["newest"]
     assert env.client.get(f"/v1/digest?as=watcher&after={newest}").json()["updates"]["unread"] == 0
+
+
+def test_a_partial_or_filtered_read_does_not_acknowledge_other_mail(env):
+    """The server keeps no cursor for a handle, so no read moves `unread`: a
+    newest-first page of one, a wait=0 status-style read, a peek — none of them
+    is a delivery, and the two messages such a page never returned must still
+    count. (A server-side checkpoint moved by `page.cursor` skipped them.)"""
+    seed_agent(env.hub, "reader")
+    seed_agent(env.hub, "writer")
+    for i in range(3):
+        r = env.client.post("/v1/messages", json={"agent_id": "writer", "body": f"@reader message {i}"})
+        assert r.status_code == 201, r.text
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+    page = env.client.get("/v1/updates?as=reader&limit=1&expand=true").json()
+    assert len(page["items"]) == 1  # newest first: the two older ones were never returned
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+    page = env.client.get("/v1/updates?as=reader&order=asc&wait=0&limit=1").json()
+    assert page["items"]
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+    env.client.get("/v1/updates?as=reader&order=asc&expand=true&wait=0.05")  # a full parked page
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+
+def test_a_public_after_bound_does_not_move_another_readers_count(env):
+    """Reads are tokenless. `after=` is this request's query bound and nothing
+    more: a third party reading `digest?as=victim&after=<far future>` must not
+    pin anything the victim's next digest or recovery would trust."""
+    seed_agent(env.hub, "victim")
+    seed_agent(env.hub, "writer")
+    env.client.post("/v1/messages", json={"agent_id": "writer", "body": "@victim hello"})
+    pinned = env.client.get("/v1/digest?as=victim&after=99991231-235959-999_attacker.md").json()
+    assert pinned["updates"]["unread"] == 0  # this request's own bound, honestly answered
+    assert env.client.get("/v1/digest?as=victim").json()["updates"]["unread"] == 1
+    assert "last_cursor" not in (env.client.get("/v1/digest?as=victim").json()["watching"] or {})
 
 
 def test_digest_updates_is_zero_for_a_quiet_handle(env):
@@ -157,31 +194,53 @@ def test_digest_watching_is_null_until_someone_watches(env):
     assert env.client.get("/v1/digest?as=watcher").json()["watching"] is None
 
 
-def test_digest_watching_appears_after_a_wait_poll(env):
-    """A wait>0 poll stamps the handle's presence; a plain wait=0 poll does
-    not — polling is not watching."""
+def test_a_digest_read_counts_as_a_poll_but_does_not_answer_itself(env):
+    """The digest reports presence as it stood BEFORE the read, then stamps it:
+    the next digest sees the previous one."""
+    seed_agent(env.hub, "watcher")
+    assert env.client.get("/v1/digest?as=watcher").json()["watching"] is None
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert block["mode"] == "poll" and block["stream"] == "digest"
+
+
+def test_digest_watching_records_parked_and_plain_reads(env):
+    """Any /v1/updates read stamps presence — a synchronous `--max-wait` caller
+    is present between calls — and `mode` says whether it parked."""
     seed_agent(env.hub, "watcher")
 
-    env.client.get("/v1/updates?as=watcher")  # wait=0: not a watch
-    assert env.client.get("/v1/digest?as=watcher").json()["watching"] is None
+    env.client.get("/v1/updates?as=watcher")  # wait=0
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("poll", "updates")
 
     env.client.get("/v1/updates?as=watcher&wait=0.15")
-    data = env.client.get("/v1/digest?as=watcher").json()
-    assert data["watching"]["mode"] == "updates"
-    assert data["watching"]["last_poll_age_s"] >= 0
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("parked", "updates")
+    assert block["last_poll_age_s"] >= 0
 
 
-def test_digest_watching_reports_the_mode(env):
+def test_a_digest_read_does_not_hide_a_parked_watcher(env):
+    """mode follows the last PARKED poll, not the last read: a digest between
+    two parks still reports parked, with the parked poll's stream."""
+    seed_agent(env.hub, "watcher")
+    env.client.get("/v1/updates?as=watcher&wait=0.05")
+    env.client.get("/v1/digest?as=watcher")
+
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("parked", "updates")
+
+
+def test_digest_watching_reports_the_stream(env):
     """inbox / feed / updates are distinguishable, so an organizer can see WHAT
     an agent is watching, not just that it is alive."""
     seed_agent(env.hub, "watcher")
     env.client.get("/v1/inbox/watcher?wait=0.1")
-    assert env.client.get("/v1/digest?as=watcher").json()["watching"]["mode"] == "inbox"
+    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
+    assert (block["mode"], block["stream"]) == ("parked", "inbox")
 
     _create_channel(env, "room")
     _subscribe(env, "room", "watcher")
     env.client.get("/v1/channels/feed?as=watcher&wait=0.1")
-    assert env.client.get("/v1/digest?as=watcher").json()["watching"]["mode"] == "feed"
+    assert env.client.get("/v1/digest?as=watcher").json()["watching"]["stream"] == "feed"
 
 
 def test_digest_watching_is_visible_while_a_poll_is_parked(env):
@@ -206,7 +265,7 @@ def test_digest_watching_is_visible_while_a_poll_is_parked(env):
             else:
                 time.sleep(0.01)
         assert seen is not None, "watch presence never became visible"
-        assert seen["mode"] == "updates"
+        assert (seen["mode"], seen["stream"]) == ("parked", "updates")
     finally:
         t.join(timeout=5)
 

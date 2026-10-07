@@ -99,9 +99,11 @@ async def get_updates(
         )
 
     if wait <= 0:
-        return await run_in_threadpool(check)
+        page = await run_in_threadpool(check)
+        notifier.note_poll(as_, "updates", parked=False)
+        return page
     await run_in_threadpool(guard)
-    notifier.note_poll(as_, "updates")
+    notifier.note_poll(as_, "updates", parked=True)
     # Snapshot the keys at park time: the inbox key (always present, so this
     # stream never degrades to no_streams) plus one per notify: all channel.
     # Staleness is bounded by one wait window — a level flipped mid-park takes
@@ -141,16 +143,16 @@ def get_watching(
     read model, no bucket listing, nothing to cache — so it is cheap enough for
     a 30s UI loop, unlike the one-digest-per-agent fan-out it replaces.
 
-    `max_wait_s` is the ceiling every `wait=` is clamped to and `fresh_s` (2×
-    that) the age past which presence should read as stale, published so no
-    consumer has to keep its own copy of the knob. The registry counters ride
-    along under `longpoll`, identical to `/v1/healthz`."""
+    `max_wait_s` is the ceiling every `wait=` is clamped to and `fresh_s`
+    (WATCH_FRESH_S) the age past which presence should read as stale, published
+    so no consumer has to keep its own copy of the knob. The registry counters
+    ride along under `longpoll`, identical to `/v1/healthz`."""
     return WatchingResponse(
         max_wait_s=settings.longpoll_max_wait_s,
-        fresh_s=2 * settings.longpoll_max_wait_s,
+        fresh_s=settings.watch_fresh_s,
         watching={
-            owner: WatchingEntry(last_poll_age_s=int(age_s), mode=mode)
-            for owner, (age_s, mode) in notifier.all_last_poll().items()
+            owner: WatchingEntry(last_poll_age_s=int(p.age_s), mode=p.mode, stream=p.stream)
+            for owner, p in notifier.all_last_poll().items()
         },
         longpoll=notifier.stats(),
     )

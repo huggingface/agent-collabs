@@ -22,8 +22,25 @@
 # modes (default: wait):
 #   (none)         block until mail, print the page, exit 0
 #   --max-wait N   ...but give up cleanly after N seconds with exit 3. N is a
-#                  floor: exit 3 never fires early, and overshoots by up to the
-#                  wait window still in flight when N expires.
+#                  ceiling: every request is clamped to the time left, so the
+#                  run returns within N seconds plus network latency (and the
+#                  2s idle floor) — size N to fit your shell tool's timeout.
+#                  A server still unreachable when N is up exits 4, not 3.
+#                  If a watcher is already parked for this handle AND covers
+#                  this stream (same stream, or `updates` covering `inbox`)
+#                  with a fresh heartbeat, a bounded run exits 3 at once (not
+#                  5): that watcher will deliver, so the check has nothing to
+#                  do. A live watcher on a stream that does not cover this one,
+#                  or with a stale heartbeat, is still exit 5 — stderr says
+#                  which, and what to do.
+#   --after C      start from cursor C instead of the saved one; C is written
+#                  to the cursor file first. C is a message filename, or a bare
+#                  stamp (20260728-120000 or 20260728-120000-000): filenames
+#                  sort by stamp, so a bare stamp replays everything from that
+#                  moment on. This is the recovery path after a wiped state
+#                  dir: pick the time you last know you were caught up and
+#                  replay (duplicates are harmless; silent skips are not).
+#                  Wait and --exec modes only.
 #   --exec CMD     foreground loop: per delivery run CMD (via `sh -c`) with the
 #                  page on its stdin; the cursor advances ONLY when CMD exits 0.
 #                  CMD also sees COLLAB_WATCH_HANDLE / COLLAB_WATCH_STREAM /
@@ -51,12 +68,19 @@
 #       redirecting base URL is a permanent condition, not a transient one), bad
 #       config, or a server that does not implement the watch API
 #   2   usage error
-#   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death
-#   4   gave up after 10 consecutive request failures (also: --status could not
-#       reach the server); the heartbeat records status=gave_up
-#   5   another watcher already holds the lock for this handle. The lock is
-#       per-HANDLE, not per-stream: one watcher covers an agent, which is what
-#       the unified `updates` stream is for
+#   3   --max-wait elapsed with no mail — a CLEAN timeout, not a death; also a
+#       --max-wait run that found a live watcher parked for this handle on a
+#       stream that covers this one (see --max-wait above)
+#   4   gave up after 10 consecutive request failures, or --max-wait ran out
+#       mid-retry (also: --status could not reach the server); the heartbeat
+#       records status=gave_up
+#   5   another watcher already holds the lock for this handle. A --max-wait
+#       run exits 3 instead when that watcher covers this stream and is
+#       looping; it still exits 5 when it is on a stream that does not cover
+#       this one, looks stuck, or when --after was given (a replay cannot run
+#       beside a parked watcher — stop it first). The lock is per-HANDLE, not
+#       per-stream: one watcher covers an agent, which is what the unified
+#       `updates` stream is for
 #   10  BEHIND: items are pending (--status, --peek)
 #   11  no watcher process is running for the queried stream (--status) —
 #       including "one is running, but on a different stream"
@@ -108,15 +132,25 @@
 #   silently skipped page is not.
 #
 # harness integration — exit-on-mail composes with anything:
-#   * Background-task harness (Claude Code, Codex, ...): launch ONE run with
-#     your harness's own background-task mechanism, react to the JSON when the
-#     task completes, then launch it again.
+#   * The documented recipe (the collab README) has two layers. Fast path: ONE
+#     unbounded run launched with your harness's background-task mechanism
+#     (Claude Code: run_in_background); it exits with the mail the moment it
+#     arrives and its last stderr line tells you to launch it again. Safety
+#     net: one synchronous `--max-wait N` run at every pause. The two share
+#     the cursor; a bounded run that finds a covering, looping watcher parked
+#     exits 3 at once (stderr names its pid — if you did not launch it, nobody
+#     is reading it: kill it and launch yours). Forgetting to re-launch the
+#     fast path costs latency, never mail.
+#   * Harness with no background completion push (Codex CLI): the safety net
+#     alone is the whole loop.
 #   * Foreground handler loop (a harness that can hold a child process):
 #         sh collab_watch.sh "$BASE" "$ME" --exec ./on_mail.sh
 #     on_mail.sh reads the page on stdin; exit 0 = acked (cursor advances),
 #     non-zero = not acked (the same page is re-delivered after a backoff).
 #   * At every natural pause, whatever your loop shape:
-#         sh collab_watch.sh "$BASE" "$ME" --status || re-arm the watcher
+#         sh collab_watch.sh "$BASE" "$ME" --max-wait 100
+#     (`--status` still answers "is my watcher alive?" for humans and tooling,
+#     but the loop above does not need it.)
 #
 # do NOT wrap this in a supervisor loop (`while true; do ... done`) inside an
 #   agent harness: harnesses reap long-lived background processes (exit 144,
@@ -161,6 +195,7 @@ IDLE_FLOOR_S=2     # minimum seconds between two empty answers
 # Server-issued filename shape: <YYYYMMDD>-<HHMMSS>-<mmm>_<agent-id>.md, where
 # the agent part is AGENT_ID_RE's character class ([a-z0-9-], never a dot).
 FILENAME_RE='[0-9]{8}-[0-9]{6}-[0-9]{3}_[a-z0-9][a-z0-9-]*\.md'
+STAMP_RE='[0-9]{8}-[0-9]{6}(-[0-9]{3})?'
 
 WAIT="${COLLAB_WATCH_WAIT:-55}"
 EXEC_RETRIES="${COLLAB_WATCH_EXEC_RETRIES:-3}"
@@ -182,7 +217,7 @@ log() { printf '%s: %s\n' "$SELF" "$*" >&2; }
 usage_text() {
     cat <<'EOF'
 usage: sh collab_watch.sh <base-url> <handle> [updates|inbox|feed] [flags]
-flags: --max-wait N | --exec CMD | --peek | --status | --help
+flags: --max-wait N | --after CURSOR | --exec CMD | --peek | --status | --help
 exit:  0 delivered/ok | 1 fatal | 2 usage | 3 clean no-mail timeout |
        4 gave up | 5 lock held | 10 behind | 11 no watcher | 12 stale heartbeat
 EOF
@@ -219,6 +254,8 @@ STREAM=""
 MODE="wait"
 MODE_FLAG=""
 MAX_WAIT=""
+AFTER=""
+DEADLINE=""
 EXEC_CMD=""
 
 set_mode() {
@@ -246,6 +283,13 @@ while [ "$#" -gt 0 ]; do
             MAX_WAIT="$1"
             is_num "$MAX_WAIT" || usage "--max-wait must be a whole number of seconds, got '$MAX_WAIT'"
             [ "$MAX_WAIT" -gt 0 ] || usage "--max-wait must be greater than 0"
+            ;;
+        --after)
+            shift
+            [ "$#" -gt 0 ] || usage "--after needs a cursor (a message filename or a stamp)"
+            AFTER="$1"
+            printf '%s\n' "$AFTER" | grep -qxE "$FILENAME_RE|$STAMP_RE" ||
+                usage "--after must be a message filename like 20260728-120000-000_agent-b.md or a stamp like 20260728-120000, got '$AFTER'"
             ;;
         -h | --help)
             # Self-documenting: the header comment IS the manual. Falls back to
@@ -277,6 +321,22 @@ done
 [ -n "$BASE" ] || usage "missing <base-url>"
 [ -n "$HANDLE" ] || usage "missing <handle>"
 [ -n "$STREAM" ] || STREAM=updates
+STREAM_ARG=""
+[ "$STREAM" = updates ] || STREAM_ARG=" $STREAM"
+
+# rearm_cmd: the exact command that relaunches this watcher — same script
+# (or `watch.sh` when this run came through a pipe and $0 is not a file),
+# same base, handle and stream, and the same state knobs, so the relaunch
+# lands in the same state directory and lock instead of cold-starting.
+rearm_cmd() {
+    rc_script="$0"
+    [ -f "$rc_script" ] || rc_script="watch.sh"
+    rc_env=""
+    [ -z "${COLLAB_WATCH_DIR:-}" ] || rc_env="COLLAB_WATCH_DIR='$COLLAB_WATCH_DIR' "
+    [ -z "${COLLAB_WATCH_STATE:-}" ] || rc_env="${rc_env}COLLAB_WATCH_STATE='$COLLAB_WATCH_STATE' "
+    [ -z "${COLLAB_WATCH_WAIT:-}" ] || rc_env="${rc_env}COLLAB_WATCH_WAIT=$WAIT "
+    printf "%ssh '%s' '%s' %s%s" "$rc_env" "$rc_script" "$BASE" "$HANDLE" "$STREAM_ARG"
+}
 
 case "$STREAM" in
     updates | inbox | feed) ;;
@@ -293,6 +353,9 @@ esac
 if [ -n "$MAX_WAIT" ] && [ "$MODE" != wait ]; then
     usage "--max-wait applies to the default wait mode only (not $MODE_FLAG)"
 fi
+case "$MODE" in
+    peek | status) [ -z "$AFTER" ] || usage "--after applies to wait and --exec modes only (not $MODE_FLAG)" ;;
+esac
 
 # ── configuration ─────────────────────────────────────────────────────
 
@@ -413,6 +476,68 @@ lock_alive() {
 # which is the eq2 failure this prevents (double delivery plus last-write-wins
 # cursor rollback). Needing only one watcher is what the unified `updates`
 # stream is for.
+# parked_watcher_covers: does the live lock owner's heartbeat say it is a
+# watcher that will deliver $STREAM's mail? Four things must hold. The
+# heartbeat is the lock owner's (pid matches; a watcher that has just taken
+# the lock gets one second to write its first one). Its stream includes
+# $STREAM: `updates` is inbox + notify:all channels, so it covers `inbox`;
+# nothing else covers anything else (`feed` has no board mail, `inbox` has no
+# channel traffic). Its state is one a looping watcher writes, not one written
+# on the way out (`delivered` is an unbounded run exiting, `no_mail` a bounded
+# one, `gave_up`/`no_cursor` a death). And it is fresh: within 3x the wait
+# window (floored at 10 s), the --status threshold, and not from the future.
+# Sets HB_STREAM, and PW_WHY with the reason and a remedy when it answers no.
+HB_STREAM=""
+PW_WHY=""
+pw_read_hb() {
+    pw_epoch=""
+    pw_state=""
+    pw_pid=""
+    pw_stream=""
+    read -r pw_epoch pw_state pw_pid pw_stream <"$HEARTBEAT" 2>/dev/null || :
+}
+parked_watcher_covers() {
+    HB_STREAM=""
+    PW_WHY="it left no heartbeat (not a watcher, or an older one); if it is still there next time, kill $lk_pid and relaunch"
+    [ -f "$HEARTBEAT" ] || return 1
+    pw_read_hb
+    if [ "$pw_pid" != "$lk_pid" ]; then
+        sleep 1
+        pw_read_hb
+        if [ "$pw_pid" != "$lk_pid" ]; then
+            PW_WHY="its heartbeat belongs to pid ${pw_pid:-?}, not to the lock owner (a watcher that has only just started, or a leftover from one that was killed); run this check again"
+            return 1
+        fi
+    fi
+    HB_STREAM="${pw_stream:--}"
+    case "$pw_stream" in
+        "$STREAM") ;;
+        updates) [ "$STREAM" = inbox ] || { PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'; stop it (kill $lk_pid) and relaunch it on 'updates', which covers everything"; return 1; } ;;
+        "") PW_WHY="its heartbeat names no stream (an older watcher); kill $lk_pid and relaunch"; return 1 ;;
+        *) PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'; stop it (kill $lk_pid) and relaunch it on 'updates', which covers everything"; return 1 ;;
+    esac
+    case "$pw_state" in
+        starting | baselined | waiting | acked | retrying | timeout | empty | exec_failed | dead_lettered | http_*) ;;
+        *) PW_WHY="its last heartbeat says '${pw_state:-?}', a watcher on its way out, not one that will deliver; run this check again"; return 1 ;;
+    esac
+    if ! is_num "${pw_epoch:-}"; then
+        PW_WHY="its heartbeat is unreadable; kill $lk_pid and relaunch"
+        return 1
+    fi
+    pw_age=$(($(now) - pw_epoch))
+    if [ "$pw_age" -lt 0 ]; then
+        PW_WHY="its heartbeat is ${pw_age#-}s in the future (clock skew?); kill $lk_pid and relaunch"
+        return 1
+    fi
+    pw_stale_after=$((WAIT * 3))
+    [ "$pw_stale_after" -ge 10 ] || pw_stale_after=10
+    if [ "$pw_age" -gt "$pw_stale_after" ]; then
+        PW_WHY="its heartbeat is ${pw_age}s old (last: $pw_state), so it may be stuck; if it still looks stuck next time, kill $lk_pid and relaunch"
+        return 1
+    fi
+    return 0
+}
+
 lock_acquire() {
     if mkdir "$LOCKDIR" 2>/dev/null; then
         LOCK_HELD=1
@@ -431,6 +556,25 @@ lock_acquire() {
         lk_pid=$(lock_pid)
     fi
     if lock_alive "$lk_pid"; then
+        if [ -n "$MAX_WAIT" ]; then
+            # A bounded run is the safety net under a parked watcher: if that
+            # watcher covers this stream and is looping, it will exit with the
+            # mail the moment it arrives, so there is nothing for this run to
+            # do. Not an error. A live pid alone proves nothing: it may be on
+            # a stream that does not include this one, or stuck. And a replay
+            # (--after) can never be "nothing to do": the cursor it asks for
+            # would be silently dropped.
+            if [ -n "$AFTER" ]; then
+                log "--after cannot run while a watcher (pid $lk_pid) is parked for this handle: stop it (kill $lk_pid), run this command again, then relaunch the background watcher; exiting 5"
+                exit 5
+            fi
+            if parked_watcher_covers && lock_alive "$lk_pid"; then
+                log "a watcher is already parked for this handle (pid $lk_pid, stream $HB_STREAM); it delivers your mail the moment it arrives, so this check has nothing to do (if you did not launch pid $lk_pid, nobody is reading it: kill it and launch yours); exiting 3"
+                exit 3
+            fi
+            log "a watcher holds this handle's lock (pid $lk_pid) but $PW_WHY; the lock is per-handle; exiting 5"
+            exit 5
+        fi
         log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
         exit 5
     fi
@@ -553,6 +697,11 @@ on_retryable() {
         log "giving up after $STREAK consecutive request failures (last: HTTP $HTTP, curl rc=$CURL_RC)"
         exit 4
     fi
+    if [ -n "$DEADLINE" ] && [ $((DEADLINE - $(now))) -le "$BACKOFF" ]; then
+        hb gave_up
+        log "request failed (HTTP $HTTP, curl rc=$CURL_RC) and --max-wait ${MAX_WAIT}s is up; exiting 4"
+        exit 4
+    fi
     hb retrying
     log "request failed (HTTP $HTTP, curl rc=$CURL_RC); retry $STREAK/$FAIL_STREAK_MAX in ${BACKOFF}s"
     if [ "$BACKOFF" -gt 0 ]; then
@@ -567,6 +716,22 @@ on_retryable() {
 request_ok_reset() {
     STREAK=0
     BACKOFF="$BACKOFF_BASE"
+}
+
+# curl --max-time for a request parked $1 seconds: the wait plus 20s of slack,
+# but never past the --max-wait deadline plus 5s of network latency.
+max_time() {
+    mt=$(($1 + 20))
+    if [ -n "$DEADLINE" ]; then
+        mt_cap=$((DEADLINE - $(now) + 5))
+        if [ "$mt_cap" -lt "$mt" ]; then
+            mt="$mt_cap"
+        fi
+    fi
+    if [ "$mt" -lt 1 ]; then
+        mt=1
+    fi
+    printf '%s' "$mt"
 }
 
 # Forward-drain URL: $1 = limit, $2 = wait. `after` is omitted when the cursor
@@ -586,7 +751,7 @@ poll_url() {
 # so peeking and watching agree about where "now" is.
 baseline_cursor() {
     while :; do
-        do_request "$URL${SEP}limit=1&order=desc&expand=true" $((WAIT + 20))
+        do_request "$URL${SEP}limit=1&order=desc&expand=true" "$(max_time 0)"
         bc_cls=0
         classify || bc_cls=$?
         case "$bc_cls" in
@@ -619,38 +784,44 @@ journal_page() {
         log "warning: could not append to $1 (delivery continues, recovery does not)"
 }
 
-# ── mode: wait / bounded wait ─────────────────────────────────────────
-
-run_wait() {
-    lock_acquire
-    hb starting
-
-    # --max-wait is a FLOOR, never a ceiling: exit 3 must not fire before the
-    # caller's N seconds are really up. `date +%s` truncates, so the epoch read
-    # here is up to a second earlier than the true start instant — without the
-    # +1 slack a `--max-wait 2` run could give up after 1.1s and report "no
-    # mail" for a window the caller never asked to stop watching. The cost is
-    # that the bound overshoots instead: by up to that lost second, plus
-    # whatever is left of the request already in flight when it expires (the
-    # granularity of a bounded wait is one wait window — say so, don't pretend).
-    rw_deadline=""
-    if [ -n "$MAX_WAIT" ]; then
-        rw_deadline=$(($(now) + MAX_WAIT + 1))
+# The cursor to resume from: --after if given, else the saved one, else a
+# cold-start baseline.
+load_cursor() {
+    if [ -n "$AFTER" ]; then
+        write_line "$CURSOR_FILE" "$AFTER"
+        log "cursor set to '$AFTER' (--after)"
     fi
-
     if [ ! -f "$CURSOR_FILE" ]; then
         baseline_cursor
         hb baselined
     else
         CURSOR=$(cursor_read)
     fi
+}
+
+# ── mode: wait / bounded wait ─────────────────────────────────────────
+
+run_wait() {
+    lock_acquire
+    hb starting
+
+    # --max-wait is a CEILING: it is sized to fit a shell tool's timeout, and a
+    # run the harness kills mid-request is worse than one that returns a second
+    # early. Every request is clamped to the time left, and so are curl's
+    # --max-time and the retry backoff. (`date +%s` truncates, so the run may
+    # end up to a second before N.)
+    if [ -n "$MAX_WAIT" ]; then
+        DEADLINE=$(($(now) + MAX_WAIT))
+    fi
+
+    load_cursor
 
     # Page FORWARD from the cursor (order=asc) so a burst larger than one page
     # drains oldest-first across consecutive runs with no gaps.
     while :; do
         rw_wait="$WAIT"
-        if [ -n "$rw_deadline" ]; then
-            rw_left=$((rw_deadline - $(now)))
+        if [ -n "$DEADLINE" ]; then
+            rw_left=$((DEADLINE - $(now)))
             if [ "$rw_left" -le 0 ]; then
                 hb no_mail
                 log "no mail within ${MAX_WAIT}s — clean timeout, exiting 3"
@@ -663,7 +834,7 @@ run_wait() {
 
         hb waiting
         rw_t0=$(now)
-        do_request "$(poll_url "$LIMIT" "$rw_wait")" $((rw_wait + 20))
+        do_request "$(poll_url "$LIMIT" "$rw_wait")" "$(max_time "$rw_wait")"
         rw_cls=0
         classify || rw_cls=$?
         case "$rw_cls" in
@@ -687,6 +858,12 @@ run_wait() {
             write_line "$CURSOR_FILE" "$PAGE_CURSOR"
             hb delivered
             log "delivered $NITEMS item(s); cursor -> $PAGE_CURSOR"
+            if [ -z "$MAX_WAIT" ]; then
+                # An unbounded run is the background single-shot. The README
+                # that said "re-arm" may be long compacted out of the agent's
+                # context; this line arrives with the mail itself.
+                log "re-arm: this watcher has exited. Launch it again as a background task so the next message reaches you at once: $(rearm_cmd)"
+            fi
             exit 0
         fi
 
@@ -747,13 +924,7 @@ idle_pace() {
 run_exec() {
     lock_acquire
     hb starting
-
-    if [ ! -f "$CURSOR_FILE" ]; then
-        baseline_cursor
-        hb baselined
-    else
-        CURSOR=$(cursor_read)
-    fi
+    load_cursor
 
     re_page=""
     re_fails=0

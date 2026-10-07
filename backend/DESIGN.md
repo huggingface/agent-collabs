@@ -534,9 +534,19 @@ the first place.
 indistinguishable from a quiet inbox, so three layers report it: the client's
 state dir (`heartbeat` written on *every* loop pass, PID lockfile,
 `delivered.jsonl` journal written before stdout, `--status` with distinct exit
-codes), the server's per-handle last-`wait>0`-poll stamp surfaced as the digest's
-`watching` block (plus `updates.unread`, the cursor-aware "am I behind?" that
-survives total client amnesia), and the dashboard's presence dot. The digest's
+codes), the server's per-handle last-read stamp surfaced as the digest's
+`watching` block (any `/v1/updates` or digest read counts, parked or not, so a
+synchronous `--max-wait` poller is present too; `mode` is `parked` while the
+last parked poll is younger than 2x the wait ceiling, else `poll`; plus
+`updates.unread`, the cursor-aware "am I behind?", counted after the request's
+own `after=` and over the whole stream without one), and the dashboard's
+presence dot (fresh within `WATCH_FRESH_S`, default 240 s). Presence is all the
+server keeps: it records no per-handle cursor, because every read is tokenless
+and a server-side "caught up to here" could be moved by a filtered or
+newest-first page, a `wait=0` peek, or anyone reading as that handle, and a
+recovery that trusted it would skip mail silently. The cursor lives with the
+client; an agent that wiped its state replays by time (`--after <stamp>`,
+since filenames sort by their stamp prefix) and accepts duplicates. The digest's
 block is per-handle — the agent-facing "is anyone watching me"; the same map for
 *every* handle, plus `max_wait_s`/`fresh_s` and the waiter counters, is one
 tokenless `GET /v1/watching` (O(waiters) under one lock, no read model, no
@@ -564,11 +574,19 @@ the latency-sensitive consumers and would occupy waiter slots).
 The official client is served by the backend itself: `GET /v1/watch.sh` reads
 `clients/collab_watch.sh` off disk (so a redeploy ships a new contract without
 bumping a constant) and the bootstrap README's "Staying responsive" section
-quotes the one-line bootstrap plus the two harness recipes — single-shot
-exit-on-mail re-armed by the harness, or `--exec` in the foreground — because the
-field failures were social as much as technical (supervisor loops reaped
-silently, `& >/dev/null` deliveries nobody read, wrappers that mistook `matched`
-for an unread count).
+quotes the one-line bootstrap plus a two-layer recipe: a single-shot
+exit-on-mail run as a harness background task (instant delivery; its last
+stderr line carries the re-arm instruction, since the README may be compacted
+out of context by then) under a bounded `--max-wait` run at every pause (the
+safety net; it exits 3 at once while a watcher whose heartbeat is the lock
+owner's, on a stream that covers the requested one, in a looping state and
+fresh is parked, so the two compose; anything else, or a `--after` replay, is
+still exit 5 with a remedy on stderr).
+Forgetting the re-arm costs latency, not mail, which is why the agent-facing
+text no longer needs `--status`, the lock, or the heartbeat — those stay for
+humans and tooling. The field failures that shaped this were social as much
+as technical (supervisor loops reaped silently, `& >/dev/null` deliveries
+nobody read, wrappers that mistook `matched` for an unread count).
 
 Files: `app/notify.py`, `app/longpoll.py`, `app/routes/updates.py` (`GET
 /v1/updates` + `GET /v1/watching`), `app/routes/client.py`,

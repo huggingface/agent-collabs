@@ -487,22 +487,31 @@ class DigestInbox(BaseModel):
 
 class DigestUpdates(BaseModel):
     """Cursor-aware "am I behind?" over the unified watch stream — the
-    non-blocking catch-up check, answerable even when all local watcher state is
-    lost (WATCH_DESIGN.md §4.5)."""
-    # Items newer than the digest's `after=` cursor (the whole stream when none).
+    non-blocking catch-up check (WATCH_DESIGN.md §4.5). It is only as
+    cursor-aware as the `after=` the caller sends: without one it is the size
+    of the whole stream."""
+    # Items newer than the digest's `after=` cursor; the whole stream without
+    # one. The server keeps no cursor for a handle (see DigestWatching).
     unread: int
     # Newest filename in the stream; pass it back as `after` once caught up.
     newest: str | None = None
 
 
 class DigestWatching(BaseModel):
-    """The server's record of the handle's most recent `wait>0` poll. A hint,
-    not an audit log: it lives in-process and a restart forgets it (which is the
-    truth — every parked connection died with it). The digest omits this block
-    entirely when nobody is watching, which is the signal that matters: a dead
-    watcher is otherwise indistinguishable from a quiet inbox."""
+    """The server's record of the handle's most recent read (a `wait>0` poll,
+    a plain `/v1/updates` read, or a digest). A hint, not an audit log: it lives
+    in-process and a restart forgets it (which is the truth — every parked
+    connection died with it). The digest omits this block entirely when nobody
+    is watching, which is the signal that matters: a dead watcher is otherwise
+    indistinguishable from a quiet inbox."""
     last_poll_age_s: int
-    mode: str  # updates | inbox | feed
+    mode: str  # parked (a wait>0 poll within 2x the wait ceiling) | poll
+    # updates | inbox | feed | digest: the parked poll's while parked, else
+    # the most recent read's.
+    stream: str
+    # Deliberately no cursor: reads are tokenless, so a server-side "caught up
+    # to here" could be moved by a filtered page, a peek, or anyone reading as
+    # this handle. The cursor lives with the client; recovery replays by time.
 
 
 class DigestResponse(BaseModel):
@@ -525,7 +534,8 @@ class WatchingEntry(BaseModel):
     """One handle's watch presence — the same hint the digest reports as its
     per-handle `watching` block, in the aggregate map."""
     last_poll_age_s: int
-    mode: str  # updates | inbox | feed
+    mode: str  # parked (wait>0) | poll (wait=0 or a digest)
+    stream: str  # updates | inbox | feed | digest
 
 
 class WatchingResponse(BaseModel):
@@ -537,12 +547,10 @@ class WatchingResponse(BaseModel):
     It also advertises the ceiling a client would otherwise have to hardcode."""
     # The `wait=` ceiling every long-poll is clamped to (LONGPOLL_MAX_WAIT_S).
     max_wait_s: float
-    # Freshness threshold for "someone is watching this handle right now": a
-    # watcher re-arms at most one wait window after the last one ended, so 2×
-    # the ceiling is the youngest age that can still be stale. Published so no
-    # consumer keeps its own copy of the backend's knob.
+    # Freshness threshold for "someone is watching this handle right now"
+    # (WATCH_FRESH_S). Published so no consumer keeps its own copy of the knob.
     fresh_s: float
-    # Only handles this process has served a wait>0 poll for; absent = nobody is
+    # Only handles this process has served a read for; absent = nobody is
     # watching that one. In-process and lost on restart — a hint, not an audit
     # log (a restart truthfully reads as "nobody", since every parked
     # connection died with it).
