@@ -734,6 +734,69 @@ def test_max_wait_still_delivers_when_mail_arrives(stub, tmp_path):
     assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [filename]
 
 
+def test_max_wait_beside_a_parked_watcher_exits_3_at_once(stub, tmp_path):
+    """The bounded run is the safety net under the background single-shot. If
+    that watcher is parked it WILL deliver, so the check has nothing to do:
+    exit 3 immediately (not 5, not a 100 s park), and never touch the lock."""
+    state = fresh(tmp_path, cursor="")
+    watcher = popen(stub, state)
+    try:
+        pid_file = state / "lock" / "pid"
+        assert wait_until(pid_file.exists), "no lock was taken"
+        # first line only: the lock file may also record the owner's start time
+        assert pid_file.read_text().split()[0] == str(watcher.pid)
+
+        t0 = time.monotonic()
+        result = run(stub, state, "--max-wait", "30", timeout=20)
+        elapsed = time.monotonic() - t0
+
+        assert result.returncode == 3, result.stderr
+        assert elapsed < 5, f"a parked-watcher check must not park itself ({elapsed:.1f}s)"
+        assert result.stdout == ""
+        assert str(watcher.pid) in result.stderr
+        assert "parked" in result.stderr
+        assert pid_file.read_text().split()[0] == str(watcher.pid), \
+            "the bounded run must leave the parked watcher's lock alone"
+        assert watcher.poll() is None, "the parked watcher must still be running"
+    finally:
+        stop(watcher)
+
+
+def test_unbounded_delivery_prints_the_re_arm_command(stub, tmp_path):
+    """The background single-shot's exit is the harness notification; the
+    instruction to launch it again rides on that notification instead of on a
+    README that may have been compacted out of the agent's context."""
+    state = fresh(tmp_path, cursor="")
+    stub.add()
+    result = run(stub, state)
+    assert result.returncode == 0, result.stderr
+    rearm = [l for l in result.stderr.splitlines() if "re-arm:" in l]
+    assert len(rearm) == 1, result.stderr
+    assert f"sh {SCRIPT} {stub.base_url} agent-a" in rearm[0]
+    assert "feed" not in rearm[0] and "inbox" not in rearm[0], \
+        "the default stream is not spelled out"
+    assert rearm[0] == result.stderr.splitlines()[-1], "it must be the LAST line"
+
+
+def test_re_arm_command_names_a_non_default_stream(stub, tmp_path):
+    state = fresh(tmp_path, cursor="", stream="feed")
+    stub.add()
+    result = run(stub, state, stream="feed")
+    assert result.returncode == 0, result.stderr
+    rearm = [l for l in result.stderr.splitlines() if "re-arm:" in l]
+    assert rearm and rearm[0].endswith(f"sh {SCRIPT} {stub.base_url} agent-a feed"), result.stderr
+
+
+def test_bounded_delivery_has_no_re_arm_line(stub, tmp_path):
+    """A --max-wait run is the pause check, not the background watcher; telling
+    the agent to re-arm there would send it chasing a process it never had."""
+    state = fresh(tmp_path, cursor="")
+    stub.add()
+    result = run(stub, state, "--max-wait", "10", timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "re-arm:" not in result.stderr
+
+
 # ── 7. --peek ─────────────────────────────────────────────────────────
 
 

@@ -571,11 +571,16 @@ the latency-sensitive consumers and would occupy waiter slots).
 The official client is served by the backend itself: `GET /v1/watch.sh` reads
 `clients/collab_watch.sh` off disk (so a redeploy ships a new contract without
 bumping a constant) and the bootstrap README's "Staying responsive" section
-quotes the one-line bootstrap plus the two harness recipes — single-shot
-exit-on-mail re-armed by the harness, or `--exec` in the foreground — because the
-field failures were social as much as technical (supervisor loops reaped
-silently, `& >/dev/null` deliveries nobody read, wrappers that mistook `matched`
-for an unread count).
+quotes the one-line bootstrap plus a two-layer recipe: a single-shot
+exit-on-mail run as a harness background task (instant delivery; its last
+stderr line carries the re-arm instruction, since the README may be compacted
+out of context by then) under a bounded `--max-wait` run at every pause (the
+safety net; it exits 3 at once while a watcher is parked, so the two compose).
+Forgetting the re-arm costs latency, not mail, which is why the agent-facing
+text no longer needs `--status`, the lock, or the heartbeat — those stay for
+humans and tooling. The field failures that shaped this were social as much
+as technical (supervisor loops reaped silently, `& >/dev/null` deliveries
+nobody read, wrappers that mistook `matched` for an unread count).
 
 Files: `app/notify.py`, `app/longpoll.py`, `app/routes/updates.py` (`GET
 /v1/updates` + `GET /v1/watching`), `app/routes/client.py`,

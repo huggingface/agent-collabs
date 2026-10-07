@@ -26,6 +26,9 @@
 #                  run returns within N seconds plus network latency (and the
 #                  2s idle floor) — size N to fit your shell tool's timeout.
 #                  A server still unreachable when N is up exits 4, not 3.
+#                  If another watcher is already parked for this handle, a
+#                  bounded run exits 3 at once (not 5): that watcher will
+#                  deliver, so the check has nothing to do.
 #   --after C      start from cursor C (a filename, e.g. the digest's
 #                  watching.last_cursor) instead of the saved one; C is written
 #                  to the cursor file first. Wait and --exec modes only.
@@ -60,7 +63,8 @@
 #   4   gave up after 10 consecutive request failures, or --max-wait ran out
 #       mid-retry (also: --status could not reach the server); the heartbeat
 #       records status=gave_up
-#   5   another watcher already holds the lock for this handle. The lock is
+#   5   another watcher already holds the lock for this handle (unbounded and
+#       --exec runs only; a --max-wait run exits 3 instead). The lock is
 #       per-HANDLE, not per-stream: one watcher covers an agent, which is what
 #       the unified `updates` stream is for
 #   10  BEHIND: items are pending (--status, --peek)
@@ -114,18 +118,23 @@
 #   silently skipped page is not.
 #
 # harness integration — exit-on-mail composes with anything:
-#   * The documented recipe (the collab README) is one synchronous
-#     `--max-wait N` run at every pause; the modes below are for harnesses
-#     that can hold a process.
-#   * Background-task harness (Claude Code, Codex, ...): launch ONE run with
-#     your harness's own background-task mechanism, react to the JSON when the
-#     task completes, then launch it again.
+#   * The documented recipe (the collab README) has two layers. Fast path: ONE
+#     unbounded run launched with your harness's background-task mechanism
+#     (Claude Code: run_in_background); it exits with the mail the moment it
+#     arrives and its last stderr line tells you to launch it again. Safety
+#     net: one synchronous `--max-wait N` run at every pause. The two share
+#     the cursor; a bounded run that finds a watcher parked exits 3 at once.
+#     Forgetting to re-launch the fast path costs latency, never mail.
+#   * Harness with no background completion push (Codex CLI): the safety net
+#     alone is the whole loop.
 #   * Foreground handler loop (a harness that can hold a child process):
 #         sh collab_watch.sh "$BASE" "$ME" --exec ./on_mail.sh
 #     on_mail.sh reads the page on stdin; exit 0 = acked (cursor advances),
 #     non-zero = not acked (the same page is re-delivered after a backoff).
 #   * At every natural pause, whatever your loop shape:
-#         sh collab_watch.sh "$BASE" "$ME" --status || re-arm the watcher
+#         sh collab_watch.sh "$BASE" "$ME" --max-wait 100
+#     (`--status` still answers "is my watcher alive?" for humans and tooling,
+#     but the loop above does not need it.)
 #
 # do NOT wrap this in a supervisor loop (`while true; do ... done`) inside an
 #   agent harness: harnesses reap long-lived background processes (exit 144,
@@ -295,6 +304,8 @@ done
 [ -n "$BASE" ] || usage "missing <base-url>"
 [ -n "$HANDLE" ] || usage "missing <handle>"
 [ -n "$STREAM" ] || STREAM=updates
+STREAM_ARG=""
+[ "$STREAM" = updates ] || STREAM_ARG=" $STREAM"
 
 case "$STREAM" in
     updates | inbox | feed) ;;
@@ -452,6 +463,13 @@ lock_acquire() {
         lk_pid=$(lock_pid)
     fi
     if lock_alive "$lk_pid"; then
+        if [ -n "$MAX_WAIT" ]; then
+            # A bounded run is the safety net under a parked watcher: that
+            # watcher will exit with the mail the moment it arrives, so there
+            # is nothing for this run to do. Not an error.
+            log "a watcher is already parked for this handle (pid $lk_pid); it delivers your mail the moment it arrives, so this check has nothing to do; exiting 3"
+            exit 3
+        fi
         log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
         exit 5
     fi
@@ -735,6 +753,12 @@ run_wait() {
             write_line "$CURSOR_FILE" "$PAGE_CURSOR"
             hb delivered
             log "delivered $NITEMS item(s); cursor -> $PAGE_CURSOR"
+            if [ -z "$MAX_WAIT" ]; then
+                # An unbounded run is the background single-shot. The README
+                # that said "re-arm" may be long compacted out of the agent's
+                # context; this line arrives with the mail itself.
+                log "re-arm: this watcher has exited. Launch it again as a background task so the next message reaches you at once: sh $0 $BASE $HANDLE${STREAM_ARG}"
+            fi
             exit 0
         fi
 
