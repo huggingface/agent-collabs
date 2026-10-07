@@ -100,11 +100,10 @@ async def get_updates(
 
     if wait <= 0:
         page = await run_in_threadpool(check)
-        notifier.note_poll(as_, "updates", parked=False, after=after)
-        notifier.note_cursor(as_, page.cursor)
+        notifier.note_poll(as_, "updates", parked=False)
         return page
     await run_in_threadpool(guard)
-    notifier.note_poll(as_, "updates", parked=True, after=after)
+    notifier.note_poll(as_, "updates", parked=True)
     # Snapshot the keys at park time: the inbox key (always present, so this
     # stream never degrades to no_streams) plus one per notify: all channel.
     # Staleness is bounded by one wait window — a level flipped mid-park takes
@@ -125,7 +124,6 @@ async def get_updates(
         check=check,
         has_items=lambda listing: bool(listing.items),
     )
-    notifier.note_cursor(as_, page.cursor)
     return watched(page, status, waited_ms)
 
 

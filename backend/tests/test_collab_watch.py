@@ -713,8 +713,8 @@ def test_max_wait_ceiling_holds_while_the_server_is_down(tmp_path):
 
 
 def test_after_overrides_the_saved_cursor(stub, tmp_path):
-    """--after resumes from a cursor the agent got elsewhere (the digest's
-    watching.last_cursor) — e.g. after its state directory was wiped."""
+    """--after resumes from a cursor the agent got elsewhere — e.g. after its
+    state directory was wiped."""
     state = fresh(tmp_path)  # no cursor file: would otherwise baseline
     first = stub.add()
     second = stub.add()
@@ -724,6 +724,34 @@ def test_after_overrides_the_saved_cursor(stub, tmp_path):
     assert result.returncode == 0, result.stderr
     assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [second]
     assert (state / "cursor.updates").read_text().strip() == second
+
+
+def test_after_accepts_a_bare_stamp_and_replays_from_it(stub, tmp_path):
+    """Recovery without server state: filenames sort by their stamp prefix, so
+    `--after 20260728-1201` -style stamps replay everything from that moment.
+    Both the seconds form and the milliseconds form are accepted."""
+    state = fresh(tmp_path)
+    older = stub.add()      # 20260728-120001-000_agent-b.md
+    newer = stub.add()      # 20260728-120002-000_agent-b.md
+    stamp = newer.split("_")[0].rsplit("-", 1)[0]  # 20260728-120002
+
+    result = run(stub, state, "--after", stamp, "--max-wait", "5")
+    assert result.returncode == 0, result.stderr
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [newer]
+
+    # The milliseconds form is a prefix of the filename at that very stamp, so
+    # "from that moment on" includes it: replay, not skip.
+    (tmp_path / "b").mkdir()
+    result = run(stub, fresh(tmp_path / "b"), "--after", older.split("_")[0], "--max-wait", "5")
+    assert result.returncode == 0, result.stderr
+    assert [i["filename"] for i in json.loads(result.stdout)["items"]] == [older, newer]
+
+
+def test_after_rejects_a_non_stamp(tmp_path):
+    result = subprocess.run(["sh", SCRIPT, "http://127.0.0.1:9", "agent-a", "--after", "yesterday"],
+                            capture_output=True, text=True)
+    assert result.returncode == 2
+    assert "stamp" in result.stderr
 
 
 def test_max_wait_still_delivers_when_mail_arrives(stub, tmp_path):
@@ -760,6 +788,73 @@ def test_max_wait_beside_a_parked_watcher_exits_3_at_once(stub, tmp_path):
         assert watcher.poll() is None, "the parked watcher must still be running"
     finally:
         stop(watcher)
+
+
+def test_max_wait_beside_a_watcher_on_a_stream_that_does_not_cover_it_exits_5(stub, tmp_path):
+    """An `inbox` watcher does not see notify:all channel traffic, so it does
+    not cover a bounded `updates` check: that check must not call itself done.
+    It cannot take the per-handle lock either, so it is exit 5, and stderr
+    names the stream mismatch."""
+    state = fresh(tmp_path, cursor="", stream="inbox")
+    (state / "cursor.updates").write_text("\n")
+    watcher = popen(stub, state, stream="inbox")
+    try:
+        assert wait_until((state / "heartbeat").exists)
+        result = run(stub, state, "--max-wait", "3", stream="updates", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "'inbox'" in result.stderr and "'updates'" in result.stderr
+        assert watcher.poll() is None
+    finally:
+        stop(watcher)
+
+
+def test_max_wait_on_inbox_beside_an_updates_watcher_exits_3(stub, tmp_path):
+    """`updates` is inbox + notify:all channels, so it covers an `inbox` check."""
+    state = fresh(tmp_path, cursor="", stream="updates")
+    (state / "cursor.inbox").write_text("\n")
+    watcher = popen(stub, state)
+    try:
+        assert wait_until((state / "heartbeat").exists)
+        result = run(stub, state, "--max-wait", "3", stream="inbox", timeout=10)
+        assert result.returncode == 3, (result.returncode, result.stderr)
+        assert "stream updates" in result.stderr
+    finally:
+        stop(watcher)
+
+
+def test_max_wait_beside_a_live_pid_with_a_stale_heartbeat_exits_5(stub, tmp_path):
+    """A live pid is not a healthy watcher: one that stopped looping (stuck
+    handler, hung curl) must not make the safety net report nothing to do.
+    Exit 5, say it looks stuck, and leave its lock alone."""
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        (state / "heartbeat").write_text(f"{int(time.time()) - 3600} waiting {alive.pid} updates\n")
+
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "stuck" in result.stderr and str(alive.pid) in result.stderr
+        assert (state / "lock" / "pid").read_text().split()[0] == str(alive.pid)
+    finally:
+        alive.terminate()
+        alive.wait()
+
+
+def test_max_wait_beside_a_live_pid_without_a_heartbeat_exits_5(stub, tmp_path):
+    state = fresh(tmp_path, cursor="")
+    alive = subprocess.Popen(["sleep", "30"])
+    try:
+        (state / "lock").mkdir()
+        (state / "lock" / "pid").write_text(f"{alive.pid}\n")
+        result = run(stub, state, "--max-wait", "3", timeout=10)
+        assert result.returncode == 5, (result.returncode, result.stderr)
+        assert "heartbeat" in result.stderr
+    finally:
+        alive.terminate()
+        alive.wait()
 
 
 def test_unbounded_delivery_prints_the_re_arm_command(stub, tmp_path):

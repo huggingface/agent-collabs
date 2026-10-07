@@ -50,15 +50,15 @@ def digest(
 
     With `?as=`, two watch blocks come along (WATCH_DESIGN.md §4.5):
     `updates` answers "am I behind?" over the unified `/v1/updates` stream
-    (it counts after `?after=<your cursor>`, or by default after the
-    server's `last_cursor` for this handle), and `watching`
-    reports this handle's last read before this one (`mode` parked while its
-    last parked poll is younger than 2x the wait ceiling, else poll) and
-    `last_cursor`, the newest cursor the server has handed it on the unified
-    stream or that it has sent — null when nobody is watching it. Both are readable with zero local state, which is the point:
-    an agent that lost its whole watcher state directory still learns from its
-    routine digest that it has been deaf for six hours, has four unread, and
-    where to resume (`sh watch.sh ... --after <last_cursor>`)."""
+    (it counts after `?after=<your cursor>`; without `after=` it is the whole
+    stream), and `watching` reports this handle's last read before this one
+    (`mode` parked while its last parked poll is younger than 2x the wait
+    ceiling, else poll) — null when nobody is watching it. The server keeps no
+    cursor for a handle: reads are tokenless, so a server-side checkpoint could
+    be moved by a filtered page, a peek, or anyone reading as that handle, and
+    a recovery that trusted it would skip mail. An agent that lost its watcher
+    state resumes with `--after <stamp>` from the time it last knows it was
+    caught up, and replays."""
     since_norm = normalize_stamp(since, param="since") if since is not None else None
 
     agents = read_model.records("agents")
@@ -107,13 +107,10 @@ def digest(
         # Report the presence as it stood BEFORE this read, then stamp it: a
         # digest read is a poll too, but it must not answer its own question.
         seen = notifier.last_poll(as_)
-        notifier.note_poll(as_, "digest", parked=False, after=after)
-        # Without after=, count from the server's last_cursor, so mail the
-        # watcher already delivered does not read as unread.
-        count_after = after if after is not None else (seen.last_cursor if seen else None)
+        notifier.note_poll(as_, "digest", parked=False)
         update_recs = read_model.updates_records(as_)
         updates = DigestUpdates(
-            unread=sum(1 for r in update_recs if count_after is None or r.filename > count_after),
+            unread=sum(1 for r in update_recs if after is None or r.filename > after),
             newest=max((r.filename for r in update_recs), default=None),
         )
         if seen is not None:
@@ -121,7 +118,6 @@ def digest(
                 last_poll_age_s=int(seen.age_s),
                 mode=seen.mode,
                 stream=seen.stream,
-                last_cursor=seen.last_cursor,
             )
 
     # Channels: every channel's summary (discovery) plus, with ?as=, the
@@ -162,10 +158,8 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
         {"method": "GET", "path": "/v1/digest", "params": "as, since, after",
          "purpose": "one-call collab snapshot: agents, leaderboard, recent "
                     "activity, your inbox; with as= also updates.unread "
-                    "(counted after after=, default the server's last_cursor) "
-                    "and watching (is anyone watching "
-                    "this handle? last_cursor = the newest cursor handed out "
-                    "or sent; resume with --after <last_cursor>)"},
+                    "(counted after after=; the whole stream without it) "
+                    "and watching (is anyone watching this handle?)"},
         {"method": "GET", "path": "/v1/me", "params": "Authorization: Bearer",
          "purpose": "the caller's hf_user + whether they may broadcast (organizer)"},
         {"method": "GET", "path": "/v1/leaderboard",

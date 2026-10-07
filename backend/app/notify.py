@@ -59,9 +59,6 @@ class Presence(NamedTuple):
     # updates | inbox | feed | digest: the parked poll's stream while parked,
     # else the most recent read's.
     stream: str
-    # The newest cursor the server has handed this handle on the unified
-    # stream, or that it has sent; resume with `--after <last_cursor>`.
-    last_cursor: str | None
 
 
 class Subscription:
@@ -201,7 +198,6 @@ class Notifier:
         # owner -> the newest cursor handed out or sent on the unified stream,
         # so an agent whose local state was wiped can resume from the server's
         # record. Same lifetime.
-        self._last_cursor: dict[str, str] = {}
         # Cheap operational counters for /v1/healthz. eq2 shipped this feature
         # with zero observability, so an operator could not tell a quiet board
         # from a registry that had been degrading every request for hours.
@@ -297,9 +293,7 @@ class Notifier:
 
     # ── liveness & observability ──
 
-    def note_poll(
-        self, owner: str, stream: str, *, parked: bool, after: str | None = None
-    ) -> None:
+    def note_poll(self, owner: str, stream: str, *, parked: bool) -> None:
         """Record that ``owner`` just read ``stream`` (updates|inbox|feed|digest),
         parked (``wait>0``) or not. The server side of "is anyone watching this
         handle?" — the one liveness signal that survives total client amnesia
@@ -309,24 +303,19 @@ class Notifier:
         ``mode`` reports ``parked`` while the last parked poll is younger than
         the parked window (2x the wait ceiling), whatever was read since, so a
         digest between two parks does not hide a live watcher; ``stream`` is
-        then the parked poll's."""
+        then the parked poll's.
+
+        Presence is ALL the server records about a read. It keeps no per-handle
+        cursor: every read here is tokenless, so any server-side "where this
+        handle is caught up to" could be moved by a filtered page, a peek, or
+        anyone reading as that handle, and a recovery that trusted it would
+        skip mail. The cursor lives with the client; recovery replays by time
+        (`--after <stamp>`)."""
         with self._lock:
             now = self._clock()
             self._last_poll[owner] = (now, stream)
             if parked:
                 self._last_parked[owner] = (now, stream)
-            self._note_cursor_locked(owner, after)
-
-    def note_cursor(self, owner: str, cursor: str | None) -> None:
-        """Record a cursor the server just handed ``owner`` on the unified
-        stream (a page's top-level ``cursor``). Keeps the newest seen."""
-        with self._lock:
-            self._note_cursor_locked(owner, cursor)
-
-    def _note_cursor_locked(self, owner: str, cursor: str | None) -> None:
-        # Cursors are lexically ordered filename stamps: newest = largest.
-        if cursor and cursor > self._last_cursor.get(owner, ""):
-            self._last_cursor[owner] = cursor
 
     def _presence_locked(self, owner: str, now: float) -> Presence:
         stamp, stream = self._last_poll[owner]
@@ -334,12 +323,7 @@ class Notifier:
         parked = parked_at is not None and now - parked_at < self._parked_window_s
         if parked:
             stream = parked_stream
-        return Presence(
-            max(0.0, now - stamp),
-            "parked" if parked else "poll",
-            stream,
-            self._last_cursor.get(owner),
-        )
+        return Presence(max(0.0, now - stamp), "parked" if parked else "poll", stream)
 
     def last_poll(self, owner: str) -> Presence | None:
         """``owner``'s most recent read, or ``None`` if this process has never

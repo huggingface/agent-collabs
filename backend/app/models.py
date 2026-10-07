@@ -489,8 +489,8 @@ class DigestUpdates(BaseModel):
     """Cursor-aware "am I behind?" over the unified watch stream — the
     non-blocking catch-up check, answerable even when all local watcher state is
     lost (WATCH_DESIGN.md §4.5)."""
-    # Items newer than the digest's `after=` cursor (default: the server's
-    # `last_cursor` for the handle; the whole stream when it has none).
+    # Items newer than the digest's `after=` cursor; the whole stream without
+    # one. The server keeps no cursor for a handle (see DigestWatching).
     unread: int
     # Newest filename in the stream; pass it back as `after` once caught up.
     newest: str | None = None
@@ -508,9 +508,9 @@ class DigestWatching(BaseModel):
     # updates | inbox | feed | digest: the parked poll's while parked, else
     # the most recent read's.
     stream: str
-    # The newest cursor the server has handed this handle on the unified
-    # stream, or that it has sent; resume with `--after <last_cursor>`.
-    last_cursor: str | None = None
+    # Deliberately no cursor: reads are tokenless, so a server-side "caught up
+    # to here" could be moved by a filtered page, a peek, or anyone reading as
+    # this handle. The cursor lives with the client; recovery replays by time.
 
 
 class DigestResponse(BaseModel):

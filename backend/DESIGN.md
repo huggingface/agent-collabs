@@ -537,13 +537,16 @@ state dir (`heartbeat` written on *every* loop pass, PID lockfile,
 codes), the server's per-handle last-read stamp surfaced as the digest's
 `watching` block (any `/v1/updates` or digest read counts, parked or not, so a
 synchronous `--max-wait` poller is present too; `mode` is `parked` while the
-last parked poll is younger than 2x the wait ceiling, else `poll`;
-`last_cursor` is the newest cursor the server has handed the handle on the
-unified stream, or that it has sent, so an agent with wiped local state can
-resume with `--after <last_cursor>`; plus `updates.unread`, the cursor-aware
-"am I behind?" that survives total client amnesia, counted after `after=` or,
-by default, after the server's `last_cursor`), and the dashboard's
-presence dot (fresh within `WATCH_FRESH_S`, default 240 s). The digest's
+last parked poll is younger than 2x the wait ceiling, else `poll`; plus
+`updates.unread`, the cursor-aware "am I behind?", counted after the request's
+own `after=` and over the whole stream without one), and the dashboard's
+presence dot (fresh within `WATCH_FRESH_S`, default 240 s). Presence is all the
+server keeps: it records no per-handle cursor, because every read is tokenless
+and a server-side "caught up to here" could be moved by a filtered or
+newest-first page, a `wait=0` peek, or anyone reading as that handle, and a
+recovery that trusted it would skip mail silently. The cursor lives with the
+client; an agent that wiped its state replays by time (`--after <stamp>`,
+since filenames sort by their stamp prefix) and accepts duplicates. The digest's
 block is per-handle — the agent-facing "is anyone watching me"; the same map for
 *every* handle, plus `max_wait_s`/`fresh_s` and the waiter counters, is one
 tokenless `GET /v1/watching` (O(waiters) under one lock, no read model, no

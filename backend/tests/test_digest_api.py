@@ -144,16 +144,41 @@ def test_digest_updates_is_cursor_aware_via_after(env):
     assert env.client.get(f"/v1/digest?as=watcher&after={newest}").json()["updates"]["unread"] == 0
 
 
-def test_digest_without_after_counts_from_the_server_last_cursor(env):
-    """An agent that lost its state reads the digest without after=: mail the
-    watcher already delivered must not read as unread."""
-    seed_agent(env.hub, "watcher")
-    seed_agent(env.hub, "poster")
-    env.client.post("/v1/messages", json={"agent_id": "poster", "body": "one @watcher"})
-    assert env.client.get("/v1/digest?as=watcher").json()["updates"]["unread"] == 1
-    assert len(env.client.get("/v1/updates?as=watcher").json()["items"]) == 1
+def test_a_partial_or_filtered_read_does_not_acknowledge_other_mail(env):
+    """The server keeps no cursor for a handle, so no read moves `unread`: a
+    newest-first page of one, a wait=0 status-style read, a peek — none of them
+    is a delivery, and the two messages such a page never returned must still
+    count. (A server-side checkpoint moved by `page.cursor` skipped them.)"""
+    seed_agent(env.hub, "reader")
+    seed_agent(env.hub, "writer")
+    for i in range(3):
+        r = env.client.post("/v1/messages", json={"agent_id": "writer", "body": f"@reader message {i}"})
+        assert r.status_code == 201, r.text
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
 
-    assert env.client.get("/v1/digest?as=watcher").json()["updates"]["unread"] == 0
+    page = env.client.get("/v1/updates?as=reader&limit=1&expand=true").json()
+    assert len(page["items"]) == 1  # newest first: the two older ones were never returned
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+    page = env.client.get("/v1/updates?as=reader&order=asc&wait=0&limit=1").json()
+    assert page["items"]
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+    env.client.get("/v1/updates?as=reader&order=asc&expand=true&wait=0.05")  # a full parked page
+    assert env.client.get("/v1/digest?as=reader").json()["updates"]["unread"] == 3
+
+
+def test_a_public_after_bound_does_not_move_another_readers_count(env):
+    """Reads are tokenless. `after=` is this request's query bound and nothing
+    more: a third party reading `digest?as=victim&after=<far future>` must not
+    pin anything the victim's next digest or recovery would trust."""
+    seed_agent(env.hub, "victim")
+    seed_agent(env.hub, "writer")
+    env.client.post("/v1/messages", json={"agent_id": "writer", "body": "@victim hello"})
+    pinned = env.client.get("/v1/digest?as=victim&after=99991231-235959-999_attacker.md").json()
+    assert pinned["updates"]["unread"] == 0  # this request's own bound, honestly answered
+    assert env.client.get("/v1/digest?as=victim").json()["updates"]["unread"] == 1
+    assert "last_cursor" not in (env.client.get("/v1/digest?as=victim").json()["watching"] or {})
 
 
 def test_digest_updates_is_zero_for_a_quiet_handle(env):
@@ -191,33 +216,6 @@ def test_digest_watching_records_parked_and_plain_reads(env):
     block = env.client.get("/v1/digest?as=watcher").json()["watching"]
     assert (block["mode"], block["stream"]) == ("parked", "updates")
     assert block["last_poll_age_s"] >= 0
-
-
-def test_digest_watching_reports_last_cursor(env):
-    """The state-loss safety net: the newest after= cursor the handle sent comes
-    back as last_cursor, and a later read without after= does not erase it."""
-    seed_agent(env.hub, "watcher")
-    cursor = "20260728-120000-000_agent-b.md"
-    env.client.get(f"/v1/updates?as=watcher&after={cursor}&wait=0.05")
-    env.client.get("/v1/updates?as=watcher")  # no cursor: keeps the last one
-
-    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
-    assert block["last_cursor"] == cursor
-
-
-def test_digest_watching_records_the_cursor_handed_out(env):
-    """A watcher that baselined with an empty cursor never SENT one; the cursor
-    the server handed it is what it must resume from."""
-    seed_agent(env.hub, "watcher")
-    seed_agent(env.hub, "poster")
-    r = env.client.post("/v1/messages", json={"agent_id": "poster", "body": "ping @watcher"})
-    assert r.status_code == 201, r.text
-
-    page = env.client.get("/v1/updates?as=watcher").json()  # wait=0, no after=
-    assert len(page["items"]) == 1 and page["cursor"]
-
-    block = env.client.get("/v1/digest?as=watcher").json()["watching"]
-    assert block["last_cursor"] == page["cursor"]
 
 
 def test_a_digest_read_does_not_hide_a_parked_watcher(env):

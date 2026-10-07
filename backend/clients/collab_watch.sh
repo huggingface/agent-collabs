@@ -26,12 +26,21 @@
 #                  run returns within N seconds plus network latency (and the
 #                  2s idle floor) — size N to fit your shell tool's timeout.
 #                  A server still unreachable when N is up exits 4, not 3.
-#                  If another watcher is already parked for this handle, a
-#                  bounded run exits 3 at once (not 5): that watcher will
-#                  deliver, so the check has nothing to do.
-#   --after C      start from cursor C (a filename, e.g. the digest's
-#                  watching.last_cursor) instead of the saved one; C is written
-#                  to the cursor file first. Wait and --exec modes only.
+#                  If a watcher is already parked for this handle AND covers
+#                  this stream (same stream, or `updates` covering `inbox`)
+#                  with a fresh heartbeat, a bounded run exits 3 at once (not
+#                  5): that watcher will deliver, so the check has nothing to
+#                  do. A live watcher on a stream that does not cover this one,
+#                  or with a stale heartbeat, is still exit 5 — stderr says
+#                  which, and what to do.
+#   --after C      start from cursor C instead of the saved one; C is written
+#                  to the cursor file first. C is a message filename, or a bare
+#                  stamp (20260728-120000 or 20260728-120000-000): filenames
+#                  sort by stamp, so a bare stamp replays everything from that
+#                  moment on. This is the recovery path after a wiped state
+#                  dir: pick the time you last know you were caught up and
+#                  replay (duplicates are harmless; silent skips are not).
+#                  Wait and --exec modes only.
 #   --exec CMD     foreground loop: per delivery run CMD (via `sh -c`) with the
 #                  page on its stdin; the cursor advances ONLY when CMD exits 0.
 #                  CMD also sees COLLAB_WATCH_HANDLE / COLLAB_WATCH_STREAM /
@@ -179,6 +188,7 @@ IDLE_FLOOR_S=2     # minimum seconds between two empty answers
 # Server-issued filename shape: <YYYYMMDD>-<HHMMSS>-<mmm>_<agent-id>.md, where
 # the agent part is AGENT_ID_RE's character class ([a-z0-9-], never a dot).
 FILENAME_RE='[0-9]{8}-[0-9]{6}-[0-9]{3}_[a-z0-9][a-z0-9-]*\.md'
+STAMP_RE='[0-9]{8}-[0-9]{6}(-[0-9]{3})?'
 
 WAIT="${COLLAB_WATCH_WAIT:-55}"
 EXEC_RETRIES="${COLLAB_WATCH_EXEC_RETRIES:-3}"
@@ -269,10 +279,10 @@ while [ "$#" -gt 0 ]; do
             ;;
         --after)
             shift
-            [ "$#" -gt 0 ] || usage "--after needs a cursor (a message filename)"
+            [ "$#" -gt 0 ] || usage "--after needs a cursor (a message filename or a stamp)"
             AFTER="$1"
-            printf '%s\n' "$AFTER" | grep -qxE "$FILENAME_RE" ||
-                usage "--after must be a message filename like 20260728-120000-000_agent-b.md, got '$AFTER'"
+            printf '%s\n' "$AFTER" | grep -qxE "$FILENAME_RE|$STAMP_RE" ||
+                usage "--after must be a message filename like 20260728-120000-000_agent-b.md or a stamp like 20260728-120000, got '$AFTER'"
             ;;
         -h | --help)
             # Self-documenting: the header comment IS the manual. Falls back to
@@ -445,6 +455,39 @@ lock_alive() {
 # which is the eq2 failure this prevents (double delivery plus last-write-wins
 # cursor rollback). Needing only one watcher is what the unified `updates`
 # stream is for.
+# parked_watcher_covers: does the live lock owner's heartbeat say it is
+# looping on a stream that includes $STREAM? `updates` is inbox + notify:all
+# channels, so it covers `inbox`; nothing else covers anything else (`feed`
+# has no board mail, `inbox` has no channel traffic). Fresh = within 3x the
+# wait window (floored at 10 s), the same threshold --status uses. Sets
+# HB_STREAM, and PW_WHY with the reason when it answers no.
+HB_STREAM=""
+PW_WHY=""
+parked_watcher_covers() {
+    HB_STREAM=""
+    PW_WHY="it left no heartbeat (not a watcher, or an older one); kill $lk_pid and relaunch"
+    [ -f "$HEARTBEAT" ] || return 1
+    pw_epoch=""
+    pw_state=""
+    _pw_pid=""
+    pw_stream=""
+    read -r pw_epoch pw_state _pw_pid pw_stream <"$HEARTBEAT" || :
+    HB_STREAM="${pw_stream:--}"
+    case "$pw_stream" in
+        "$STREAM") ;;
+        updates) [ "$STREAM" = inbox ] || { PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'"; return 1; } ;;
+        "") PW_WHY="its heartbeat names no stream (an older watcher); kill $lk_pid and relaunch"; return 1 ;;
+        *) PW_WHY="it is on stream '$pw_stream', which does not cover '$STREAM'"; return 1 ;;
+    esac
+    pw_stale_after=$((WAIT * 3))
+    [ "$pw_stale_after" -ge 10 ] || pw_stale_after=10
+    if ! is_num "${pw_epoch:-}" || [ $(($(now) - pw_epoch)) -gt "$pw_stale_after" ]; then
+        PW_WHY="its heartbeat is $(( $(now) - ${pw_epoch:-0} ))s old (last: ${pw_state:-?}), so it looks stuck; kill $lk_pid and relaunch"
+        return 1
+    fi
+    return 0
+}
+
 lock_acquire() {
     if mkdir "$LOCKDIR" 2>/dev/null; then
         LOCK_HELD=1
@@ -464,11 +507,17 @@ lock_acquire() {
     fi
     if lock_alive "$lk_pid"; then
         if [ -n "$MAX_WAIT" ]; then
-            # A bounded run is the safety net under a parked watcher: that
-            # watcher will exit with the mail the moment it arrives, so there
-            # is nothing for this run to do. Not an error.
-            log "a watcher is already parked for this handle (pid $lk_pid); it delivers your mail the moment it arrives, so this check has nothing to do; exiting 3"
-            exit 3
+            # A bounded run is the safety net under a parked watcher: if that
+            # watcher covers this stream and is looping, it will exit with the
+            # mail the moment it arrives, so there is nothing for this run to
+            # do. Not an error. A live pid alone proves nothing: it may be on
+            # a stream that does not include this one, or stuck.
+            if parked_watcher_covers; then
+                log "a watcher is already parked for this handle (pid $lk_pid, stream $HB_STREAM); it delivers your mail the moment it arrives, so this check has nothing to do; exiting 3"
+                exit 3
+            fi
+            log "a watcher holds this handle's lock (pid $lk_pid) but $PW_WHY; it will not deliver this stream's mail, and the lock is per-handle; exiting 5"
+            exit 5
         fi
         log "another watcher already holds this handle (pid $lk_pid, lock $LOCKDIR); the lock is per-handle, one watcher covers every stream; exiting 5"
         exit 5

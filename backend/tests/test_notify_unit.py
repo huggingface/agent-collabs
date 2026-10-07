@@ -115,11 +115,3 @@ def test_mode_is_parked_within_the_window_then_poll():
     now[0] = 111.0
     assert n.last_poll("a")[1:3] == ("poll", "digest")
 
-
-def test_last_cursor_keeps_the_newest_of_sent_and_handed_out():
-    n = _notifier()
-    n.note_poll("a", "updates", parked=False, after="20260101-000000-000_x.md")
-    n.note_cursor("a", "20260102-000000-000_y.md")
-    n.note_poll("a", "updates", parked=False, after="20260101-000000-000_x.md")
-    n.note_cursor("a", None)
-    assert n.last_poll("a").last_cursor == "20260102-000000-000_y.md"
