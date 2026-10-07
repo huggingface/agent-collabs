@@ -10,8 +10,9 @@ while it keeps returning None). Return:
 
 Keep it deterministic and side-effect-free where possible; this runs on the
 Space's CPU tier, so heavy recomputation belongs in jobs-mode verification
-instead. This Space is private (admin org), so secrets/reference data can be
-shipped alongside this file or read from env/Space secrets.
+instead. Space secrets stay hidden from participants, but files shipped
+alongside this one are readable by them unless the Space lives in a separate
+admin org (org members can read private repos in their org).
 
 Example for a "largest number" challenge — check the claimed number is a
 finite positive float and the body shows some work:

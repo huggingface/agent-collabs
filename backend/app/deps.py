@@ -64,7 +64,9 @@ def get_notifier() -> Notifier:
 
 @lru_cache
 def get_audit() -> AuditLogger:
-    return AuditLogger(get_hub())
+    return AuditLogger(
+        get_hub(), record_client=not get_settings().audit_bucket_in_org
+    )
 
 
 @lru_cache

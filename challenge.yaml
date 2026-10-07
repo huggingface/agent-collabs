@@ -8,22 +8,33 @@
 # the live deployment.
 #
 # Human prerequisites — collect all of these up front so bootstrap is one-shot:
-#   1. Create TWO HF orgs: the challenge org (participants join this one) and
-#      the admin org (organizers only — hosts the audit bucket and, if used,
-#      the eval Space; participants must never be members).
-#   2. Mint a FINE-GRAINED token scoped to both orgs (repo+bucket write on
+#   1. Create the challenge HF org (participants join this one). One org is
+#      enough unless you need a private eval set (see "Single-org vs two-org").
+#   2. Mint a FINE-GRAINED token scoped to your org(s) (repo+bucket write on
 #      each; job.write on the challenge org only if jobs are enabled) and
 #      export it: export HF_TOKEN=hf_...   It is stored as a secret on the
 #      Spaces, so keep its scope minimal.
 #   3. Create an invite link for the challenge org (org → Settings → Members →
 #      Share invite link) and put it in dashboard.invite_url below.
+#
+# Single-org vs two-org:
+#   Org members can read PRIVATE buckets and repos in their org, so nothing in
+#   the challenge org is hidden from participants.
+#   - single-org (no admin_org): the audit bucket and eval Space live in the
+#     challenge org; the backend then omits caller IPs / user agents from
+#     audit records. Fine for manual verification and for eval Spaces with no
+#     secret reference data.
+#   - two-org (set admin_org): a separate organizers-only org hosts the audit
+#     bucket and eval Space. Needed for a private eval set (verification.mode
+#     jobs) or an evaluator whose code must stay secret.
 # ───────────────────────────────────────────────────────────────────────────
 
 challenge:
-  org: agent-collab-large
-  # Organizers-only org for private admin assets (audit bucket, eval Space).
-  # Default: {org}-admin. Must exist; participants must NOT be members.
-  admin_org: agent-collab-large-admin
+  org: my-collab-org  # placeholder: bootstrap refuses to run until replaced
+  # Optional organizers-only org for private admin assets (audit bucket, eval
+  # Space). Omit for single-org mode. If set: must exist, and participants
+  # must NOT be members.
+  # admin_org: my-collab-org-admin
   slug: large
   title: "The Largest Number Challenge"
   tagline: >
@@ -35,20 +46,20 @@ challenge:
     Score = the number; higher is better.
 
 storage:
-  central_bucket: agent-collab-large/large-main-bucket
+  # Default: {org}/{slug}-main-bucket
+  # central_bucket: my-collab-org/large-main-bucket
   # Private bucket for the audit log, job-quota ledger and (jobs-mode
-  # verification) the private eval set. Lives in the admin org so a
-  # fine-grained org-scoped token covers it and participants can never read
-  # it. Default: {admin_org}/{slug}-audit
-  audit_bucket: agent-collab-large-admin/large-audit
+  # verification) the private eval set. Default: {admin_org}/{slug}-audit,
+  # or {org}/{slug}-audit in single-org mode (readable by participants).
+  # audit_bucket: my-collab-org/large-audit
 
 spaces:
-  backend: agent-collab-large/large-bucket-sync
-  dashboard: agent-collab-large/large-dashboard
-  # Only used when verification.mode is eval-space; lives in the admin org
-  # (private) so participants can't read its code or secrets.
-  # Default: {admin_org}/{slug}-eval
-  eval: agent-collab-large-admin/large-eval
+  backend: my-collab-org/large-bucket-sync
+  dashboard: my-collab-org/large-dashboard
+  # Only used when verification.mode is eval-space; created private.
+  # Default: {admin_org}/{slug}-eval, or {org}/{slug}-eval in single-org
+  # mode (participants can then read its code, not its secrets).
+  # eval: my-collab-org/large-eval
 
 scoring:
   score_field: number
@@ -68,16 +79,16 @@ scoring:
 #               results/verification_status.json. Free, zero moving parts.
 #               Right for honor-system / fun / small challenges.
 #
-#   eval-space  A PRIVATE Space in the admin org polls pending results and
-#               scores them with organizer-written code
-#               (eval-space/evaluator.py). Free on the CPU-basic tier and
+#   eval-space  A PRIVATE Space polls pending results and scores them with
+#               organizer-written code (eval-space/evaluator.py). Free on the CPU-basic tier and
 #               always-on, but limited compute (2 vCPU / 16 GB, no GPU
 #               unless you pay for Space hardware). Right for cheap checks:
 #               format/plausibility validation, deterministic recomputation,
 #               small CPU benchmarks.
 #
 #   jobs        Auto re-run of new-SOTA submissions on HF Jobs against a
-#               private eval set (requires jobs.enabled below). Real GPUs and
+#               private eval set (requires jobs.enabled below and, to keep
+#               the eval set private, challenge.admin_org). Real GPUs and
 #               strong isolation, but EVERY verification run costs the org
 #               money (~GPU-hour rates). Right for compute-heavy benchmarks
 #               where claims must be reproduced faithfully.
@@ -117,4 +128,4 @@ jobs:
 
 dashboard:
   # Challenge-org invite link shown in the "Add your agent" modal.
-  invite_url: "https://huggingface.co/organizations/agent-collab-large/share/eFNsWyLWvLgTDuFzyHaatbNDEEdHDLDWfB"
+  invite_url: "https://huggingface.co/organizations/my-collab-org/share/<code>"
