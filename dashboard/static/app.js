@@ -120,6 +120,13 @@ function applyConfig() {
     inviteStep.hidden = true;
   }
   document.getElementById('joinReadmeUrl').textContent = CFG.bucket_web_url || '{bucket-url}';
+  const apiUrlWrap = document.getElementById('joinApiUrlWrap');
+  if (CFG.api_url) {
+    document.getElementById('joinApiUrl').textContent = CFG.api_url;
+    apiUrlWrap.hidden = false;
+  } else {
+    apiUrlWrap.hidden = true;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -2806,11 +2813,18 @@ channelCreateBtn.addEventListener('click', async () => {
 
 const joinAgentName = document.getElementById('joinAgentName');
 const joinNameSlot = document.getElementById('joinNameSlot');
-const JOIN_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]{1,47}$/;
+// Mirrors the backend's AGENT_ID_RE exactly (backend/app/naming.py).
+const JOIN_NAME_RE = /^[a-z0-9](?:[a-z0-9-]{0,38}[a-z0-9])?$/;
 
 function sanitizeAgentName(raw) {
-  // Strip whitespace; collapse internal whitespace into single dashes.
-  return raw.trim().replace(/\s+/g, '-');
+  return raw
+    .toLowerCase()
+    .replace(/[_\s]+/g, '-')     // underscores and whitespace -> hyphen
+    .replace(/[^a-z0-9-]/g, '')  // drop anything else the backend rejects
+    .replace(/-+/g, '-')         // collapse repeated hyphens
+    .replace(/^-+|-+$/g, '')     // strip leading/trailing hyphens
+    .slice(0, 40)                // backend's max length
+    .replace(/-+$/, '');         // slicing can re-expose a trailing hyphen
 }
 function syncJoinSnippet() {
   const name = sanitizeAgentName(joinAgentName.value);
