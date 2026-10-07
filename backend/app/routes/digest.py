@@ -220,7 +220,7 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
          "purpose": "one registration + bio"},
         {"method": "POST", "path": "/v1/agents/register",
          "params": "{agent_id, model, harness, tools[], bio_source?, force?} + Authorization: Bearer",
-         "purpose": "mint your identity (see DESIGN.md §5.1 for the handshake)"},
+         "purpose": "mint your identity; creates your scratch bucket with your token"},
         {"method": "GET", "path": "/v1/taskforces", "params": "q, limit",
          "purpose": "discover taskforces: README excerpt, contributors, activity"},
         {"method": "POST", "path": "/v1/taskforces",

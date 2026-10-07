@@ -5,7 +5,7 @@ import hashlib
 
 from app.config import Settings
 from app.frontmatter import serialise
-from app.hub import HubIdentity, ListedFile, OrgMemberRole
+from app.hub import HubIdentity, HubUnreachable, ListedFile, OrgMemberRole
 from app.naming import SourceURI, parse_source_uri
 
 
@@ -30,6 +30,18 @@ class FakeHub:
         self.whoami_email: str | None = "test-user@example.com"
         self.whoami_orgs: set[str] = {settings.org}
         self.whoami_fails = False
+        self.whoami_unreachable = False
+        # Writes made with a caller's token: a bucket's creator is its owner
+        # and only the owner may write (the org ACL). A bucket seeded by a
+        # test without an owner is writable by the caller.
+        self.bucket_owners: dict[str, str] = {}
+        # An org admin's token can write every bucket in the org.
+        self.caller_is_org_admin = False
+        # Paths ("<bucket>/<path>", or a bare central path) whose optional
+        # reads fail with a Hub error instead of answering.
+        self.failing_reads: set[str] = set()
+        self.caller_writes: list[tuple[str, str, str]] = []  # (bucket, path, token)
+        self.created_buckets: list[tuple[str, str]] = []  # (bucket, token)
         # Scripted challenge-org member roles for the organizer-broadcast gate.
         self.org_roles: dict[str, str] = {}
         self.org_roles_by_email: dict[str, tuple[str, str]] = {}
@@ -81,12 +93,25 @@ class FakeHub:
 
     def read_central_text(self, path: str) -> str:
         files = self._central()
-        if path not in files:
+        # Like HubClient._download_one, a failed read surfaces as missing.
+        if path not in files or path in self.failing_reads:
             raise FileNotFoundError(path)
         return files[path].decode("utf-8")
 
     def read_central_bytes_optional(self, path: str) -> bytes | None:
+        if path in self.failing_reads:
+            raise RuntimeError(f"hub read failed: {path}")
         return self._central().get(path)
+
+    def read_text_optional(self, uri) -> str | None:
+        parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
+        if parsed is None:
+            raise ValueError(f"invalid source URI: {uri}")
+        bucket = f"{parsed.org}/{parsed.bucket}"
+        if f"{bucket}/{parsed.path}" in self.failing_reads:
+            raise RuntimeError(f"hub read failed: {bucket}/{parsed.path}")
+        data = self.buckets.get(bucket, {}).get(parsed.path)
+        return None if data is None else data.decode("utf-8")
 
     def write_text_central(self, path: str, text: str) -> None:
         self._central()[path] = text.encode("utf-8")
@@ -107,8 +132,10 @@ class FakeHub:
         parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
         if parsed is None:
             raise ValueError(f"invalid source URI: {uri}")
-        files = self.buckets.get(f"{parsed.org}/{parsed.bucket}", {})
-        if parsed.path not in files:
+        bucket = f"{parsed.org}/{parsed.bucket}"
+        files = self.buckets.get(bucket, {})
+        # Like HubClient._download_one, a failed read surfaces as missing.
+        if parsed.path not in files or f"{bucket}/{parsed.path}" in self.failing_reads:
             raise FileNotFoundError(str(uri))
         return files[parsed.path]
 
@@ -161,10 +188,24 @@ class FakeHub:
     def bucket_exists(self, bucket: str) -> bool:
         return bucket in self.buckets
 
+    def create_bucket_as(self, bucket: str, token: str) -> None:
+        self.created_buckets.append((bucket, token))
+        self.buckets.setdefault(bucket, {})
+        self.bucket_owners.setdefault(bucket, self.whoami_user)
+
+    def write_text_as(self, bucket: str, path: str, text: str, token: str) -> None:
+        owner = self.bucket_owners.get(bucket, self.whoami_user)
+        if owner != self.whoami_user and not self.caller_is_org_admin:
+            raise PermissionError(f"403: {bucket} is not yours")
+        self.caller_writes.append((bucket, path, token))
+        self.write_text_to_bucket(bucket, path, text)
+
     def whoami_for_token(self, token: str) -> str:
         return self.whoami_user
 
     def whoami_identity(self, token: str) -> HubIdentity:
+        if self.whoami_unreachable:
+            raise HubUnreachable("503 from whoami")
         if self.whoami_fails:
             raise ValueError("whoami did not return a `name` field")
         return HubIdentity(

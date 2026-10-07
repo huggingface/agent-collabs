@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Header, Request
 
 from app.audit import AuditLogger
@@ -14,15 +16,18 @@ from app.deps import (
 )
 from app.errors import (
     AgentIdTaken,
-    BucketMissing,
+    BucketCreateForbidden,
     BucketNotOwnedByCaller,
+    BucketNotYours,
+    HubUnavailable,
     IdentityMismatch,
+    NotOrgMember,
     NotRegistered,
     RateLimited,
     Unauthorized,
 )
 from app.frontmatter import parse, serialise
-from app.hub import HubClient
+from app.hub import HubClient, HubUnreachable
 from app.listing import apply_filters, effective_limit, paginate
 from app.models import (
     AgentInfo,
@@ -46,6 +51,14 @@ from app.validation import (
 )
 
 
+log = logging.getLogger(__name__)
+
+def _log_read_failure(op: str, agent_id: str, e: Exception) -> None:
+    """Structured fields only: exception text can carry signed URLs or Xet
+    credentials, so it never reaches the log."""
+    status = getattr(getattr(e, "response", None), "status_code", None)
+    log.warning("register %s: %s failed (type=%s status=%s)", agent_id, op, type(e).__name__, status)
+
 router = APIRouter()
 
 
@@ -67,62 +80,44 @@ def register(
     agent_id = req.agent_id
     validate_registerable_agent_id(agent_id)
 
-    allowed, retry = limiter.try_consume(agent_id)
-    if not allowed:
-        raise RateLimited(retry)
-
-    bucket = expected_agent_bucket(settings, agent_id)
-    if not hub.bucket_exists(bucket):
-        raise BucketMissing(bucket)
-
     # Resolve caller identity from the caller's own token. Do not fall back to
     # the app/admin token here: registration binds a public agent identity.
     caller_token = extract_bearer(authorization)
     if not caller_token:
         raise Unauthorized(
             "missing Authorization: Bearer <hf_token>",
-            hint="pass your HF token so we can verify the agent owner",
+            hint="pass your HF token: -H \"authorization: Bearer $(hf auth token 2>/dev/null)\"",
         )
     try:
-        caller_hf_user = hub.whoami_for_token(caller_token)
+        identity = hub.whoami_identity(caller_token)
+    except HubUnreachable:
+        raise HubUnavailable()
     except Exception:
-        raise Unauthorized("could not resolve caller identity via whoami; check your token")
-
-    # Handshake: the caller must have written `.bucket-sync-handshake` into
-    # the scratch bucket with content equal to their hf_user. Since only the
-    # bucket's creator (and admins) can write to that bucket, presence of a
-    # file whose content matches the calling whoami proves the caller controls
-    # both the bucket and the identity being recorded. A different contributor
-    # replaying the registration would fail this check because they could not
-    # have written their own hf_user into someone else's bucket.
-    handshake_uri = SourceURI(
-        org=settings.org,
-        bucket=f"{settings.collab_slug}-{agent_id}",
-        path=HANDSHAKE_FILE,
-    )
-    try:
-        handshake_content = hub.read_text(handshake_uri).strip()
-    except FileNotFoundError:
-        raise BucketNotOwnedByCaller(
-            "handshake file missing in scratch bucket",
-            hint=(
-                f"echo '{caller_hf_user}' > /tmp/h && "
-                f"hf buckets cp /tmp/h hf://buckets/{bucket}/{HANDSHAKE_FILE}"
-            ),
+        raise Unauthorized(
+            "could not resolve caller identity via whoami; check your token",
+            hint="run `hf auth login --force`, then pass $(hf auth token 2>/dev/null)",
         )
-    if handshake_content != caller_hf_user:
-        raise BucketNotOwnedByCaller(
-            f"handshake content '{handshake_content}' does not match caller hf_user '{caller_hf_user}'",
-        )
+    creator = identity.username
 
-    creator = caller_hf_user
+    # Keyed on the verified user, after auth: a bad token costs nothing, and
+    # nobody can exhaust someone else's allowance by naming their agent_id.
+    allowed, retry = limiter.try_consume(creator)
+    if not allowed:
+        raise RateLimited(retry)
 
+    if settings.org not in identity.orgs:
+        raise NotOrgMember(creator, settings.org, settings.invite_url)
+
+    # Checked before any write, so a doomed request touches nothing. Only a
+    # genuinely missing file means "unregistered": a failed read must not look
+    # like one, or the provisioning below could take over a live identity.
     target = registration_path(agent_id)
-    existing_text: str | None = None
     try:
-        existing_text = hub.read_central_text(target)
-    except Exception:
-        existing_text = None
+        existing_bytes = hub.read_central_bytes_optional(target)
+    except Exception as e:
+        _log_read_failure("registration lookup", agent_id, e)
+        raise HubUnavailable()
+    existing_text = existing_bytes.decode("utf-8") if existing_bytes is not None else None
 
     if existing_text is not None:
         existing_fm, _ = parse(existing_text)
@@ -133,6 +128,44 @@ def register(
             )
         if not req.force:
             raise AgentIdTaken(agent_id)
+
+    # Provision the scratch bucket and the `.bucket-sync-handshake` inside it,
+    # both with the CALLER's token (never the admin token). The proof of
+    # ownership is the write itself: only a bucket's creator (and org admins)
+    # can write there. Handshake text alone proves nothing (anyone can create
+    # a bucket and write a victim's username into it), so the write happens
+    # even when the handshake already names the caller.
+    bucket = expected_agent_bucket(settings, agent_id)
+    handshake_uri = SourceURI(
+        org=settings.org,
+        bucket=f"{settings.collab_slug}-{agent_id}",
+        path=HANDSHAKE_FILE,
+    )
+    try:
+        if not hub.bucket_exists(bucket):
+            try:
+                hub.create_bucket_as(bucket, caller_token)
+            except PermissionError:
+                raise BucketCreateForbidden(bucket)
+        else:
+            # A handshake naming someone else is their claim on the bucket;
+            # never overwrite it, even for a caller (an org admin) who could.
+            # As above, a failed read must not pass for a missing file.
+            try:
+                handshake = hub.read_text_optional(handshake_uri)
+            except Exception as e:
+                _log_read_failure("handshake read", agent_id, e)
+                raise HubUnavailable()
+            if handshake is not None and handshake.strip() != creator:
+                raise BucketNotYours(
+                    f"'{bucket}' is claimed by '{handshake.strip()}' (its handshake), not '{creator}'"
+                )
+        try:
+            hub.write_text_as(bucket, HANDSHAKE_FILE, creator, caller_token)
+        except PermissionError:
+            raise BucketNotYours(f"cannot write to '{bucket}' as '{creator}'")
+    except HubUnreachable:
+        raise HubUnavailable()
 
     bio_body = ""
     if req.bio_source is not None:
