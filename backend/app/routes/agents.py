@@ -45,6 +45,7 @@ from app.naming import (
 from app.rate_limit import TokenBucket
 from app.read_model import ReadModel, Record
 from app.validation import (
+    read_source_text,
     resolve_source,
     validate_agent_id,
     validate_registerable_agent_id,
@@ -174,7 +175,7 @@ def register(
             raise BucketNotOwnedByCaller(
                 "bio_source must live in your own scratch bucket",
             )
-        bio_text = hub.read_text(parsed_bio_uri)
+        bio_text = read_source_text(hub, settings, parsed_bio_uri)
         _, bio_body = parse(bio_text)
 
     now = utc_now()

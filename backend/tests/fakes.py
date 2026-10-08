@@ -196,7 +196,7 @@ class FakeHub:
             raise RuntimeError(f"hub read failed: {path}")
         return self._central().get(path)
 
-    def read_text_optional(self, uri) -> str | None:
+    def read_bytes_optional(self, uri) -> bytes | None:
         parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
         if parsed is None:
             raise ValueError(f"invalid source URI: {uri}")
@@ -204,7 +204,10 @@ class FakeHub:
         bucket = f"{parsed.org}/{parsed.bucket}"
         if f"{bucket}/{parsed.path}" in self.failing_reads:
             raise RuntimeError(f"hub read failed: {bucket}/{parsed.path}")
-        data = self.buckets.get(bucket, {}).get(parsed.path)
+        return self.buckets.get(bucket, {}).get(parsed.path)
+
+    def read_text_optional(self, uri) -> str | None:
+        data = self.read_bytes_optional(uri)
         return None if data is None else data.decode("utf-8")
 
     def write_text_central(self, path: str, text: str) -> None:

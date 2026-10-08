@@ -30,6 +30,13 @@ import sys
 _XET_REFUSED_RE = re.compile(r"HTTP status client error \((401|403) (Unauthorized|Forbidden)\)")
 
 
+def xet_refusal_status(e: BaseException) -> int | None:
+    """401 or 403 when the Xet client's error text states an explicit refusal;
+    None otherwise. Only the number leaves this function, never the text."""
+    m = _XET_REFUSED_RE.search(str(e))
+    return int(m.group(1)) if m else None
+
+
 def classify(e: BaseException) -> dict:
     """Structured result for a failed caller write: "forbidden" only for an
     explicit 401/403 from the Hub; anything else is "failed" (upstream)."""
@@ -38,9 +45,9 @@ def classify(e: BaseException) -> dict:
     if status in (401, 403):
         return {"result": "forbidden", "status": status}
     if isinstance(e, ConnectionError):
-        m = _XET_REFUSED_RE.search(str(e))
-        if m:
-            return {"result": "forbidden", "status": int(m.group(1))}
+        refused = xet_refusal_status(e)
+        if refused:
+            return {"result": "forbidden", "status": refused}
     return {"result": "failed", "type": type(e).__name__, "status": status}
 
 

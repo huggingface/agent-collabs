@@ -20,7 +20,14 @@ from app.deps import (
     get_read_model,
     get_settings_dep,
 )
-from app.errors import InvalidFrontmatter, InvalidPath, NotFound, RateLimited, SyncTooLarge
+from app.errors import (
+    InvalidFrontmatter,
+    InvalidPath,
+    NotFound,
+    RateLimited,
+    SourceNotFound,
+    SyncTooLarge,
+)
 from app.frontmatter import merge, parse, serialise
 from app.hub import HubClient
 from app.models import (
@@ -46,7 +53,12 @@ from app.trace_stats import (
     list_traces,
     validate_trace_manifest,
 )
-from app.validation import resolve_source, validate_agent_id, validate_path_components
+from app.validation import (
+    read_source_bytes,
+    resolve_source,
+    validate_agent_id,
+    validate_path_components,
+)
 
 
 router = APIRouter()
@@ -109,8 +121,8 @@ def post_trace(
         raise RateLimited(retry)
 
     try:
-        manifest_text = hub.read_text(parsed.join("manifest.md"))
-    except FileNotFoundError:
+        manifest_text = read_source_bytes(hub, parsed.join("manifest.md")).decode("utf-8")
+    except SourceNotFound:
         raise InvalidPath(
             "trace bundle is missing manifest.md",
             hint="share-trace writes manifest.md into traces/<session>/",

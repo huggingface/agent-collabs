@@ -30,7 +30,7 @@ from app.naming import result_path, stamp_yaml, utc_now
 from app.rate_limit import CompoundLimiter
 from app.read_model import ReadModel
 from app.routes.messages import require_registered
-from app.validation import resolve_source, validate_agent_id
+from app.validation import read_source_text, resolve_source, validate_agent_id
 from app.verification import PENDING, VerificationStatusStore
 from app.verifier import Verifier
 
@@ -58,8 +58,8 @@ def post_result(
     if not allowed:
         raise RateLimited(retry)
 
-    body_bytes = hub.read_bytes(parsed)
-    body_text = body_bytes.decode("utf-8")
+    body_text = read_source_text(hub, settings, parsed)
+    body_bytes = body_text.encode("utf-8")
     client_fm, source_body = parse(body_text)
     validate_result_frontmatter(settings, client_fm)
 

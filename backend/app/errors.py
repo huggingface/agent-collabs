@@ -104,7 +104,12 @@ class NotRegistered(APIError):
 
 class SourceNotFound(APIError):
     def __init__(self, uri: str):
-        super().__init__(404, "SOURCE_NOT_FOUND", f"source not found: {uri}")
+        super().__init__(
+            404,
+            "SOURCE_NOT_FOUND",
+            f"source not found: {uri}",
+            f"upload the file to your bucket first: hf buckets cp <local> {uri}",
+        )
 
 
 class AgentIdTaken(APIError):
@@ -159,6 +164,18 @@ class AlreadyPromoted(APIError):
             "identical content was already promoted",
             f"existing filename: {existing_filename}",
         )
+
+
+class InvalidRequest(APIError):
+    def __init__(self, message: str):
+        super().__init__(
+            400, "INVALID_REQUEST", message, "GET /v1 lists every endpoint and its params"
+        )
+
+
+class TooLarge(APIError):
+    def __init__(self, message: str):
+        super().__init__(413, "TOO_LARGE", message)
 
 
 class SyncTooLarge(APIError):
@@ -233,3 +250,31 @@ class QuotaBackendUnavailable(APIError):
             "retry shortly",
         )
         self.headers = {"Retry-After": "30"}
+
+
+class StorageUnavailable(APIError):
+    def __init__(self, status: int | None = None) -> None:
+        # A failed storage call can still have landed, or landed in part (a
+        # copied file whose manifest write failed; a commit whose response was
+        # lost), so the message never claims nothing was written.
+        if status and 400 <= status < 500 and status != 429:
+            # The Hub refused the Space's own token: a deployment problem, not
+            # a blip. Retrying will not help; the organizer has to look.
+            message = (
+                f"the storage backend refused the Space's own credentials (HTTP {status}); "
+                "the request may have been partly applied; "
+                "this is a deployment problem — tell the organizer"
+            )
+        else:
+            message = (
+                "the storage backend failed mid-request; "
+                "the request may have been partly applied"
+            )
+        super().__init__(
+            503,
+            "STORAGE_UNAVAILABLE",
+            message,
+            "check with the matching GET (e.g. GET /v1/messages?agent=<you>) "
+            "before retrying; a blind retry can post a duplicate",
+        )
+        self.headers = {"Retry-After": "5"}

@@ -1,6 +1,8 @@
 """TokenBucket / CompoundLimiter unit tests."""
 from __future__ import annotations
 
+from app.config import Settings
+from app.deps import raw_message_limiter
 from app.rate_limit import CompoundLimiter, TokenBucket
 
 
@@ -41,3 +43,17 @@ def test_compound_keys_are_independent():
     assert limiter.try_consume("a")[0] is True
     assert limiter.try_consume("a")[0] is False
     assert limiter.try_consume("b")[0] is True
+
+
+def test_raw_message_hourly_refill_is_fractional():
+    """30/h refills one token every 2 minutes, not every minute (60/h)."""
+    settings = Settings(
+        ORG="o", COLLAB_SLUG="s", AUDIT_BUCKET="a/b",
+        RAW_MESSAGE_PER_MINUTE=1000, RAW_MESSAGE_PER_HOUR=30,
+    )
+    limiter = raw_message_limiter(settings)
+    for _ in range(30):
+        assert limiter.try_consume("k") == (True, 0)
+    allowed, retry = limiter.try_consume("k")
+    assert allowed is False
+    assert 115 <= retry <= 121

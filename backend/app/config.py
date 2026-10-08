@@ -58,13 +58,15 @@ class Settings(BaseSettings):
     sync_max_bytes: int = Field(5 * 1024**3, alias="SYNC_MAX_BYTES")
     sync_max_files: int = Field(10_000, alias="SYNC_MAX_FILES")
 
-    bucket_write_per_minute: int = Field(60, alias="BUCKET_WRITE_PER_MINUTE")
     bucket_write_burst: int = Field(20, alias="BUCKET_WRITE_BURST")
     raw_message_per_minute: int = Field(5, alias="RAW_MESSAGE_PER_MINUTE")
     raw_message_per_hour: int = Field(30, alias="RAW_MESSAGE_PER_HOUR")
     registration_per_minute: int = Field(3, alias="REGISTRATION_PER_MINUTE")
     # Org invite link, quoted back to callers whose token is not an org member.
     invite_url: str = Field("", alias="INVITE_URL")
+
+    # Byte cap on a promoted source file (messages and results alike).
+    message_max_bytes: int = Field(65536, alias="MESSAGE_MAX_BYTES")
 
     dedup_lru_size: int = Field(10_000, alias="DEDUP_LRU_SIZE")
 
