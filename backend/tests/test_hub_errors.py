@@ -156,6 +156,41 @@ def test_xet_write_failure_is_a_sanitized_503(env, real_writes, caplog, exc):
     assert MARKER not in caplog.text and MARKER not in r.text
 
 
+@pytest.mark.parametrize("status, reason", [(401, "Unauthorized"), (403, "Forbidden")])
+@pytest.mark.parametrize("wrap", ["connection", "poisoned-session"])
+def test_xet_refusal_of_the_space_token_is_the_deployment_503(env, real_writes, caplog, status, reason, wrap):
+    refusal = (
+        f"Network error: Request error: HTTP status client error ({status} {reason}), "
+        f"domain: {SIGNED_URL}"
+    )
+    real_writes(ConnectionError(refusal) if wrap == "connection" else RuntimeError(f"Previous task error: {refusal}"))
+    seed_agent(env.hub, "agent-1")
+    with caplog.at_level(logging.WARNING):
+        r = env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "hi"})
+    err = _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert f"HTTP {status}" in err["message"] and "tell the organizer" in err["message"]
+    assert f"status={status})" in caplog.text
+    assert MARKER not in caplog.text and MARKER not in r.text
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Network error: connection reset, domain: https://fake-hub.test/buckets/org/403/x?code=401",
+        "Previous task error: request to https://fake-hub.test/403 timed out",
+    ],
+    ids=["connection", "poisoned-session"],
+)
+def test_a_401_or_403_only_in_a_url_is_not_a_refusal(env, real_writes, caplog, text):
+    real_writes(ConnectionError(text) if text.startswith("Network") else RuntimeError(text))
+    seed_agent(env.hub, "agent-1")
+    with caplog.at_level(logging.WARNING):
+        r = env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "hi"})
+    err = _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert "deployment" not in err["message"]
+    assert "status=None)" in caplog.text
+
+
 def test_an_unrelated_runtime_error_is_not_a_storage_failure(env, real_writes):
     seed_agent(env.hub, "agent-1")
     real_writes(RuntimeError("a bug, not storage"))

@@ -34,6 +34,7 @@ from huggingface_hub.errors import (
 from huggingface_hub.utils import build_hf_headers, get_session
 
 from app.caller_write import classify as classify_caller_write_error
+from app.caller_write import xet_refusal_status
 from app.config import Settings
 from app.naming import SourceURI, parse_source_uri
 
@@ -73,11 +74,12 @@ def _status(e: BaseException) -> int | None:
 class StorageFailed(Exception):
     """A Space-token storage call failed below the HTTP layer, in the Xet
     client. Keeps only the exception type and HTTP status: the original text
-    can carry signed URLs or Xet credentials."""
+    can carry signed URLs or Xet credentials. Xet errors carry no response, so
+    an explicit 401/403 refusal is read from their text, as for caller writes."""
 
     def __init__(self, cause: BaseException):
         self.type_name = type(cause).__name__
-        self.status = _status(cause)
+        self.status = _status(cause) or xet_refusal_status(cause)
         super().__init__(f"storage call failed ({self.type_name}, status={self.status})")
 
 
