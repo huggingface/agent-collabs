@@ -15,7 +15,8 @@ from app.naming import SourceURI, parse_source_uri
 
 def _http_error(message: str = "simulated hub write failure") -> HfHubHTTPError:
     """An HfHubHTTPError shaped like the one HubClient lets propagate from a
-    failed batch_bucket_files call (writes aren't caught in hub.py)."""
+    failed batch_bucket_files call (writes aren't caught in hub.py), or sees
+    from a failed download."""
     request = httpx.Request("PUT", "https://fake-hub.test/batch")
     return HfHubHTTPError(message, response=httpx.Response(500, request=request))
 
@@ -84,7 +85,11 @@ class FakeHub:
 
     def fail_next_read(self, path_substring: str | None = None, exc: Exception | None = None) -> None:
         """The next read whose path contains `path_substring` (any path, if
-        omitted) raises `exc` (default: FileNotFoundError)."""
+        omitted) fails with `exc` (default: an HfHubHTTPError). Each read
+        surfaces it like its HubClient counterpart: read_central_text and
+        read_bytes flatten an HfHubHTTPError to FileNotFoundError, the optional
+        and audit reads propagate it, and download_many drops the whole batch
+        on an HfHubHTTPError. Any other `exc` is raised as is."""
         self._fail_read = (path_substring, exc)
 
     def partial_listing(self, folder: str, drop: int = 1) -> None:
@@ -107,15 +112,30 @@ class FakeHub:
             exc, self._fail_write = self._fail_write, None
             raise exc
 
-    def _maybe_fail_read(self, path: str) -> None:
+    def _take_read_failure(self, *paths: str) -> Exception | None:
+        """Consume and return the armed read failure if it matches any of `paths`."""
         self._maybe_sleep()
         if self._fail_read is None:
-            return
+            return None
         substring, exc = self._fail_read
-        if substring is not None and substring not in path:
-            return
+        if not any(substring is None or substring in p for p in paths):
+            return None
         self._fail_read = None
-        raise exc or FileNotFoundError(path)
+        return exc or _http_error("simulated hub read failure")
+
+    def _maybe_fail_read(self, path: str) -> None:
+        # Like HubClient._download_one, a Hub error surfaces as missing.
+        exc = self._take_read_failure(path)
+        if isinstance(exc, HfHubHTTPError):
+            raise FileNotFoundError(path) from exc
+        if exc is not None:
+            raise exc
+
+    def _maybe_fail_optional_read(self, path: str) -> None:
+        # Optional reads tell missing (None) from failed: the error propagates.
+        exc = self._take_read_failure(path)
+        if exc is not None:
+            raise exc
 
     def _apply_listing_toggles(self, prefix: str, files: list[ListedFile]) -> list[ListedFile]:
         self._maybe_sleep()
@@ -125,7 +145,7 @@ class FakeHub:
         if self._partial_listing is not None and self._partial_listing[0] == prefix:
             _, drop = self._partial_listing
             self._partial_listing = None
-            return files[: len(files) - drop] if drop else files
+            return files[: max(len(files) - drop, 0)]
         return files
 
     # ── HubClient surface used by the app ────────────────────────────
@@ -154,6 +174,11 @@ class FakeHub:
 
     def download_many(self, bucket: str, remote_paths: list[str]) -> dict[str, bytes]:
         self.download_calls += 1
+        exc = self._take_read_failure(*remote_paths)
+        if isinstance(exc, HfHubHTTPError):
+            return {}  # HubClient logs a failed batch and leaves its entries out
+        if exc is not None:
+            raise exc
         files = self.buckets.get(bucket, {})
         return {p: files[p] for p in remote_paths if p in files}
 
@@ -166,6 +191,7 @@ class FakeHub:
         return files[path].decode("utf-8")
 
     def read_central_bytes_optional(self, path: str) -> bytes | None:
+        self._maybe_fail_optional_read(path)
         if path in self.failing_reads:
             raise RuntimeError(f"hub read failed: {path}")
         return self._central().get(path)
@@ -174,6 +200,7 @@ class FakeHub:
         parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
         if parsed is None:
             raise ValueError(f"invalid source URI: {uri}")
+        self._maybe_fail_optional_read(str(uri))
         bucket = f"{parsed.org}/{parsed.bucket}"
         if f"{bucket}/{parsed.path}" in self.failing_reads:
             raise RuntimeError(f"hub read failed: {bucket}/{parsed.path}")
@@ -222,6 +249,7 @@ class FakeHub:
         b[path] = existing + line.encode("utf-8") + b"\n"
 
     def read_audit_bytes(self, path: str) -> bytes | None:
+        self._maybe_fail_optional_read(path)
         return self.buckets[self._settings.audit_bucket].get(path)
 
     def write_bytes_audit(self, path: str, data: bytes) -> None:
