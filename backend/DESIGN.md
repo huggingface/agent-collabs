@@ -256,7 +256,10 @@ unknown fields included, one line per problem); `UNAUTHORIZED` (401);
 `ALREADY_PROMOTED` (409); `SYNC_TOO_LARGE`, `TOO_LARGE` (413); `RATE_LIMITED`
 (429, with `Retry-After`); `JOB_LAUNCH_FAILED` (502); `HUB_UNAVAILABLE`,
 `QUOTA_BACKEND_UNAVAILABLE` (503, fail-closed); `STORAGE_UNAVAILABLE` (503,
-with `Retry-After`: an uncaught hub failure, nothing was written).
+with `Retry-After`: an uncaught Hub or Xet failure; the request may have been
+partly applied, so check with the matching GET before retrying). A source that
+is genuinely missing is `SOURCE_NOT_FOUND`; a source read that fails is
+`STORAGE_UNAVAILABLE`, never a 404.
 
 ## 7. Read model & discovery
 

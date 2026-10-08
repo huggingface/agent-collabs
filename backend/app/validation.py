@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from huggingface_hub.errors import HfHubHTTPError, RepositoryNotFoundError
+
 from app.config import Settings
 from app.errors import InvalidFrontmatter, InvalidPath, SourceNotFound, TooLarge
 from app.hub import HubClient
@@ -140,13 +142,25 @@ def resolve_source(settings: Settings, source: str) -> tuple[SourceURI, str]:
     return parsed, agent_id
 
 
+def read_source_bytes(hub: HubClient, parsed: SourceURI) -> bytes:
+    """Read a participant's bucket file. SourceNotFound only when the file (or
+    its whole bucket) is genuinely missing; any other storage failure
+    propagates, to answer 503, instead of passing for a missing file."""
+    try:
+        data = hub.read_bytes_optional(parsed)
+    except HfHubHTTPError as e:
+        if isinstance(e, RepositoryNotFoundError) or getattr(getattr(e, "response", None), "status_code", None) == 404:
+            raise SourceNotFound(str(parsed))
+        raise
+    if data is None:
+        raise SourceNotFound(str(parsed))
+    return data
+
+
 def read_source_text(hub: HubClient, settings: Settings, parsed: SourceURI) -> str:
     """Read a promoted source file as UTF-8 text, mapping every way it can be
     unusable to an agent-facing error instead of a bare 500."""
-    try:
-        data = hub.read_bytes(parsed)
-    except FileNotFoundError:
-        raise SourceNotFound(str(parsed))
+    data = read_source_bytes(hub, parsed)
     if len(data) > settings.message_max_bytes:
         raise TooLarge(
             f"source is {len(data)} bytes; the limit is {settings.message_max_bytes}"

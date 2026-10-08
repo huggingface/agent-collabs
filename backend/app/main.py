@@ -7,6 +7,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from app.errors import APIError, InvalidRequest, StorageUnavailable, TooLarge
+from app.hub import StorageFailed
 from app.routes import (
     agents,
     channels,
@@ -32,6 +33,7 @@ except ImportError:
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger(__name__)
 
 # The long-poll waiter registry (app/notify.py) lives in this process's memory,
 # so a wake can only reach waiters parked on the same worker. Stated at startup
@@ -69,12 +71,18 @@ async def _api_error_handler(_: Request, exc: APIError) -> JSONResponse:
 
 
 @app.exception_handler(HubHTTPError)
-async def _storage_error_handler(request: Request, exc: HubHTTPError) -> JSONResponse:
-    """An uncaught hub failure (HfHubHTTPError, or the connection/timeout error
-    under it) means the storage write never landed: a retryable 503, not a 500."""
-    logging.getLogger(__name__).warning("storage backend failed: %r", exc)
-    response = getattr(exc, "response", None)
-    return await _api_error_handler(request, StorageUnavailable(getattr(response, "status_code", None)))
+@app.exception_handler(StorageFailed)
+async def _storage_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """An uncaught storage failure (HfHubHTTPError, the connection/timeout
+    error under it, or a Xet failure) is a retryable 503, not a 500. Logs the
+    type and status only: exception text can carry signed URLs or Xet
+    credentials."""
+    status = getattr(exc, "status", None) or getattr(getattr(exc, "response", None), "status_code", None)
+    log.warning(
+        "storage backend failed: %s %s (type=%s status=%s)",
+        request.method, request.url.path, getattr(exc, "type_name", type(exc).__name__), status,
+    )
+    return await _api_error_handler(request, StorageUnavailable(status))
 
 
 @app.exception_handler(RequestValidationError)

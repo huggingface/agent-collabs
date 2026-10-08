@@ -18,6 +18,7 @@ from app.errors import (
     JobsDisabled,
     NotRegistered,
     RateLimited,
+    SourceNotFound,
     Unauthorized,
 )
 from app.frontmatter import parse
@@ -26,7 +27,7 @@ from app.job_quota import DurableJobQuota
 from app.jobs import JobRunner
 from app.models import BenchmarkJobRequest, BenchmarkJobResponse
 from app.naming import SourceURI, registration_path
-from app.validation import validate_agent_id, validate_path_components
+from app.validation import read_source_bytes, validate_agent_id, validate_path_components
 
 
 router = APIRouter()
@@ -81,8 +82,8 @@ def _verify_caller_owns_agent(
         path=HANDSHAKE_FILE,
     )
     try:
-        handshake_content = hub.read_text(handshake_uri).strip()
-    except FileNotFoundError:
+        handshake_content = read_source_bytes(hub, handshake_uri).decode("utf-8").strip()
+    except SourceNotFound:
         raise BucketNotOwnedByCaller(
             "handshake file missing in scratch bucket",
             hint=(

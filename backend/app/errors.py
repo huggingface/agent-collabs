@@ -254,14 +254,27 @@ class QuotaBackendUnavailable(APIError):
 
 class StorageUnavailable(APIError):
     def __init__(self, status: int | None = None) -> None:
+        # A failed storage call can still have landed, or landed in part (a
+        # copied file whose manifest write failed; a commit whose response was
+        # lost), so the message never claims nothing was written.
         if status and 400 <= status < 500 and status != 429:
             # The Hub refused the Space's own token: a deployment problem, not
             # a blip. Retrying will not help; the organizer has to look.
             message = (
-                f"the storage backend rejected the request (HTTP {status}); "
-                "nothing was written; this is a deployment problem — tell the organizer"
+                f"the storage backend refused the Space's own credentials (HTTP {status}); "
+                "the request may have been partly applied; "
+                "this is a deployment problem — tell the organizer"
             )
         else:
-            message = "the storage backend failed; nothing was written; retry in a few seconds"
-        super().__init__(503, "STORAGE_UNAVAILABLE", message)
+            message = (
+                "the storage backend failed mid-request; "
+                "the request may have been partly applied"
+            )
+        super().__init__(
+            503,
+            "STORAGE_UNAVAILABLE",
+            message,
+            "check with the matching GET (e.g. GET /v1/messages?agent=<you>) "
+            "before retrying; a blind retry can post a duplicate",
+        )
         self.headers = {"Retry-After": "5"}

@@ -335,6 +335,17 @@ def test_subscribe_unsubscribe_idempotent(env):
     assert env.client.get("/v1/channels/evals/messages").json()["matched"] == 1
 
 
+def test_subscribe_source_read_failure_is_503_not_missing(env):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "lurker")
+    create_channel(env, "evals")
+    post_to_channel(env, "bb", "evals", "first finding")
+    env.hub.fail_next_read("subscribe-marker.md")
+    r = subscribe(env, "evals", "lurker")
+    assert r.status_code == 503 and r.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
+    assert subscribe(env, "evals", "lurker").status_code == 200
+
+
 def test_subscribe_agent_raw_body_rejected(env):
     seed_agent(env.hub, "bb")
     seed_agent(env.hub, "lurker")

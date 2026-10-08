@@ -4,7 +4,7 @@ token aggregate (including null/coverage handling). All over the FakeHub."""
 from __future__ import annotations
 
 from app.frontmatter import serialise
-from fakes import seed_agent
+from fakes import _http_error, seed_agent
 
 
 CC_USAGE = {
@@ -325,3 +325,34 @@ def test_stats_empty(env):
 def test_cost_summed_when_present(env):
     env.client.post("/v1/traces", json={"source": _write_bundle(env, manifest=_manifest(cost_usd=4.0))})
     assert env.client.get("/v1/stats").json()["cost_usd"] == 4.0
+
+
+# ───────────────────────── storage failures ─────────────────────────
+
+
+def test_missing_manifest_is_invalid_path(env):
+    seed_agent(env.hub, "agent-1")
+    r = env.client.post("/v1/traces", json={"source": "hf://buckets/test-org/test-agent-1/traces/sess-1"})
+    assert r.status_code == 400 and r.json()["error"]["code"] == "INVALID_PATH"
+
+
+def test_failed_manifest_read_is_503_not_a_missing_manifest(env):
+    src = _write_bundle(env)
+    env.hub.fail_next_read("manifest.md")
+    r = env.client.post("/v1/traces", json={"source": src})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
+
+
+def test_partial_promote_does_not_claim_nothing_was_written(env, monkeypatch):
+    """The log copy lands, then the manifest write fails: the 503 must not say
+    nothing was written."""
+    def fail(*args, **kwargs):
+        raise _http_error()
+
+    monkeypatch.setattr(env.hub, "write_text_central", fail)
+    src = _write_bundle(env, manifest=_manifest(native_log_file="session.jsonl"), log=b"{}\n")
+    r = env.client.post("/v1/traces", json={"source": src, "share": "full"})
+    assert r.status_code == 503
+    assert "traces/agent-1/sess-1/session.jsonl" in _central(env)
+    err = r.json()["error"]
+    assert "nothing was written" not in err["message"] and "partly applied" in err["message"]

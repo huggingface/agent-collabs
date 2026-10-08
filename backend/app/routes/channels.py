@@ -42,7 +42,6 @@ from app.errors import (
     NotOrganizer,
     NotRegistered,
     RateLimited,
-    SourceNotFound,
     Unauthorized,
 )
 from app.frontmatter import merge, serialise
@@ -84,6 +83,7 @@ from app.routes.messages import (
 from app.validation import (
     NOTIFY_MENTIONS,
     is_human_handle,
+    read_source_bytes,
     resolve_source,
     stored_notify_level,
     validate_agent_id,
@@ -448,10 +448,7 @@ def _resolve_subscriber(
         allowed, retry = bucket_limiter.try_consume(parsed.bucket)
         if not allowed:
             raise RateLimited(retry)
-        try:
-            hub.read_bytes(parsed)  # existence is the ownership proof
-        except FileNotFoundError:
-            raise SourceNotFound(str(parsed))
+        read_source_bytes(hub, parsed)  # existence is the ownership proof
         return handle, "bucket"
     assert req.agent_id is not None
     handle = req.agent_id

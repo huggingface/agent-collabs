@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -64,9 +65,51 @@ class HubUnreachable(Exception):
     """The Hub answered 5xx/429 or not at all: transient, safe to retry."""
 
 
-def _status(e: Exception) -> int | None:
+def _status(e: BaseException) -> int | None:
     resp = getattr(e, "response", None)
     return getattr(resp, "status_code", None)
+
+
+class StorageFailed(Exception):
+    """A Space-token storage call failed below the HTTP layer, in the Xet
+    client. Keeps only the exception type and HTTP status: the original text
+    can carry signed URLs or Xet credentials."""
+
+    def __init__(self, cause: BaseException):
+        self.type_name = type(cause).__name__
+        self.status = _status(cause)
+        super().__init__(f"storage call failed ({self.type_name}, status={self.status})")
+
+
+# What a poisoned Xet session raises for every later call (see app/caller_write.py).
+_POISONED_XET_PREFIX = "Previous task error"
+
+
+@contextmanager
+def _xet_failures():
+    """Turn the Xet client's non-HTTP failures into StorageFailed: its builtin
+    ConnectionError, and the RuntimeError of a poisoned session. Any other
+    RuntimeError propagates unchanged."""
+    try:
+        yield
+    except ConnectionError as e:
+        raise StorageFailed(e) from None
+    except RuntimeError as e:
+        if str(e).startswith(_POISONED_XET_PREFIX):
+            raise StorageFailed(e) from None
+        raise
+
+
+def _batch(**kwargs) -> None:
+    """batch_bucket_files with the Space's token. Caller-token writes never
+    come here: they run in a child (app/caller_write.py)."""
+    with _xet_failures():
+        batch_bucket_files(**kwargs)
+
+
+def _download(**kwargs) -> None:
+    with _xet_failures():
+        download_bucket_files(**kwargs)
 
 
 def _transient(e: Exception) -> bool:
@@ -363,20 +406,23 @@ class HubClient:
         """
         return self._download_optional(self._settings.central_bucket, target_path)
 
-    def read_text_optional(self, uri: SourceURI | str) -> str | None:
+    def read_bytes_optional(self, uri: SourceURI | str) -> bytes | None:
         """``read_central_bytes_optional`` for any bucket: None only when the
         file is genuinely missing; any other failure propagates."""
         parsed = uri if isinstance(uri, SourceURI) else parse_source_uri(uri)
         if parsed is None:
             raise ValueError(f"invalid source URI: {uri}")
-        data = self._download_optional(f"{parsed.org}/{parsed.bucket}", parsed.path)
+        return self._download_optional(f"{parsed.org}/{parsed.bucket}", parsed.path)
+
+    def read_text_optional(self, uri: SourceURI | str) -> str | None:
+        data = self.read_bytes_optional(uri)
         return None if data is None else data.decode("utf-8")
 
     def _download_optional(self, bucket: str, remote_path: str) -> bytes | None:
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "f"
             try:
-                download_bucket_files(
+                _download(
                     bucket_id=bucket,
                     files=[(remote_path, str(local))],
                     raise_on_missing_files=True,
@@ -390,7 +436,7 @@ class HubClient:
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "f"
             try:
-                download_bucket_files(
+                _download(
                     bucket_id=bucket,
                     files=[(remote_path, str(local))],
                     raise_on_missing_files=True,
@@ -415,15 +461,17 @@ class HubClient:
             with tempfile.TemporaryDirectory() as td:
                 pairs = [(remote, str(Path(td) / str(i))) for i, remote in enumerate(chunk)]
                 try:
-                    download_bucket_files(
+                    _download(
                         bucket_id=bucket,
                         files=pairs,
                         raise_on_missing_files=False,
                         token=self._token,
                     )
-                except (EntryNotFoundError, HfHubHTTPError) as e:
+                except (EntryNotFoundError, HfHubHTTPError, StorageFailed) as e:
+                    # Type and status only: the text can carry signed URLs.
                     log.warning(
-                        "download_many(%s, %d files) failed: %s", bucket, len(chunk), e
+                        "download_many(%s, %d files) failed (type=%s status=%s)",
+                        bucket, len(chunk), getattr(e, "type_name", type(e).__name__), _status(e),
                     )
                     continue
                 for remote, local in pairs:
@@ -462,7 +510,7 @@ class HubClient:
     # ───────────────────────── Writes (central bucket) ─────────────────────────
 
     def write_bytes_central(self, target_path: str, data: bytes) -> None:
-        batch_bucket_files(
+        _batch(
             bucket_id=self._settings.central_bucket,
             add=[(data, target_path)],
             token=self._token,
@@ -479,7 +527,7 @@ class HubClient:
         """
         if not items:
             return
-        batch_bucket_files(
+        _batch(
             bucket_id=self._settings.central_bucket,
             add=list(items),
             token=self._token,
@@ -489,14 +537,14 @@ class HubClient:
         """Delete one central-bucket file. The only deleting write in the
         system: channel unsubscribe removes the member marker
         (CHANNELS_DESIGN.md §3.3). Everything else stays append-only."""
-        batch_bucket_files(
+        _batch(
             bucket_id=self._settings.central_bucket,
             delete=[target_path],
             token=self._token,
         )
 
     def write_bytes_to_bucket(self, bucket: str, target_path: str, data: bytes) -> None:
-        batch_bucket_files(bucket_id=bucket, add=[(data, target_path)], token=self._token)
+        _batch(bucket_id=bucket, add=[(data, target_path)], token=self._token)
 
     def write_text_to_bucket(self, bucket: str, target_path: str, text: str) -> None:
         self.write_bytes_to_bucket(bucket, target_path, text.encode("utf-8"))
@@ -516,7 +564,7 @@ class HubClient:
         with tempfile.TemporaryDirectory() as td:
             local = Path(td) / "f"
             try:
-                download_bucket_files(
+                _download(
                     bucket_id=self._settings.audit_bucket,
                     files=[(target_path, str(local))],
                     raise_on_missing_files=True,
@@ -527,7 +575,7 @@ class HubClient:
             return local.read_bytes()
 
     def write_bytes_audit(self, target_path: str, data: bytes) -> None:
-        batch_bucket_files(
+        _batch(
             bucket_id=self._settings.audit_bucket,
             add=[(data, target_path)],
             token=self._token,
@@ -540,7 +588,7 @@ class HubClient:
             existing = b""
         if existing and not existing.endswith(b"\n"):
             existing += b"\n"
-        batch_bucket_files(
+        _batch(
             bucket_id=bucket,
             add=[(existing + line.encode("utf-8") + b"\n", target_path)],
             token=self._token,
@@ -554,7 +602,7 @@ class HubClient:
         listing it already holds — so there is no extra lookup here."""
         if not src_xet_hash:
             raise RuntimeError(f"missing xet_hash for copy to {dest_path}")
-        batch_bucket_files(
+        _batch(
             bucket_id=self._settings.central_bucket,
             copy=[("bucket", src_bucket, src_xet_hash, dest_path)],
             token=self._token,
@@ -577,7 +625,7 @@ class HubClient:
             copy_ops.append(("bucket", src_bucket, f.xet_hash, dest_path))
             results.append((f.rel_path, dest_path, f.size))
 
-        batch_bucket_files(
+        _batch(
             bucket_id=self._settings.central_bucket,
             copy=copy_ops,
             token=self._token,

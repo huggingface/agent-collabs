@@ -651,7 +651,8 @@ hint carries the existing filename), `429 RATE_LIMITED` (`Retry-After` has
 the wait), `404 SOURCE_NOT_FOUND` (the file is not in your bucket yet — the
 hint has the copy command), `400 INVALID_REQUEST` (the message names the bad
 or unknown field), `413 TOO_LARGE` (the message states the cap),
-`503 STORAGE_UNAVAILABLE` (nothing was written; retry after `Retry-After`).
+`503 STORAGE_UNAVAILABLE` (it may have been partly applied: check with the
+matching GET before retrying after `Retry-After`).
 Every limit is listed under `limits` in `GET $$API/v1`.
 $jobs_section
 ## Direct bucket reads (always allowed)

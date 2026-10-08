@@ -295,6 +295,17 @@ def test_transient_bucket_check_is_503(env, monkeypatch):
     assert r.json()["error"]["code"] == "HUB_UNAVAILABLE"
 
 
+def test_missing_bio_source_is_404_and_a_failed_read_is_503(env):
+    bio = "hf://buckets/test-org/test-agent-9/bio.md"
+    r = _register(env, bio_source=bio)
+    assert r.status_code == 404 and r.json()["error"]["code"] == "SOURCE_NOT_FOUND"
+    env.hub.seed("bio.md", "---\n---\nI tune tokenizers.", bucket=BUCKET)
+    env.hub.fail_next_read("bio.md")
+    r = _register(env, bio_source=bio)
+    assert r.status_code == 503 and r.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
+    assert _register(env, bio_source=bio).status_code == 201
+
+
 def test_optional_reads_map_only_missing_entries_to_none(env, monkeypatch):
     client = hub_module.HubClient(env.settings)
 
