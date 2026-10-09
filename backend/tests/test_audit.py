@@ -73,6 +73,26 @@ def test_failed_audit_write_does_not_fail_the_request(env, monkeypatch, caplog):
     )
 
 
+def test_failed_audit_write_logs_no_exception_text(env, caplog):
+    """Hub and Xet error text can carry signed URLs: the log names the
+    error's type and status, never its message."""
+    import httpx
+    from huggingface_hub.errors import HfHubHTTPError
+
+    marker = "X-Amz-Signature=SECRETMARKER"
+    url = f"https://cas-bridge.xethub.hf.co/xet?{marker}"
+    exc = HfHubHTTPError(f"503 for url: {url}", response=httpx.Response(503, request=httpx.Request("PUT", url)))
+    env.hub.fail_next_write(exc)
+    with caplog.at_level(logging.WARNING, logger="app.audit"):
+        AuditLogger(env.hub).write(
+            agent_id="agent-1", route="/v1/messages", via="raw", source=None,
+            target_path=None, bytes_count=0, status_code=201,
+        )
+    assert "type=HfHubHTTPError status=503" in caplog.text
+    assert "SECRETMARKER" not in caplog.text
+    assert '"agent_id": "agent-1"' in caplog.text or "'agent_id': 'agent-1'" in caplog.text
+
+
 @pytest.mark.parametrize(
     "org, audit_bucket, in_org",
     [
