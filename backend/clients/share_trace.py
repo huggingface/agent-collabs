@@ -496,6 +496,23 @@ _PROVIDER_SECRET_PATTERNS = [
      )),
 ]
 
+# Each provider token starts with a fixed string; checking for it with `in`
+# first skips the regex on almost every string.
+_PROVIDER_NEEDLES = {
+    "HF_TOKEN": ("hf_",), "GITHUB_TOKEN": ("gh", "github_pat_"), "ANTHROPIC_KEY": ("sk-ant-",),
+    "OPENAI_KEY": ("sk-",), "AWS_ACCESS_KEY": ("AKIA", "ASIA"), "SLACK_TOKEN": ("xox",),
+    "GITLAB_TOKEN": ("glpat-",), "GOOGLE_API_KEY": ("AIza",), "NPM_TOKEN": ("npm_",),
+    "PYPI_TOKEN": ("pypi-",), "JWT": ("eyJ",),
+}
+
+
+def _providers_in(text: str):
+    """The provider patterns whose fixed prefix occurs in `text`."""
+    for category, how, pattern in _PROVIDER_SECRET_PATTERNS:
+        if any(needle in text for needle in _PROVIDER_NEEDLES[category]):
+            yield category, how, pattern
+
+
 _PRIVATE_KEY_RE = re.compile(
     r"-----BEGIN (?P<label>[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?)-----.*?"
     r"-----END (?P=label)-----",
@@ -533,30 +550,45 @@ _SECRET_NAME_CORE = (
     r"api[_-]?key|apikey|private[_-]?key|access[_-]?key|"
     r"(?:access|refresh|id|session|auth|bearer)[_-]?token|credentials?"
 )
+# Matches the secret word itself; a prefix (`db_`, `SERVICE_`) is recovered by
+# _full_name for the report. Matching the prefix in the regex made the engine
+# retry at nearly every position of long lines.
 _SECRET_NAME = (
-    rf"(?<![A-Za-z0-9_])(?:[A-Za-z0-9]+[_.-])*(?:{_SECRET_NAME_CORE}|(?<=[_.-])token)"
-    r"(?![A-Za-z0-9])"
+    rf"(?<![A-Za-z0-9])(?:{_SECRET_NAME_CORE}|(?<=[_.-])token)(?![A-Za-z0-9])"
 )
-# `name = "value"` / `name: 'value'`, also as JSON text and with JSON-escaped
-# quotes (`\"password\": \"...\"`). The closing quote may be missing at the
-# very end: a tool output cut off mid-value that the JSON parser could not read.
-_QUOTED_SECRET_RE = re.compile(
-    rf"(?i)(?P<key>{_SECRET_NAME})(?P<kq>\\?[\"']?)(?P<sep>\s*[:=]\s*)"
-    r"(?P<quote>\\?[\"'])(?P<value>[^\r\n]*?)(?P<close>(?P=quote)|$)"
+_NAME_CHARS = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_.-")
+
+
+def _full_name(m: re.Match) -> str:
+    """The whole name a secret word belongs to: `SERVICE_API_KEY` for the
+    match `API_KEY`."""
+    text, start = m.string, m.start("key")
+    while start > 0 and text[start - 1] in _NAME_CHARS:
+        start -= 1
+    return text[start:m.end("key")]
+# The start of `name = "value"` / `name: 'value'`, also as JSON text and with
+# JSON-escaped quotes (`\"password\": \"...\"`). Where the value ends is found
+# by _quoted_value_end, which honours backslash escapes. A quoted value is a
+# literal, so it is always replaced, whatever it looks like.
+_QUOTED_SECRET_START_RE = re.compile(
+    rf"(?i)(?P<key>{_SECRET_NAME})(?P<kq>\\?[\"']?)(?P<sep>\s*[:=]\s*)(?P<quote>\\?[\"'])"
 )
 _UNQUOTED_SECRET_RE = re.compile(
     rf"(?i)(?P<key>{_SECRET_NAME})(?P<kq>\\?[\"']?)(?P<sep>\s*[:=]\s*)(?!\\?[\"'])"
     r"(?P<value>[^\s,;}\]\"'\\]+)"
 )
-# Values next to a secret name that are not a literal secret: empty, null,
-# booleans, numbers, masks, placeholders, and references such as $VAR,
-# ${VAR}, os.environ[...] or a function call. Left alone by the scrubber and
-# ignored by the scan, so code that talks about passwords is not mangled.
-_NOT_A_LITERAL_RE = re.compile(
-    r"(?is)^(?:|null|none|nil|true|false|undefined|[-+]?\d+(?:\.\d+)?|\**|x{3,}|"
+# Unquoted values next to a secret name that are code, not a secret: null,
+# booleans, masks, placeholders, and references such as $VAR, ${VAR},
+# os.environ[...] or a function call. Numbers are secrets (a numeric password)
+# except after a *_token name, where they are counters (max_token=5).
+_UNQUOTED_REFERENCE_RE = re.compile(
+    r"(?is)^(?:null|none|nil|true|false|undefined|\*+|x{3,}|"
     r"<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?.*|%[A-Za-z_]+%|\{\{.*\}\}|"
     r"(?:os\.environ|os\.getenv|process\.env|env)\b.*|[A-Za-z_][A-Za-z0-9_.]*\(.*)$"
 )
+_NUMBER_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?$")
+# A credential has at least one letter or digit; a lone "," or "" does not.
+_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
 _EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@"
     r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
@@ -621,17 +653,69 @@ def _sensitive_key_category(key: object, value: object) -> str | None:
     norm = _normalise_key(key)
     if norm in _SENSITIVE_KEYS:
         return _SENSITIVE_KEYS[norm]
-    if isinstance(value, str):
-        for suffix, category in _SENSITIVE_KEY_SUFFIXES:
-            if norm.endswith(suffix):
-                return category
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    for suffix, category in _SENSITIVE_KEY_SUFFIXES:
+        # A string always; a number too (a numeric PIN or password), except
+        # for *_token, where numbers are counters.
+        if norm.endswith(suffix) and (isinstance(value, str) or (number and suffix != "_token")):
+            return category
     return None
 
 
-def _is_literal(value: str) -> bool:
-    """A value that could be a secret, not a reference or a mask (see
-    _NOT_A_LITERAL_RE)."""
-    return not _NOT_A_LITERAL_RE.match(value.strip())
+def _unquoted_secret(key: str, value: str) -> bool:
+    """Whether an unquoted value after a secret name may be the secret itself
+    (see _UNQUOTED_REFERENCE_RE)."""
+    v = value.strip()
+    if not v or _UNQUOTED_REFERENCE_RE.match(v):
+        return False
+    if _NUMBER_RE.match(v):
+        return not _normalise_key(key).endswith("token")
+    return True
+
+
+def _quoted_value_end(text: str, start: int, quote: str) -> tuple[int, int]:
+    """(end of the value, end of its closing quote) for a value opened by
+    `quote` just before `start`. A quote character closes it only when the
+    backslashes before it leave it unescaped: an even count for a plain quote,
+    1 mod 4 for a JSON-escaped one (\\" inside a JSON string), whose value also
+    stops where that JSON string ends. With no closing quote on the line, the
+    value runs to the end of the line."""
+    q, escaped = quote[-1], len(quote) == 2
+    i = start
+    while i < len(text):
+        ch = text[i]
+        if ch in "\r\n":
+            return i, i
+        if ch == q:
+            n, j = 0, i
+            while j > start and text[j - 1] == "\\":
+                n, j = n + 1, j - 1
+            if not escaped and n % 2 == 0:
+                return i, i + 1
+            if escaped and n % 4 == 1:
+                return i - 1, i + 1
+            if escaped and n % 2 == 0:
+                return i, i  # the enclosing JSON string ends: a cut-off value
+        i += 1
+    return len(text), len(text)
+
+
+_OPAQUE_RUN_RE = re.compile(r"[A-Za-z0-9]{16,}")
+
+
+def _sanitize_label(text: str, custom_patterns=(), privacy: str = "balanced") -> str:
+    """A key or variable name as the report may print it: credential shapes,
+    custom-pattern matches and (balanced/strict) emails become their category,
+    as in the upload, and any opaque run of 16+ letters/digits (which no real
+    key name has) becomes its length. A report never shows more than the
+    scrubbed upload, and less when the scan has found something."""
+    for category, _how, pattern in _providers_in(text):
+        text = pattern.sub(f"<{category}>", text)
+    for _lineno, pattern in custom_patterns:
+        text = pattern.sub("<CUSTOM>", text)
+    if privacy in ("balanced", "strict"):
+        text = _EMAIL_RE.sub("<EMAIL>", text)
+    return _OPAQUE_RUN_RE.sub(lambda m: f"<{len(m.group(0))} chars>", text)
 
 
 def _custom_patterns(path: str | None) -> list[tuple[int, re.Pattern]]:
@@ -687,6 +771,27 @@ class TraceRedactor:
     @staticmethod
     def _is_placeholder(value: object) -> bool:
         return isinstance(value, str) and bool(_PLACEHOLDER_RE.fullmatch(value))
+
+    def _label(self, name: str) -> str:
+        return _sanitize_label(name, self.custom_patterns, self.privacy)
+
+    def _redact_quoted_assignments(self, text: str) -> str:
+        out, pos = [], 0
+        for m in _QUOTED_SECRET_START_RE.finditer(text):
+            if m.start() < pos:
+                continue  # inside a value already replaced
+            start = m.end()
+            end, _close = _quoted_value_end(text, start, m.group("quote"))
+            value = text[start:end]
+            out.append(text[pos:start])
+            if _ALNUM_RE.search(value) and not self._is_placeholder(value):
+                key = _full_name(m)
+                out.append(self._alias(_assignment_category(key), value, f"assignment {self._label(key)}"))
+            else:
+                out.append(value)
+            pos = end
+        out.append(text[pos:])
+        return "".join(out)
 
     def _note(self, key: str, category: str, how: str) -> None:
         origin = self.origins.setdefault(
@@ -776,24 +881,20 @@ class TraceRedactor:
             text,
         )
 
-        def assignment_repl(match: re.Match) -> str:
-            value = match.group("value")
-            if self._is_placeholder(value) or not _is_literal(value):
+        def unquoted_repl(match: re.Match) -> str:
+            key, value = _full_name(match), match.group("value")
+            if self._is_placeholder(value) or not _unquoted_secret(key, value):
                 return match.group(0)
-            key = match.group("key")
-            groups = match.groupdict()
             return (
-                key
+                match.group("key")
                 + match.group("kq")
                 + match.group("sep")
-                + (groups.get("quote") or "")
-                + self._alias(_assignment_category(key), value, f"assignment {key}")
-                + (groups.get("close") or "")
+                + self._alias(_assignment_category(key), value, f"assignment {self._label(key)}")
             )
 
-        text = _QUOTED_SECRET_RE.sub(assignment_repl, text)
-        text = _UNQUOTED_SECRET_RE.sub(assignment_repl, text)
-        for category, how, pattern in _PROVIDER_SECRET_PATTERNS:
+        text = self._redact_quoted_assignments(text)
+        text = _UNQUOTED_SECRET_RE.sub(unquoted_repl, text)
+        for category, how, pattern in _providers_in(text):
             text = pattern.sub(lambda m, c=category, h=how: self._alias(c, m.group(0), h), text)
         for lineno, pattern in self.custom_patterns:
             text = pattern.sub(
@@ -851,7 +952,7 @@ class TraceRedactor:
         if category and value not in (None, "", [], {}):
             if self._is_placeholder(value):
                 return value
-            how = f'JSON key "{key}"'
+            how = f'JSON key "{self._label(str(key))}"'
             if isinstance(value, str) and category == "AUTHORIZATION":
                 return self._auth_value(value, how, category)
             return self._alias(category, value, how)
@@ -1012,16 +1113,14 @@ def _public_session_id(fields: dict, log_path: Path) -> str:
 # are all just characters here. It never changes anything. Any hit blocks the
 # upload, since it means something got past the scrubber. Lines without a
 # trigger word are skipped, which keeps long sessions cheap.
-_SCAN_TRIGGER_RE = re.compile(
-    r"(?i)key|token|secret|passw|credential|auth|cookie|sig|BEGIN|://|"
-    r"hf_|gh[pousr]_|github_pat_|sk-|AKIA|ASIA|xox|glpat-|AIza|npm_|pypi-|eyJ"
+_SCAN_TRIGGERS = (
+    "key", "token", "secret", "passw", "credential", "auth", "cookie", "sig", "begin",
+    "://", "hf_", "gh", "sk-", "akia", "asia", "xox", "glpat-", "aiza", "npm_", "pypi-", "eyj",
 )
 _SCAN_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
-# `name: value` in any quoting, JSON-escaped (\") included.
-_SCAN_ASSIGNMENT_RE = re.compile(
-    r"(?i)(?P<key>" + _SECRET_NAME + r")\\*[\"']?\s*[:=]\s*\\*[\"']?"
-    r"(?P<value>[^\s\"'\\,;}\]]+)"
-)
+# A replaced value followed straight away by more text inside the same token
+# (`'<REDACTED:PASSWORD_1>'REMAINDER`): the scrubber cut a value short.
+_SCAN_SPLIT_VALUE_RE = re.compile(r"<REDACTED:[A-Z0-9_]+_\d+>\\*[\"'](?P<rest>[A-Za-z0-9][^\s\"'\\,;}\]]*)")
 _KNOWN_PREFIXES = (
     "github_pat_", "sk-ant-", "glpat-", "pypi-", "hf_", "ghp_", "gho_", "ghu_", "ghs_",
     "ghr_", "sk-", "AKIA", "ASIA", "xoxb-", "xoxa-", "xoxp-", "xoxr-", "xoxs-", "AIza",
@@ -1035,9 +1134,10 @@ def _mask(value: str) -> str:
     return f"{prefix}...({len(value)} chars)"
 
 
-def _scan_line(line: str):
-    """(category, how it was spotted, value) for each credential left in a line."""
-    for category, how, pattern in _PROVIDER_SECRET_PATTERNS:
+def _scan_line(line: str, label=lambda name: name):
+    """(category, how it was spotted, value) for each credential left in a
+    line. `label` sanitizes key names for the report."""
+    for category, how, pattern in _providers_in(line):
         for m in pattern.finditer(line):
             yield category, how, m.group(0)
     for m in _SCAN_PRIVATE_KEY_RE.finditer(line):
@@ -1053,23 +1153,39 @@ def _scan_line(line: str):
     for m in _COOKIE_HEADER_RE.finditer(line):
         if not m.group("value").strip().startswith("<REDACTED:"):
             yield "COOKIE", "Cookie header", m.group("value").strip()
-    for m in _SCAN_ASSIGNMENT_RE.finditer(line):
-        value = m.group("value")
-        if _is_literal(value):
-            yield _assignment_category(m.group("key")), f"assignment {m.group('key')}", value
+    # A quoted value after a secret name must be exactly one placeholder: no
+    # exemptions for anything that looks like code or a number.
+    for m in _QUOTED_SECRET_START_RE.finditer(line):
+        end, _close = _quoted_value_end(line, m.end(), m.group("quote"))
+        value = line[m.end():end]
+        if _ALNUM_RE.search(value) and not _PLACEHOLDER_RE.fullmatch(value):
+            key = _full_name(m)
+            yield _assignment_category(key), f"assignment {label(key)}", value
+    for m in _UNQUOTED_SECRET_RE.finditer(line):
+        key = _full_name(m)
+        if not m.group("value").startswith("<REDACTED:") and _unquoted_secret(key, m.group("value")):
+            yield _assignment_category(key), f"assignment {label(key)}", m.group("value")
+    for m in _SCAN_SPLIT_VALUE_RE.finditer(line):
+        yield "PARTIAL", "text left after a replaced value", m.group("rest")
 
 
-def scan_upload(files: dict[str, str]) -> tuple[list[dict], int]:
+def scan_upload(
+    files: dict[str, str], custom_patterns=(), privacy: str = "balanced"
+) -> tuple[list[dict], int]:
     """Check every line of every file to be uploaded. Returns (hits, lines
     scanned); a hit carries its file, line, category and a masked value."""
+    def label(name: str) -> str:
+        return _sanitize_label(name, custom_patterns, privacy)
+
     hits: list[dict] = []
     scanned = 0
     for name, text in files.items():
         for lineno, line in enumerate(text.splitlines(), 1):
             scanned += 1
-            if not _SCAN_TRIGGER_RE.search(line):
+            low = line.lower()
+            if not any(word in low for word in _SCAN_TRIGGERS):
                 continue
-            for category, how, value in _scan_line(line):
+            for category, how, value in _scan_line(line, label):
                 hits.append({
                     "file": name, "line": lineno, "category": category,
                     "how": how, "masked": _mask(value),
@@ -1314,14 +1430,20 @@ def main() -> int:
         session_id=session_id,
         result_ref=safe_result_ref,
         native_log_file=native_log_file,
-        redaction={"version": REDACTOR_VERSION, "privacy": args.privacy, "counts": redactor.summary()},
+        # Counts as a list, not {"PASSWORD": 1}: a secret name next to a number
+        # is exactly what the scan looks for.
+        redaction={
+            "version": REDACTOR_VERSION,
+            "privacy": args.privacy,
+            "counts": [{"category": c, "count": n} for c, n in redactor.summary().items()],
+        },
     )
     upload = {"manifest.md": manifest}
     if share == "full":
         assert native_log_file is not None and log_text is not None
         upload[native_log_file] = log_text
     try:
-        hits, scanned = scan_upload(upload)
+        hits, scanned = scan_upload(upload, patterns, args.privacy)
     except Exception as exc:  # a scan that cannot finish never passes for clean
         print(f"warning: the upload scan failed ({type(exc).__name__})")
         hits, scanned = None, 0

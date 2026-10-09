@@ -452,7 +452,8 @@ def test_full_upload_only_sends_scrubbed_content_and_neutral_filename(
     trace_uri = next(uri for uri in uploads if uri.endswith("/trace.jsonl"))
     assert "alice@example.com" not in uploads[manifest_uri]
     assert '"privacy": "balanced"' in uploads[manifest_uri]
-    assert '"GITHUB_TOKEN": 1' in uploads[manifest_uri]
+    redaction = json.loads(uploads[manifest_uri].split("---")[1])["redaction"]
+    assert {"category": "GITHUB_TOKEN", "count": 1} in redaction["counts"]
     assert secret not in uploads[trace_uri]
     assert "alice@example.com" not in uploads[trace_uri]
     assert "/Users/alice" not in uploads[trace_uri]
@@ -688,3 +689,81 @@ def test_there_is_no_unsafe_raw_mode(home, monkeypatch, tmp_path):
     with pytest.raises(SystemExit) as exc:
         _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--full", "--raw")
     assert exc.value.code == 2  # argparse: unrecognized argument
+
+
+# ── numeric, escaped and report-label leaks (second review) ─────────
+
+
+def _full_share(monkeypatch, tmp_path, record, *extra):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps(record) + "\n")
+    return _share(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--full", "--yes", *extra)
+
+
+def test_numeric_and_code_shaped_credentials_are_scrubbed(home, monkeypatch, tmp_path, capsys):
+    record = {
+        "content": (
+            'password="849271" pin_password=\'secretWord(749)\' DB_PASSWORD=550312 '
+            "max_token=5 retries=3"
+        ),
+        "db_password": 774410,
+        "input_tokens": 1234,
+    }
+    rc, uploads = _full_share(monkeypatch, tmp_path, record)
+    out = capsys.readouterr().out
+    assert rc == 0 and "scan: clean" in out
+    trace = next(body for dest, body in uploads.items() if dest.endswith("/trace.jsonl"))
+    for secret in ("849271", "secretWord(749)", "550312", "774410"):
+        assert secret not in trace and secret not in out
+    # Counters and ordinary numbers are left alone.
+    assert "max_token=5 retries=3" in trace and '"input_tokens":1234' in trace
+
+
+def test_escaped_quotes_never_cut_a_credential_short(home, monkeypatch, tmp_path, capsys):
+    record = {
+        "single": "password='abc\\'REMAINDER-1' next=ok",
+        "double": 'password="ab\\"REMAINDER-2" next=ok',
+        "backslash_end": 'password="ends-with-backslash\\\\" next=ok',
+        "double_encoded": json.dumps(json.dumps({"password": 'a"REMAINDER-3'})),
+    }
+    rc, uploads = _full_share(monkeypatch, tmp_path, record)
+    out = capsys.readouterr().out
+    assert rc == 0 and "scan: clean" in out
+    trace = next(body for dest, body in uploads.items() if dest.endswith("/trace.jsonl"))
+    for marker in ("REMAINDER-1", "REMAINDER-2", "REMAINDER-3", "ends-with-backslash"):
+        assert marker not in trace and marker not in out
+    assert trace.count("next=ok") == 3  # only the value is replaced
+
+
+def test_the_report_never_prints_a_scrubbed_key_name(home, monkeypatch, tmp_path, capsys):
+    token = "hf_" + "Z" * 30
+    patterns = tmp_path / "patterns.txt"
+    patterns.write_text("ACME\n")
+    record = {f"{token}-token": "opaque-synthetic", "content": "ACME_PASSWORD=hunter2hunter2"}
+    rc, uploads = _full_share(monkeypatch, tmp_path, record, "--redact-pattern-file", str(patterns))
+    out = capsys.readouterr().out
+    assert rc == 0
+    for leaked in (token, "ACME", "opaque-synthetic", "hunter2hunter2"):
+        assert leaked not in out
+        assert all(leaked not in body for body in uploads.values())
+    assert 'JSON key "<HF_TOKEN>-token"' in out
+    assert "assignment <CUSTOM>_PASSWORD" in out
+
+
+def test_scan_flags_values_left_after_or_instead_of_a_placeholder():
+    hits, _ = st.scan_upload({"t": "\n".join([
+        "password='<REDACTED:PASSWORD_1>'REMAINDER749201'",  # value cut short
+        'password="849271"',                                  # quoted: no exemptions
+        "password=849271",                                    # unquoted number
+    ])})
+    assert [(h["line"], h["category"]) for h in hits] == [
+        (1, "PARTIAL"), (2, "PASSWORD"), (3, "PASSWORD"),
+    ]
+    clean = '{"category":"PASSWORD","count":1} max_token=5 password="<REDACTED:PASSWORD_1>" next'
+    assert st.scan_upload({"t": clean})[0] == []
+
+
+def test_scan_labels_hide_credential_shaped_key_names():
+    token = "hf_" + "Y" * 30
+    hits, _ = st.scan_upload({"t": f'{token}_password="leftover-value"'})
+    assert hits and all(token not in h["how"] for h in hits)
