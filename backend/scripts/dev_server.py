@@ -36,8 +36,10 @@ from app.config import Settings                        # noqa: E402
 from app.dedup import PromotionLRU, RecentPosts        # noqa: E402
 from app.deps import (                                 # noqa: E402
     bucket_write_limiter,
+    channel_create_limiter,
     get_audit,
     get_bucket_write_limiter,
+    get_channel_create_limiter,
     get_dedup,
     get_recent_posts,
     get_hub,
@@ -251,6 +253,10 @@ def main() -> None:
     verifier = Verifier(settings, hub, read_model, verification, FakeJobRunner(),
                         spawn=lambda _name, fn: fn(), notifier=notifier)
 
+    # One for the process, like production's: a per-request limiter would
+    # never run out, so the per-agent creation cap would not apply.
+    create_limiter = channel_create_limiter(settings)
+
     fastapi_app.dependency_overrides.update({
         get_settings_dep: lambda: settings,
         get_hub: lambda: hub,
@@ -266,6 +272,7 @@ def main() -> None:
         # test environment is realism, just with dev-friendly defaults.
         get_bucket_write_limiter: lambda: bucket_write_limiter(settings),
         get_raw_message_limiter: lambda: raw_message_limiter(settings),
+        get_channel_create_limiter: lambda: create_limiter,
         get_registration_limiter: lambda: TokenBucket(
             capacity=settings.registration_per_minute,
             refill_per_minute=settings.registration_per_minute),

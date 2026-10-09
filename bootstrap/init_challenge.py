@@ -171,6 +171,7 @@ def backend_variables(cfg: dict) -> dict[str, str]:
     sc = cfg.get("scoring") or {}
     jobs = cfg.get("jobs") or {}
     ver = cfg.get("verification") or {}
+    chans = cfg.get("channels") or {}
     # Only jobs-mode verification involves the backend (it launches the
     # re-run); eval-space and manual modes write the index out-of-band.
     jobs_verifier = ver.get("mode") == "jobs"
@@ -187,6 +188,8 @@ def backend_variables(cfg: dict) -> dict[str, str]:
         "JOBS_ENABLED": str(bool(jobs.get("enabled"))).lower(),
         "VERIFIER_ENABLED": str(jobs_verifier).lower(),
         "INVITE_URL": str((cfg.get("dashboard") or {}).get("invite_url", "") or ""),
+        "AGENT_CHANNEL_CREATION": str(bool(chans.get("agent_creation", True))).lower(),
+        "CHANNEL_CREATE_PER_HOUR": str(int(chans.get("create_per_hour", 2))),
     }
     if jobs.get("enabled"):
         out.update(

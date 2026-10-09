@@ -3,12 +3,15 @@ with auto-subscribe and mention fan-out, subscribe/unsubscribe idempotency and
 spoof resistance, the cross-channel feed, and the digest block."""
 from __future__ import annotations
 
+import threading
+
 from fakes import seed_agent
 
 
 AUTH = {"authorization": "Bearer user-oauth-token"}
-# Creation is organizer-only: the signed-in human (FakeHub whoami defaults to
+# Organizer creation: the signed-in human (FakeHub whoami defaults to
 # "test-user") acts as this handle, with the admin role scripted per test.
+# Agents create from a theme file in their bucket (see _agent_create).
 CREATOR = "human-test-user"
 
 
@@ -78,22 +81,83 @@ def test_create_channel_as_organizer(env):
     assert ann["frontmatter"]["agent"] == CREATOR
 
 
-def test_create_channel_agents_rejected(env):
-    """Creation is organizer-only: both agent variants get a clear 403, not a
-    shape error — agents propose rooms on the board instead."""
-    seed_agent(env.hub, "bb")
-    r = env.client.post(
-        "/v1/channels", json={"name": "evals", "agent_id": "bb", "body": "mine"}
-    )
-    assert r.status_code == 403
-    assert r.json()["error"]["code"] == "NOT_ORGANIZER"
+def _agent_create(env, agent: str, name: str, theme: str = "Scoring disputes live here."):
+    uri = seed_source(env, agent, f"drafts/{name}.md", theme)
+    return env.client.post("/v1/channels", json={"name": name, "source": uri})
 
-    uri = seed_source(env, "bb", "drafts/channel.md", "Scoring disputes live here.")
-    r = env.client.post("/v1/channels", json={"name": "evals", "source": uri})
-    assert r.status_code == 403
-    assert r.json()["error"]["code"] == "NOT_ORGANIZER"
-    # nothing was written
+
+def test_agent_creates_a_channel_from_a_bucket_theme(env):
+    """A registered agent creates from a theme file in its own bucket: the
+    README, its subscription and the board announcement, like an organizer."""
+    seed_agent(env.hub, "bb")
+    r = _agent_create(env, "bb", "evals")
+    assert r.status_code == 201, r.text
+    data = r.json()
+    assert data["via"] == "bucket" and data["created"] is True
+    detail = env.client.get("/v1/channels/evals").json()
+    assert detail["theme"]["frontmatter"]["creator"] == "bb"
+    assert "Scoring disputes live here." in detail["theme"]["body"]
+    assert [m["handle"] for m in detail["members"]] == ["bb"]
+    board = env.client.get("/v1/messages?expand=true").json()
+    ann = next(m for m in board["items"] if m["filename"] == data["announcement"])
+    assert ann["frontmatter"]["agent"] == "bb" and "#evals" in ann["body"]
+
+
+def test_agent_channel_creation_needs_a_registered_agent_and_an_existing_theme(env):
+    r = _agent_create(env, "ghost", "evals")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "NOT_REGISTERED"
+    seed_agent(env.hub, "bb")
+    missing = env.client.post(
+        "/v1/channels", json={"name": "evals", "source": bucket_uri("bb", "drafts/none.md")}
+    )
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "SOURCE_NOT_FOUND"
+    empty = _agent_create(env, "bb", "evals", theme="   ")
+    assert empty.status_code == 400
     assert not env.client.get("/v1/channels").json()["items"]
+
+
+def test_agents_cannot_create_from_a_raw_body(env):
+    seed_agent(env.hub, "bb")
+    r = env.client.post("/v1/channels", json={"name": "evals", "agent_id": "bb", "body": "mine"})
+    assert r.status_code == 403
+    err = r.json()["error"]
+    assert err["code"] == "NOT_ORGANIZER" and "source" in err["hint"]
+    assert not env.client.get("/v1/channels").json()["items"]
+
+
+def test_another_agent_cannot_take_or_rewrite_a_channel(env):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    assert _agent_create(env, "bb", "evals").status_code == 201
+    r = _agent_create(env, "cc", "evals", theme="Mine now.")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "CHANNEL_EXISTS"
+    # The creator can update its own theme: no re-announcement.
+    update = _agent_create(env, "bb", "evals", theme="Scoring disputes and eval bugs.")
+    assert update.status_code == 200 and update.json()["created"] is False
+    assert update.json()["announcement"] is None
+
+
+def test_agent_channel_creation_is_rate_limited_per_agent(make_env):
+    env = make_env(CHANNEL_CREATE_PER_HOUR=2)
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    assert [_agent_create(env, "bb", n).status_code for n in ("one", "two")] == [201, 201]
+    r = _agent_create(env, "bb", "three")
+    assert r.status_code == 429 and r.json()["error"]["code"] == "RATE_LIMITED"
+    assert "reuse an existing channel" in r.json()["error"]["message"]
+    # Updating your own theme doesn't spend the budget; other agents have their own.
+    assert _agent_create(env, "bb", "one", theme="Updated theme.").status_code == 200
+    assert _agent_create(env, "cc", "three").status_code == 201
+
+
+def test_the_switch_keeps_creation_organizer_only(make_env):
+    env = make_env(AGENT_CHANNEL_CREATION="false")
+    seed_agent(env.hub, "bb")
+    r = _agent_create(env, "bb", "evals")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "NOT_ORGANIZER"
+    assert "board" in r.json()["error"]["hint"]
+    assert not env.client.get("/v1/channels").json()["items"]
+    assert create_channel(env, "evals").status_code == 201  # organizers still can
 
 
 def test_create_channel_gate(env):
@@ -522,3 +586,116 @@ def test_discovery_documents_channels(env):
     assert {"/v1/channels", "/v1/channels/feed", "/v1/channels/{name}"} <= paths
     assert "channels" in doc["conventions"]
     assert "depth beats coverage" in doc["conventions"]["channels"]
+
+
+def test_v1_describes_channel_creation_as_configured(make_env):
+    on = make_env().client.get("/v1").json()
+    row = next(e for e in on["endpoints"] if e["path"] == "/v1/channels" and e["method"] == "POST")
+    assert "{name, source}" in row["params"] and "2 new channels per hour" in row["purpose"]
+    off = make_env(AGENT_CHANNEL_CREATION="false").client.get("/v1").json()
+    row = next(e for e in off["endpoints"] if e["path"] == "/v1/channels" and e["method"] == "POST")
+    assert row["purpose"].startswith("organizer-only")
+    assert "create a channel" in on["conventions"]["channels"]
+    assert "curated by the organizers" in off["conventions"]["channels"]
+
+
+# ── concurrent creation of one name ─────────────────────────────────
+
+
+def _hold_first_write(env, monkeypatch):
+    """Block the first central batch write until `release` is set."""
+    entered, release = threading.Event(), threading.Event()
+    write = env.hub.write_many_central
+    calls = []
+
+    def held(items):
+        calls.append(items)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return write(items)
+
+    monkeypatch.setattr(env.hub, "write_many_central", held)
+    return entered, release
+
+
+def _post_in_thread(env, body, headers=None):
+    out = {}
+    t = threading.Thread(
+        target=lambda: out.update(r=env.client.post("/v1/channels", json=body, headers=headers))
+    )
+    t.start()
+    return t, out
+
+
+def _agent_body(env, agent, name, theme="A theme."):
+    return {"name": name, "source": seed_source(env, agent, f"drafts/{name}-{agent}.md", theme)}
+
+
+def _race(env, monkeypatch, first, second):
+    """Hold `first`'s write, start `second`, check it waits, then release.
+    Each is (body, headers). Returns both responses."""
+    entered, release = _hold_first_write(env, monkeypatch)
+    t1, r1 = _post_in_thread(env, *first)
+    assert entered.wait(5)
+    t2, r2 = _post_in_thread(env, *second)
+    t2.join(0.3)
+    assert t2.is_alive()  # waiting on the first creation, not writing
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    return r1["r"], r2["r"]
+
+
+def _announcements(env, name):
+    board = env.client.get("/v1/messages?expand=true&limit=100").json()["items"]
+    return [m for m in board if f"#{name}" in m["body"] and m["frontmatter"].get("via") == "server"]
+
+
+def test_racing_agents_one_wins_the_other_gets_409(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    first, second = _race(
+        env, monkeypatch,
+        (_agent_body(env, "bb", "evals", "bb's theme."), None),
+        (_agent_body(env, "cc", "evals", "cc's theme."), None),
+    )
+    assert first.status_code == 201
+    assert second.status_code == 409 and second.json()["error"]["code"] == "CHANNEL_EXISTS"
+    theme = env.client.get("/v1/channels/evals").json()["theme"]
+    assert theme["frontmatter"]["creator"] == "bb" and "bb's theme." in theme["body"]
+    assert len(_announcements(env, "evals")) == 1
+
+
+def test_an_agent_racing_an_organizer_gets_409(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    make_organizer(env)
+    organizer = {"name": "evals", "agent_id": CREATOR, "body": "Organizer theme."}
+    first, second = _race(env, monkeypatch, (organizer, AUTH), (_agent_body(env, "bb", "evals"), None))
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert env.client.get("/v1/channels/evals").json()["theme"]["frontmatter"]["creator"] == CREATOR
+    assert len(_announcements(env, "evals")) == 1
+
+
+def test_a_racing_retry_by_the_same_creator_is_an_update(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    body = _agent_body(env, "bb", "evals")
+    first, second = _race(env, monkeypatch, (body, None), (body, None))
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert second.json()["created"] is False and second.json()["announcement"] is None
+    assert len(_announcements(env, "evals")) == 1
+
+
+def test_creating_another_name_does_not_wait(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    entered, release = _hold_first_write(env, monkeypatch)
+    t1, r1 = _post_in_thread(env, _agent_body(env, "bb", "evals"))
+    assert entered.wait(5)
+    t2, r2 = _post_in_thread(env, _agent_body(env, "cc", "infra"))
+    t2.join(5)
+    assert not t2.is_alive() and r2["r"].status_code == 201
+    release.set()
+    t1.join(5)
+    assert r1["r"].status_code == 201

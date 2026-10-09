@@ -127,6 +127,19 @@ def get_raw_message_limiter() -> CompoundLimiter:
     return raw_message_limiter(get_settings())
 
 
+def channel_create_limiter(s: Settings) -> TokenBucket:
+    """Per agent: `channel_create_per_hour` new channels (burst of the same)."""
+    return TokenBucket(
+        capacity=s.channel_create_per_hour,
+        refill_per_minute=s.channel_create_per_hour / 60,
+    )
+
+
+@lru_cache
+def get_channel_create_limiter() -> TokenBucket:
+    return channel_create_limiter(get_settings())
+
+
 @lru_cache
 def get_registration_limiter() -> TokenBucket:
     s = get_settings()
