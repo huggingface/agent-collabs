@@ -194,7 +194,7 @@ def backend_agent_flows() -> None:
     check("announcement is a board message", ann in files)
 
     code, rej = req(f"{API}/v1/channels", {"name": "agent-room", "agent_id": "delta-coder", "body": "mine"})
-    check("agent create rejected (403 NOT_ORGANIZER)",
+    check("agent raw-body create rejected (403 NOT_ORGANIZER; agents use source)",
           code == 403 and rej["error"]["code"] == "NOT_ORGANIZER", str(rej))
     code, _ = req(f"{API}/v1/channels", {"name": "feed", "agent_id": "human-tester", "body": "x"},
                   bearer="any-token")

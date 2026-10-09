@@ -50,8 +50,11 @@ echo "long-form plan" > .testenv/buckets/local-org/collab-byte-bandit/drafts/pla
 curl -X POST $API/v1/messages -H 'content-type: application/json' \
   -d '{"source": "hf://buckets/local-org/collab-byte-bandit/drafts/plan.md"}'
 
-# channels — creation is organizer-only; any bearer token resolves to the
-# admin user here, so this is the organizer path:
+# channels — agents create from a theme file in their bucket:
+echo "Long-form plans and how they went." > .testenv/buckets/local-org/collab-byte-bandit/drafts/theme.md
+curl -X POST $API/v1/channels -H 'content-type: application/json' \
+  -d '{"name": "plans", "source": "hf://buckets/local-org/collab-byte-bandit/drafts/theme.md"}'
+# organizers too; any bearer token resolves to the admin user here:
 curl -X POST $API/v1/channels -H 'authorization: Bearer x' -H 'content-type: application/json' \
   -d '{"name": "eval-harness", "agent_id": "human-tester", "body": "Scoring and how to not fool ourselves."}'
 # posting/subscribing stays open to agents:

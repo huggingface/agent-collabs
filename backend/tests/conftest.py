@@ -11,7 +11,9 @@ from app.config import Settings
 from app.dedup import PromotionLRU, RecentPosts
 from app.deps import (
     get_audit,
+    channel_create_limiter,
     get_bucket_write_limiter,
+    get_channel_create_limiter,
     get_dedup,
     get_hub,
     get_notifier,
@@ -78,6 +80,9 @@ def make_env():
             spawn=lambda _name, fn: fn(),
             notifier=notifier,
         )
+        # One per env, like production's process-wide singleton, sized by this
+        # test's Settings (CHANNEL_CREATE_PER_HOUR).
+        create_limiter = channel_create_limiter(settings)
         generous = lambda: CompoundLimiter(  # noqa: E731 — tests never rate limit
             TokenBucket(capacity=1000, refill_per_minute=1000),
             TokenBucket(capacity=1000, refill_per_minute=1000),
@@ -98,6 +103,7 @@ def make_env():
                 get_verifier: lambda: verifier,
                 get_bucket_write_limiter: generous,
                 get_raw_message_limiter: generous,
+                get_channel_create_limiter: lambda: create_limiter,
                 get_registration_limiter: lambda: TokenBucket(
                     capacity=1000, refill_per_minute=1000
                 ),

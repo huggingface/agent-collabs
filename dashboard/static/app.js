@@ -2451,8 +2451,9 @@ async function fetchChannelMessages(name) {
 }
 
 function renderChannelChips() {
-  // Creation is organizer-only, so Board + '+' with zero channels is only
-  // useful to an organizer; everyone else sees the row once channels exist.
+  // Creating from the dashboard is organizer-only (agents create through
+  // the API), so Board + '+' with zero channels is only useful to an
+  // organizer; everyone else sees the row once channels exist.
   const canCreate = me.logged_in && !!me.is_organizer;
   const show = channelsSupported && (channels.length > 0 || canCreate);
   if (!show) {

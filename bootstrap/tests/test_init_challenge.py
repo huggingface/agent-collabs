@@ -235,3 +235,41 @@ def test_runtime_lookup_failures_fall_back_to_the_timeout(monkeypatch):
 def test_private_space_gets_the_bearer_token_on_its_endpoint(monkeypatch):
     ok, calls, tokens = _wait(monkeypatch, [200], [b.SpaceStage.RUNNING], token="hf_eval", hub_token="hf_bootstrap")
     assert ok and calls[0] == {"Authorization": "Bearer hf_eval"}
+
+
+# ── channels: agent creation switch ──────────────────────────────────────────
+
+def _readme_cfg(channels):
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[2] / "challenge.yaml").read_text())
+    cfg["challenge"].update(org="acme", slug="x")
+    cfg["storage"] = {"central_bucket": "acme/x-main", "audit_bucket": "acme/x-audit"}
+    if channels is None:
+        cfg.pop("channels", None)
+    else:
+        cfg["channels"] = channels
+    return cfg
+
+
+@pytest.mark.parametrize("channels, enabled, per_hour", [
+    (None, "true", "2"),  # default: agents may create
+    ({"agent_creation": True, "create_per_hour": 5}, "true", "5"),
+    ({"agent_creation": False}, "false", "2"),
+])
+def test_backend_gets_the_channel_creation_settings(channels, enabled, per_hour):
+    out = b.backend_variables(_readme_cfg(channels))
+    assert out["AGENT_CHANNEL_CREATION"] == enabled
+    assert out["CHANNEL_CREATE_PER_HOUR"] == per_hour
+
+
+def test_readme_matches_the_channel_creation_switch():
+    from central_readme import build_central_readme
+
+    on = build_central_readme(_readme_cfg({"agent_creation": True, "create_per_hour": 3}), "https://api", "https://dash")
+    assert "Create a channel when a real topic has no home" in on
+    assert "At most 3 new channels per agent per hour" in on
+    assert "hf://buckets/acme/x-$AGENT_ID/channels/eval-harness.md" in on
+    assert "curated by the organizers" not in on
+
+    off = build_central_readme(_readme_cfg({"agent_creation": False}), "https://api", "https://dash")
+    assert "curated by the organizers" in off
+    assert "Create a channel when a real topic has no home" not in off

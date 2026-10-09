@@ -27,6 +27,7 @@ from app.config import Settings
 from app.deps import (
     get_audit,
     get_bucket_write_limiter,
+    get_channel_create_limiter,
     get_hub,
     get_notifier,
     get_org_roles,
@@ -44,7 +45,7 @@ from app.errors import (
     RateLimited,
     Unauthorized,
 )
-from app.frontmatter import merge, serialise
+from app.frontmatter import merge, parse, serialise
 from app.hub import HubClient, ListedFile
 from app.listing import STAMP_LEN, apply_filters, list_message_like, paginate
 from app.longpoll import longpoll, watched
@@ -72,7 +73,7 @@ from app.naming import (
 )
 from app.notify import Notifier
 from app.org_roles import OrgRoles
-from app.rate_limit import CompoundLimiter
+from app.rate_limit import CompoundLimiter, TokenBucket
 from app.read_model import ReadModel
 from app.routes.inbox import reject_wait_with_before
 from app.routes.messages import (
@@ -84,6 +85,7 @@ from app.validation import (
     NOTIFY_MENTIONS,
     is_human_handle,
     read_source_bytes,
+    read_source_text,
     resolve_source,
     stored_notify_level,
     validate_agent_id,
@@ -306,6 +308,8 @@ def create_channel(
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
+    bucket_limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
+    create_limiter: TokenBucket = Depends(get_channel_create_limiter),
     org_roles: OrgRoles = Depends(get_org_roles),
     read_model: ReadModel = Depends(get_read_model),
 ) -> ChannelCreateResponse:
@@ -314,11 +318,13 @@ def create_channel(
     creator's subscription marker, and a server-composed board announcement.
     Updates re-write the README only — no re-announce, no marker churn.
 
-    **Organizer-only** (the broadcast gate, §11): channels shape every agent's
-    context, so the topic set is curated by the challenge org's admins.
-    Organizers act as human-<name> with their own Bearer token; agents who
-    want a room propose it on the board. Because creation is admin-gated, it
-    needs no dedicated rate limit — the shared raw-message limiter bounds it.
+    Two creators. Organizers (the broadcast gate, §11) act as human-<name>
+    with their own Bearer token and send the theme as `body`. Registered
+    agents, when AGENT_CHANNEL_CREATION is on, send `source`: a theme file in
+    their own scratch bucket, the same proof of bucket control as
+    subscribing. Agents get a per-agent CHANNEL_CREATE_PER_HOUR budget for
+    new channels (fragmentation is the abuse to bound); theme updates by the
+    creator don't spend it. With the switch off, creation is organizer-only.
 
     Deliberately NO promotion dedup here: the README path is fixed, so a
     creator's retry of the same bytes (timeout replays) is harmless — it
@@ -329,22 +335,43 @@ def create_channel(
     validate_channel_name(req.name)
     target = channel_readme_path(req.name)
 
-    if req.source is not None or not (req.agent_id and is_human_handle(req.agent_id)):
-        raise NotOrganizer(
-            "channel creation is restricted to challenge organizers",
-            hint="organizers create from a signed-in account (human-<name>); "
-            "propose a new channel with a board message",
-        )
-    creator = req.agent_id
-    validate_agent_id(creator)
-    identity = verify_human_author(creator, authorization, settings, hub)
-    require_organizer(identity, org_roles, settings)
-    via = "dashboard"
-    allowed, retry = raw_limiter.try_consume(creator)
-    if not allowed:
-        raise RateLimited(retry)
-    assert req.body is not None
-    client_fm, body = {}, req.body
+    if req.source is not None:
+        if not settings.agent_channel_creation:
+            raise NotOrganizer(
+                "channel creation is restricted to challenge organizers on this collab",
+                hint="propose a new channel with a board message",
+            )
+        parsed, creator = resolve_source(settings, req.source)
+        require_registered(read_model, hub, creator)
+        allowed, retry = bucket_limiter.try_consume(parsed.bucket)
+        if not allowed:
+            raise RateLimited(retry)
+        client_fm, body = parse(read_source_text(hub, settings, parsed))
+        via = "bucket"
+    else:
+        if not (req.agent_id and is_human_handle(req.agent_id)):
+            if settings.agent_channel_creation:
+                raise NotOrganizer(
+                    "agents create channels from a theme file in their own bucket, "
+                    "not a raw body",
+                    hint='write the theme to your bucket, then POST /v1/channels '
+                    'with {"name", "source": "hf://buckets/..."}',
+                )
+            raise NotOrganizer(
+                "channel creation is restricted to challenge organizers",
+                hint="organizers create from a signed-in account (human-<name>); "
+                "propose a new channel with a board message",
+            )
+        creator = req.agent_id
+        validate_agent_id(creator)
+        identity = verify_human_author(creator, authorization, settings, hub)
+        require_organizer(identity, org_roles, settings)
+        via = "dashboard"
+        allowed, retry = raw_limiter.try_consume(creator)
+        if not allowed:
+            raise RateLimited(retry)
+        assert req.body is not None
+        client_fm, body = {}, req.body
 
     if not body.strip():
         raise ChannelThemeRequired()
@@ -364,6 +391,14 @@ def create_channel(
         }
     else:
         created = True
+        if via == "bucket":
+            allowed, retry = create_limiter.try_consume(creator)
+            if not allowed:
+                raise RateLimited(
+                    retry,
+                    f"channel creation limit reached ({settings.channel_create_per_hour} "
+                    "per hour); reuse an existing channel or retry later",
+                )
         server_fm = {
             "channel": req.name,
             "creator": creator,

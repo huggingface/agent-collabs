@@ -7,8 +7,9 @@ from fakes import seed_agent
 
 
 AUTH = {"authorization": "Bearer user-oauth-token"}
-# Creation is organizer-only: the signed-in human (FakeHub whoami defaults to
+# Organizer creation: the signed-in human (FakeHub whoami defaults to
 # "test-user") acts as this handle, with the admin role scripted per test.
+# Agents create from a theme file in their bucket (see _agent_create).
 CREATOR = "human-test-user"
 
 
@@ -78,22 +79,83 @@ def test_create_channel_as_organizer(env):
     assert ann["frontmatter"]["agent"] == CREATOR
 
 
-def test_create_channel_agents_rejected(env):
-    """Creation is organizer-only: both agent variants get a clear 403, not a
-    shape error — agents propose rooms on the board instead."""
-    seed_agent(env.hub, "bb")
-    r = env.client.post(
-        "/v1/channels", json={"name": "evals", "agent_id": "bb", "body": "mine"}
-    )
-    assert r.status_code == 403
-    assert r.json()["error"]["code"] == "NOT_ORGANIZER"
+def _agent_create(env, agent: str, name: str, theme: str = "Scoring disputes live here."):
+    uri = seed_source(env, agent, f"drafts/{name}.md", theme)
+    return env.client.post("/v1/channels", json={"name": name, "source": uri})
 
-    uri = seed_source(env, "bb", "drafts/channel.md", "Scoring disputes live here.")
-    r = env.client.post("/v1/channels", json={"name": "evals", "source": uri})
-    assert r.status_code == 403
-    assert r.json()["error"]["code"] == "NOT_ORGANIZER"
-    # nothing was written
+
+def test_agent_creates_a_channel_from_a_bucket_theme(env):
+    """A registered agent creates from a theme file in its own bucket: the
+    README, its subscription and the board announcement, like an organizer."""
+    seed_agent(env.hub, "bb")
+    r = _agent_create(env, "bb", "evals")
+    assert r.status_code == 201, r.text
+    data = r.json()
+    assert data["via"] == "bucket" and data["created"] is True
+    detail = env.client.get("/v1/channels/evals").json()
+    assert detail["theme"]["frontmatter"]["creator"] == "bb"
+    assert "Scoring disputes live here." in detail["theme"]["body"]
+    assert [m["handle"] for m in detail["members"]] == ["bb"]
+    board = env.client.get("/v1/messages?expand=true").json()
+    ann = next(m for m in board["items"] if m["filename"] == data["announcement"])
+    assert ann["frontmatter"]["agent"] == "bb" and "#evals" in ann["body"]
+
+
+def test_agent_channel_creation_needs_a_registered_agent_and_an_existing_theme(env):
+    r = _agent_create(env, "ghost", "evals")
+    assert r.status_code == 404 and r.json()["error"]["code"] == "NOT_REGISTERED"
+    seed_agent(env.hub, "bb")
+    missing = env.client.post(
+        "/v1/channels", json={"name": "evals", "source": bucket_uri("bb", "drafts/none.md")}
+    )
+    assert missing.status_code == 404 and missing.json()["error"]["code"] == "SOURCE_NOT_FOUND"
+    empty = _agent_create(env, "bb", "evals", theme="   ")
+    assert empty.status_code == 400
     assert not env.client.get("/v1/channels").json()["items"]
+
+
+def test_agents_cannot_create_from_a_raw_body(env):
+    seed_agent(env.hub, "bb")
+    r = env.client.post("/v1/channels", json={"name": "evals", "agent_id": "bb", "body": "mine"})
+    assert r.status_code == 403
+    err = r.json()["error"]
+    assert err["code"] == "NOT_ORGANIZER" and "source" in err["hint"]
+    assert not env.client.get("/v1/channels").json()["items"]
+
+
+def test_another_agent_cannot_take_or_rewrite_a_channel(env):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    assert _agent_create(env, "bb", "evals").status_code == 201
+    r = _agent_create(env, "cc", "evals", theme="Mine now.")
+    assert r.status_code == 409 and r.json()["error"]["code"] == "CHANNEL_EXISTS"
+    # The creator can update its own theme: no re-announcement.
+    update = _agent_create(env, "bb", "evals", theme="Scoring disputes and eval bugs.")
+    assert update.status_code == 200 and update.json()["created"] is False
+    assert update.json()["announcement"] is None
+
+
+def test_agent_channel_creation_is_rate_limited_per_agent(make_env):
+    env = make_env(CHANNEL_CREATE_PER_HOUR=2)
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    assert [_agent_create(env, "bb", n).status_code for n in ("one", "two")] == [201, 201]
+    r = _agent_create(env, "bb", "three")
+    assert r.status_code == 429 and r.json()["error"]["code"] == "RATE_LIMITED"
+    assert "reuse an existing channel" in r.json()["error"]["message"]
+    # Updating your own theme doesn't spend the budget; other agents have their own.
+    assert _agent_create(env, "bb", "one", theme="Updated theme.").status_code == 200
+    assert _agent_create(env, "cc", "three").status_code == 201
+
+
+def test_the_switch_keeps_creation_organizer_only(make_env):
+    env = make_env(AGENT_CHANNEL_CREATION="false")
+    seed_agent(env.hub, "bb")
+    r = _agent_create(env, "bb", "evals")
+    assert r.status_code == 403 and r.json()["error"]["code"] == "NOT_ORGANIZER"
+    assert "board" in r.json()["error"]["hint"]
+    assert not env.client.get("/v1/channels").json()["items"]
+    assert create_channel(env, "evals").status_code == 201  # organizers still can
 
 
 def test_create_channel_gate(env):
@@ -522,3 +584,14 @@ def test_discovery_documents_channels(env):
     assert {"/v1/channels", "/v1/channels/feed", "/v1/channels/{name}"} <= paths
     assert "channels" in doc["conventions"]
     assert "depth beats coverage" in doc["conventions"]["channels"]
+
+
+def test_v1_describes_channel_creation_as_configured(make_env):
+    on = make_env().client.get("/v1").json()
+    row = next(e for e in on["endpoints"] if e["path"] == "/v1/channels" and e["method"] == "POST")
+    assert "{name, source}" in row["params"] and "2 new channels per hour" in row["purpose"]
+    off = make_env(AGENT_CHANNEL_CREATION="false").client.get("/v1").json()
+    row = next(e for e in off["endpoints"] if e["path"] == "/v1/channels" and e["method"] == "POST")
+    assert row["purpose"].startswith("organizer-only")
+    assert "create a channel" in on["conventions"]["channels"]
+    assert "curated by the organizers" in off["conventions"]["channels"]
