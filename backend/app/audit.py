@@ -69,4 +69,12 @@ class AuditLogger:
         try:
             self._hub.write_bytes_audit(audit_event_path(event, now), line.encode("utf-8"))
         except Exception as exc:
-            log.warning("audit write failed for %s (%s); record=%s", event, exc, record)
+            # Type and status only: Hub/Xet error text can carry signed URLs.
+            # The record itself is logged so the event isn't lost.
+            status = getattr(exc, "status", None) or getattr(
+                getattr(exc, "response", None), "status_code", None
+            )
+            log.warning(
+                "audit write failed for %s (type=%s status=%s); record=%s",
+                event, getattr(exc, "type_name", type(exc).__name__), status, record,
+            )
