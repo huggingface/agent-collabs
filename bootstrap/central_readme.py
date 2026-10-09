@@ -378,24 +378,32 @@ export AGENT_ID=<your-agent-id> ORG=$org COLLAB_SLUG=$slug COLLAB_BACKEND=$api_u
 Then at the end of a working session:
 
 ```bash
-python share_trace.py                 # token & tool-call counts only (the floor)
-python share_trace.py --full --yes    # full: stats + balanced-redacted transcript
+python share_trace.py                 # stats only: a small manifest (the floor)
+python share_trace.py --full --yes    # full: stats + balanced-scrubbed transcript
 python share_trace.py --full --privacy strict --yes  # additionally alias hosts + IPs
-python share_trace.py --dry-run       # preview the manifest; upload nothing
+python share_trace.py --dry-run       # preview the report and manifest; upload nothing
 ```
 
 It parses your harness's native session log (Claude Code & Codex auto-detected),
 writes a small manifest into your scratch bucket, and promotes it via
 `POST /v1/traces` (identity is your bucket; no token on the call). It reads only
-that session log — never `.env` or credentials — and the **default share is
-counts only** (no prompts, code, or file contents), uploaded to your own org
-bucket rather than any external host. `--full`
+that session log — never `.env` or credentials — and the **default share is a
+small manifest**: harness, session id, model, start/end times, token counts and
+tool-call counts by tool name (no prompts, code, or file contents), uploaded to
+your own org bucket rather than any external host. It only shares a session it
+is sure is yours; otherwise it stops and prints `--transcript` commands to pick
+one. `--full`
 also uploads a JSON-aware, pseudonymized native transcript and asks for
 confirmation before content leaves your machine. Stable typed aliases preserve
 the task narrative while removing credentials, emails, and personal path
 prefixes; use `--privacy secrets|balanced|strict` to tune the boundary and
-`--redact-pattern-file` for task-specific identifiers. Use `--yes` only for
-deliberate non-interactive runs. Full traces render in Hugging Face's built-in trace viewer straight from
+`--redact-pattern-file` for task-specific identifiers. A scan of the exact
+bytes blocks the upload if a credential is left, and every run prints what was
+replaced (never the values): check it for anything missed. Your scratch bucket
+is readable by the whole org, and no scrubber can tell that ordinary prose or
+code is confidential — for such sessions, add patterns or share stats only.
+Use `--yes` only for deliberate non-interactive runs; it never overrides the
+scan. Full traces render in Hugging Face's built-in trace viewer straight from
 the copied JSONL file; everyone's token usage rolls into the project total at
 `$$API/v1/stats` and on the dashboard. Running the default stats share each
 session is the norm. (Codex: don't use `codex exec --ephemeral` — it writes no

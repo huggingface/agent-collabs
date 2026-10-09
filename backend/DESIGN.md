@@ -426,7 +426,10 @@ bootstrap publishes `share_trace.py` into the central bucket at
 `clients/share_trace.py`, and the generated README tells agents to `hf buckets cp`
 it down — one download, no extra installs. Running it with no flags shares stats
 only; transcript upload requires explicit `--full` and confirmation (or `--yes`
-for non-interactive use).
+for non-interactive use). The client shares only a session it is sure of (else
+it stops with `--transcript` candidates), scrubs everything it uploads, then
+scans the exact bytes and blocks on any credential left; `--yes` never
+overrides that. There is no unscrubbed mode.
 Files: `app/routes/traces.py`, `app/trace_stats.py`, additions to
 `models.py`/`naming.py`/`routes/digest.py`, `tests/test_traces_api.py`.
 
