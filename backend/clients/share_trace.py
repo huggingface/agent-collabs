@@ -134,6 +134,7 @@ def _cc_read(path: Path) -> dict:
     responses: dict = {}  # message.id (or a per-line key if absent) -> usage
     tools: dict[str, int] = {}
     seen_tools: set = set()
+    models: set[str] = set()
     model = first_ts = last_ts = None
     session_id = None  # from the records; never the file name
 
@@ -149,6 +150,7 @@ def _cc_read(path: Path) -> dict:
         msg = rec.get("message") or {}
         if msg.get("model"):
             model = msg["model"]
+            models.add(model)
         key = msg.get("id") or ("line", len(responses))
         responses[key] = msg.get("usage") or responses.get(key) or {}
         for block in msg.get("content") or []:
@@ -165,7 +167,7 @@ def _cc_read(path: Path) -> dict:
         usage = {k: sum(_int(u.get(src)) or 0 for u in responses.values()) for k, src in _CC_USAGE_KEYS}
         usage["total_tokens"] = sum(usage.values())
     return {"usage": usage, "requests": len(responses), "tools": tools, "model": model,
-            "session_id": session_id, "first_ts": first_ts, "last_ts": last_ts}
+            "models": models, "session_id": session_id, "first_ts": first_ts, "last_ts": last_ts}
 
 
 def adapter_claude_code(log_path: Path) -> dict:
@@ -182,21 +184,38 @@ def adapter_claude_code(log_path: Path) -> dict:
     starts = [log["first_ts"] for log in logs if log["first_ts"]]
     ends = [log["last_ts"] for log in logs if log["last_ts"]]
     extensions = {"api_requests": sum(log["requests"] for log in logs)}
+    # A log with replies but no usage is unmeasured, not zero; a log with no
+    # replies is a measured zero. Totals cover measured logs only (a floor),
+    # and the unmeasured count makes the backend record the session partial.
+    unmeasured = [log for log in subs if log["requests"] and not log["usage"]]
     if subs:
         extensions["subagent_sessions"] = len(subs)
         extensions["subagent_tokens"] = sum((log["usage"] or {}).get("total_tokens", 0) for log in subs)
+    if unmeasured:
+        extensions["subagent_sessions_unmeasured"] = len(unmeasured)
+    # The manifest model is where the stats attribute ALL the counted tokens,
+    # so with subagents it names one model only if every measured log used
+    # that model alone. Otherwise it is "mixed" (no per-model split here); the
+    # parent's model stays as a description.
+    measured = [log for log in logs if log["usage"]]
+    models = set().union(*(log["models"] for log in measured)) if measured else set()
+    mixed = bool(subs) and (len(models) > 1 or any(not log["models"] for log in measured))
+    if mixed and main["model"]:
+        extensions["main_model"] = main["model"]
 
     fields: dict = {
         "harness": "claude-code",
         "session_id": main["session_id"],  # never the file name
-        "model": main["model"],
+        "model": "mixed" if mixed else main["model"],
         "started_at": min(starts) if starts else None,
         "ended_at": max(ends) if ends else None,
         "activity": {"tool_calls": sum(tools.values()), "tool_calls_by_name": tools},
         "extensions": extensions,
     }
-    usages = [log["usage"] for log in logs if log["usage"]]
-    if usages:
+    # The parent log must be measured: subagent tokens never stand in for it
+    # (no usage here stops the share, as before subagents were counted).
+    if main["usage"]:
+        usages = [log["usage"] for log in logs if log["usage"]]
         fields["usage"] = {k: sum(u[k] for u in usages) for k in usages[0]}
     return fields
 

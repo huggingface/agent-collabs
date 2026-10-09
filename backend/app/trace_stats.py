@@ -124,13 +124,21 @@ def validate_trace_manifest(fm: dict) -> None:
 
 def completeness(fm: dict) -> str:
     """`full` iff a known harness delivered the enforced set (a numeric
-    total_tokens AND a numeric tool_calls); else `partial`. Recorded on the
-    manifest so the library/aggregate can surface adapter drift."""
+    total_tokens AND a numeric tool_calls) and measured every log it counted;
+    else `partial`. Recorded on the manifest so the library/aggregate can
+    surface adapter drift. A Claude Code session whose subagent logs had no
+    usage (extensions.subagent_sessions_unmeasured) has only a floor."""
     usage = _mapping(fm.get("usage"))
     activity = _mapping(fm.get("activity"))
     has_tokens = _int(usage.get("total_tokens")) is not None
     has_tools = _int(activity.get("tool_calls")) is not None
-    if str(fm.get("harness", "")) in KNOWN_FULL_HARNESSES and has_tokens and has_tools:
+    unmeasured = _int(_mapping(fm.get("extensions")).get("subagent_sessions_unmeasured")) or 0
+    if (
+        str(fm.get("harness", "")) in KNOWN_FULL_HARNESSES
+        and has_tokens
+        and has_tools
+        and unmeasured == 0
+    ):
         return "full"
     return "partial"
 
