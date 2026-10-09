@@ -416,3 +416,16 @@ def test_a_refused_download_is_the_deployment_503(env, monkeypatch, caplog, exc)
     assert "HTTP 403" in err["message"] and "tell the organizer" in err["message"]
     assert "status=403)" in caplog.text
     assert MARKER not in caplog.text and MARKER not in r.text
+
+
+def test_jobs_registration_read_failure_is_not_a_missing_registration(env):
+    from app.errors import NotRegistered
+    from app.routes.jobs import _registered_hf_user
+
+    seed_agent(env.hub, "agent-1")
+    assert _registered_hf_user(env.hub, "agent-1") == "test-user"
+    env.hub.fail_next_read("agents/agent-1.md")
+    with pytest.raises(HfHubHTTPError):  # a 503 at the app boundary, not 404
+        _registered_hf_user(env.hub, "agent-1")
+    with pytest.raises(NotRegistered):
+        _registered_hf_user(env.hub, "agent-9")
