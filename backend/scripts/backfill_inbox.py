@@ -71,7 +71,7 @@ def main() -> int:
     )
     failed_downloads = len(messages) - len(raw_by_path)
     if failed_downloads:
-        print(f"WARNING: {failed_downloads} message(s) failed to download; re-run to cover them")
+        print(f"WARNING: {failed_downloads} listed message(s) vanished before download; re-run to cover them")
 
     planned: list[tuple[bytes, str]] = []
     unparseable = 0

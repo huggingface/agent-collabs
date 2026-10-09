@@ -287,7 +287,26 @@ folder:
   polling storm costs at most one bucket listing per TTL window.
 - **Content cache** — parsed `{frontmatter, body}` keyed by the listing's
   `xet_hash` (byte-identical inbox copies share one entry), LRU-bounded by
-  `CONTENT_CACHE_MAX_BYTES`; cold misses are batch-downloaded.
+  `CONTENT_CACHE_MAX_BYTES`; cold misses are batch-downloaded, single-flight
+  per folder (after a restart N reconnecting watchers cost one download).
+
+**Storage failures never pass for data.** A bucket listing either completes or
+fails (`ListingFailed`; an error on page 3 discards pages 1–2). A failed
+listing of a folder that has listed before keeps serving the cached listing
+and retries after one TTL; a folder that has never listed has nothing to fall
+back on, so the request fails with `503 STORAGE_UNAVAILABLE`. A partial
+listing is never cached — it would hide files for a TTL and let a watcher's
+`after=` cursor step past a missing message for good. An empty listing is
+therefore the truth (the folder is empty). Likewise a batch download returns
+only files that genuinely do not exist as absent; a failed request is retried
+once, then 503s, rather than 404ing a file that exists.
+
+**Warm-up:** at startup a background thread fills `agents`, `message_board`,
+`results`, `broadcasts` and `channels` (retrying a failing folder every 5 s).
+`/v1/healthz` reports `warm: false` until it completes — still 200, so the
+Space is not restarted for being cold; `init_challenge.py` waits for
+`warm: true`. Its `read_model` gauges are listed in
+[OBSERVABILITY.md](OBSERVABILITY.md#backend-health-v1healthz).
 
 The Space is the only writer, so API writes are inserted synchronously
 (write-through overlay) — read-after-write is exact regardless of TTL. The TTL

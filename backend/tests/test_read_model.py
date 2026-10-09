@@ -1,7 +1,11 @@
 import json
+import threading
+
+import pytest
 
 from app.config import Settings
 from app.frontmatter import serialise
+from app.hub import DownloadFailed, ListingFailed
 from app.read_model import ReadModel
 from fakes import FakeHub, seed_message
 
@@ -70,13 +74,100 @@ def test_write_through_is_visible_without_a_new_listing():
     assert hub.list_calls == listed  # TTL untouched — served from the overlay
 
 
-def test_transient_empty_listing_keeps_cached_entries():
+def test_failed_listing_keeps_cached_entries():
     rm, hub, clock, s = make_rm()
     seed_message(hub, "20260601-120000-000", "agent-1", "hello")
     assert len(rm.records("message_board")) == 1
     hub.fail_listings = True
     clock.t += s.listing_ttl_s + 1
-    assert len(rm.records("message_board")) == 1  # nothing is ever deleted
+    assert len(rm.records("message_board")) == 1  # cached truth, not []
+    assert rm._folder("message_board").last_error is not None
+    hub.fail_listings = False
+    clock.t += s.listing_ttl_s + 1
+    rm.records("message_board")
+    assert rm._folder("message_board").last_error is None  # cleared on success
+
+
+def test_failed_listing_backs_off_one_ttl():
+    rm, hub, clock, s = make_rm()
+    rm.records("message_board")
+    hub.fail_listings = True
+    clock.t += s.listing_ttl_s + 1
+    rm.records("message_board")
+    listed = hub.list_calls
+    rm.records("message_board")
+    assert hub.list_calls == listed  # an outage is not one listing per read
+
+
+def test_failed_listing_on_a_cold_folder_raises():
+    rm, hub, _clock, _s = make_rm()
+    seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    hub.fail_next_listing("message_board")
+    with pytest.raises(ListingFailed):
+        rm.records("message_board")
+    assert len(rm.records("message_board")) == 1  # the next read retries
+
+
+def test_empty_listing_is_the_truth_once_failures_are_explicit():
+    rm, hub, clock, s = make_rm()
+    fn = seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    assert len(rm.records("message_board")) == 1
+    del hub.buckets[s.central_bucket][f"message_board/{fn}"]  # admin removal
+    clock.t += s.listing_ttl_s + 1
+    assert rm.records("message_board") == []
+
+
+def test_partial_listing_is_not_cached_and_a_cursor_does_not_skip():
+    """A listing interrupted mid-way must not replace the folder: here it
+    would have shown m3 without m2, a watcher would advance its after= cursor
+    to m3, and m2 would be lost to it for good once the full listing
+    returned."""
+    rm, hub, clock, s = make_rm()
+    m1 = seed_message(hub, "20260601-120000-000", "agent-1", "one")
+    assert [r.filename for r in rm.records("message_board")] == [m1]
+    cached = dict(rm._folder("message_board").files)
+
+    seed_message(hub, "20260603-120000-000", "agent-1", "three")
+    m2 = seed_message(hub, "20260602-120000-000", "agent-1", "two")  # listed last
+    hub.partial_listing("message_board", drop=1)  # the page holding m2 fails
+    clock.t += s.listing_ttl_s + 1
+
+    def after(cursor):
+        return [r.filename for r in rm.records("message_board") if r.filename > cursor]
+
+    assert after(m1) == []  # the cached truth, not "m3 but no m2"
+    assert rm._folder("message_board").files == cached
+    clock.t += s.listing_ttl_s + 1
+    assert after(m1)[0] == m2  # nothing skipped once the listing completes
+
+
+def test_failed_batch_download_raises_rather_than_dropping_records():
+    rm, hub, _clock, _s = make_rm()
+    fn = seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    hub.fail_next_read("message_board/")
+    with pytest.raises(DownloadFailed):
+        rm.record("message_board", fn)  # not None, which would be a false 404
+    assert rm.record("message_board", fn).body.strip() == "hello"
+
+
+def test_concurrent_cold_reads_share_one_batch_download():
+    """After a restart every watcher reconnects at once; N cold readers of a
+    folder must cost one batch download, not N."""
+    rm, hub, _clock, _s = make_rm()
+    for i in range(3):
+        seed_message(hub, f"2026060{i + 1}-120000-000", "agent-1", f"msg {i}")
+    hub.latency_s = 0.2
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(rm.records("message_board")))
+        for _ in range(2)
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert [len(r) for r in results] == [3, 3]
+    assert hub.list_calls == 1 and hub.download_calls == 1
 
 
 def test_lru_eviction_bounds_memory_but_never_drops_results():
@@ -254,3 +345,66 @@ def test_updates_records_leaves_other_views_untagged():
     hub.seed(f"inbox/agent-1/{fn}", serialise({"agent": "agent-2"}, "ping @agent-1"))
     assert rm.updates_records("agent-1")[0].reasons == ["mention"]
     assert rm.inbox_records("agent-1")[0].reasons is None
+
+
+# ── health stats during recovery; single-flight for record() ────────
+
+
+class _RecoveringFolder:
+    """A folder whose listing recovers right after stats() first looks at it:
+    every later read of last_error sees the cleared value."""
+
+    def __init__(self, err):
+        self._err, self.reads = err, 0
+
+    @property
+    def last_error(self):
+        self.reads += 1
+        return self._err if self.reads == 1 else None
+
+
+def test_stats_reads_each_listing_error_once():
+    rm, _hub, clock, _s = make_rm()
+    rm._folders["message_board"] = _RecoveringFolder(("type=HfHubHTTPError status=503", clock()))
+    errors = rm.stats()["listing_errors"]  # a re-read would see None and crash
+    assert errors["message_board"]["error"] == "type=HfHubHTTPError status=503"
+
+
+def _hold_first_download(hub):
+    """Block the first download_many until `release` is set; count all calls."""
+    entered, release = threading.Event(), threading.Event()
+    download = hub.download_many
+    calls = []
+
+    def held(bucket, paths):
+        calls.append(list(paths))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return download(bucket, paths)
+
+    hub.download_many = held
+    return entered, release, calls
+
+
+@pytest.mark.parametrize("first", ["record", "folder"])
+def test_a_cold_record_read_waits_for_an_inflight_fetch(first):
+    """Two cold reads of one message, or a read during the folder's warm-up
+    fetch, cost one download: the second waits, then hits the cache."""
+    rm, hub, _clock, _s = make_rm()
+    fn = seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    entered, release, calls = _hold_first_download(hub)
+    results = {}
+    start = (lambda: rm.record("message_board", fn)) if first == "record" else (lambda: rm.records("message_board"))
+    a = threading.Thread(target=lambda: results.update(a=start()))
+    a.start()
+    assert entered.wait(5)
+    b = threading.Thread(target=lambda: results.update(b=rm.record("message_board", fn)))
+    b.start()
+    b.join(0.3)
+    assert b.is_alive()  # waiting on the in-flight fetch, not downloading
+    release.set()
+    a.join(5)
+    b.join(5)
+    assert len(calls) == 1
+    assert results["b"].body.strip() == "hello"

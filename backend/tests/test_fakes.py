@@ -4,6 +4,7 @@ import pytest
 from huggingface_hub.errors import HfHubHTTPError
 
 from app.config import Settings
+from app.hub import DownloadFailed, ListingFailed
 from fakes import FakeHub, seed_message
 
 
@@ -87,9 +88,9 @@ def test_fail_next_read_flattens_hub_errors_to_missing_in_source_reads():
         hub.read_text(uri)
 
 
-def test_fail_next_read_drops_the_whole_download_many_batch():
-    """HubClient.download_many logs a failed batch and leaves its entries out
-    of the result; other exceptions propagate."""
+def test_fail_next_read_fails_the_whole_download_many_batch():
+    """HubClient.download_many raises DownloadFailed once its retry is spent,
+    never a subset of the batch."""
     hub = make_hub()
     paths = []
     for i in range(2):
@@ -100,12 +101,15 @@ def test_fail_next_read_drops_the_whole_download_many_batch():
     hub.fail_next_read("results/")  # matches none of the batch
     assert len(hub.download_many(central, paths)) == 2
     hub.fail_next_read(paths[1])
-    assert hub.download_many(central, paths) == {}
+    with pytest.raises(DownloadFailed):
+        hub.download_many(central, paths)
     assert len(hub.download_many(central, paths)) == 2  # toggle reset
 
     hub.fail_next_read("message_board/", RuntimeError("injected"))
-    with pytest.raises(RuntimeError, match="injected"):
+    with pytest.raises(DownloadFailed) as caught:
         hub.download_many(central, paths)
+    assert caught.value.type_name == "RuntimeError"  # its type, never its text
+    assert "injected" not in str(caught.value)
 
 
 def test_fail_next_read_is_not_consumed_by_an_empty_batch():
@@ -136,23 +140,33 @@ def test_latency_applies_to_every_read(monkeypatch):
     assert sleeps == [0.5] * 5
 
 
-@pytest.mark.parametrize("drop, kept", [(0, 3), (1, 2), (3, 0), (4, 0), (5, 0)])
-def test_partial_listing_drops_last_n_then_resets(drop, kept):
+@pytest.mark.parametrize("drop", [1, 3, 4, 5])
+def test_partial_listing_raises_instead_of_returning_a_prefix_then_resets(drop):
     hub = make_hub()
     for i in range(3):
         seed_message(hub, f"2026060{i + 1}-100000-000", "agent-1", f"msg {i}")
 
     hub.partial_listing("message_board", drop=drop)
-    assert len(hub.list_central_dir("message_board")) == kept
+    with pytest.raises(ListingFailed):
+        hub.list_central_dir("message_board")
 
     assert len(hub.list_central_dir("message_board")) == 3  # toggle reset
 
 
-def test_fail_next_listing_returns_empty_then_resets():
+def test_partial_listing_dropping_nothing_is_the_full_listing():
+    hub = make_hub()
+    for i in range(3):
+        seed_message(hub, f"2026060{i + 1}-100000-000", "agent-1", f"msg {i}")
+    hub.partial_listing("message_board", drop=0)
+    assert len(hub.list_central_dir("message_board")) == 3
+
+
+def test_fail_next_listing_raises_then_resets():
     hub = make_hub()
     seed_message(hub, "20260601-100000-000", "agent-1", "hello")
 
     hub.fail_next_listing("message_board")
-    assert hub.list_central_dir("message_board") == []
+    with pytest.raises(ListingFailed):
+        hub.list_central_dir("message_board")
 
     assert len(hub.list_central_dir("message_board")) == 1  # toggle reset

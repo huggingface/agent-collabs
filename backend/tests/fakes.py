@@ -9,7 +9,14 @@ from huggingface_hub.errors import HfHubHTTPError
 
 from app.config import Settings
 from app.frontmatter import serialise
-from app.hub import HubIdentity, HubUnreachable, ListedFile, OrgMemberRole
+from app.hub import (
+    DownloadFailed,
+    HubIdentity,
+    HubUnreachable,
+    ListedFile,
+    ListingFailed,
+    OrgMemberRole,
+)
 from app.naming import SourceURI, parse_source_uri
 
 
@@ -88,18 +95,21 @@ class FakeHub:
         omitted) fails with `exc` (default: an HfHubHTTPError). Each read
         surfaces it like its HubClient counterpart: read_central_text and
         read_bytes flatten an HfHubHTTPError to FileNotFoundError, the optional
-        and audit reads propagate it, and download_many drops the whole batch
-        on an HfHubHTTPError. Any other `exc` is raised as is."""
+        and audit reads propagate it, and download_many raises DownloadFailed
+        (from `exc`), as HubClient does once its retry is spent. Any other
+        `exc` is raised as is."""
         self._fail_read = (path_substring, exc)
 
     def partial_listing(self, folder: str, drop: int = 1) -> None:
-        """The next listing of `folder` omits its last `drop` entries, as if
-        a list_bucket_tree generator was interrupted mid-page."""
+        """The next listing of `folder` is interrupted after all but its last
+        `drop` entries, as if a list_bucket_tree page failed mid-way. Like
+        HubClient._list, the pages already read are discarded and the call
+        raises ListingFailed — a partial listing is never returned."""
         self._partial_listing = (folder, drop)
 
     def fail_next_listing(self, folder: str) -> None:
-        """The next listing of `folder` returns [] — mirrors how HubClient._list
-        swallows a list_bucket_tree failure into an empty page."""
+        """The next listing of `folder` raises ListingFailed, as HubClient._list
+        does for any list_bucket_tree failure."""
         self._fail_listing_folder = folder
 
     def _maybe_sleep(self) -> None:
@@ -141,11 +151,14 @@ class FakeHub:
         self._maybe_sleep()
         if self._fail_listing_folder == prefix:
             self._fail_listing_folder = None
-            return []
+            raise ListingFailed(_http_error("simulated listing failure")) from None
         if self._partial_listing is not None and self._partial_listing[0] == prefix:
             _, drop = self._partial_listing
             self._partial_listing = None
-            return files[: max(len(files) - drop, 0)]
+            if drop:
+                # Interrupted after all but `drop` entries: HubClient discards
+                # the pages it read and raises.
+                raise ListingFailed(_http_error("simulated mid-listing failure")) from None
         return files
 
     # ── HubClient surface used by the app ────────────────────────────
@@ -165,20 +178,21 @@ class FakeHub:
     def list_central_dir(self, prefix: str) -> list[ListedFile]:
         self.list_calls += 1
         if self.fail_listings:
-            return []  # the real hub flattens listing errors to []
+            raise ListingFailed(_http_error("simulated listing outage")) from None
         return self._apply_listing_toggles(prefix, self._listed(self._central(), prefix))
 
     def list_bucket_dir(self, bucket: str, prefix: str) -> list[ListedFile]:
+        # A missing bucket lists as [] (HubClient maps only a 404 to []);
+        # any other failure raises, as there.
         files = self._listed(self.buckets.get(bucket, {}), prefix)
         return self._apply_listing_toggles(prefix, files)
 
     def download_many(self, bucket: str, remote_paths: list[str]) -> dict[str, bytes]:
         self.download_calls += 1
         exc = self._take_read_failure(*remote_paths)
-        if isinstance(exc, HfHubHTTPError):
-            return {}  # HubClient logs a failed batch and leaves its entries out
         if exc is not None:
-            raise exc
+            # HubClient retries a failed chunk once, then raises DownloadFailed.
+            raise DownloadFailed(exc) from None
         files = self.buckets.get(bucket, {})
         return {p: files[p] for p in remote_paths if p in files}
 

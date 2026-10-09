@@ -356,3 +356,11 @@ def test_partial_promote_does_not_claim_nothing_was_written(env, monkeypatch):
     assert "traces/agent-1/sess-1/session.jsonl" in _central(env)
     err = r.json()["error"]
     assert "nothing was written" not in err["message"] and "partly applied" in err["message"]
+
+
+def test_failed_scratch_listing_is_503_not_a_missing_log(env):
+    src = _write_bundle(env, manifest=_manifest(native_log_file="session.jsonl"), log=b"{}\n")
+    env.hub.fail_next_listing("traces/sess-1")
+    r = env.client.post("/v1/traces", json={"source": src, "share": "full"})
+    assert r.status_code == 503 and r.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
+    assert "traces/agent-1/sess-1/session.jsonl" not in _central(env)
