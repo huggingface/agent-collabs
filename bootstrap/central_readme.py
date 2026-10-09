@@ -387,11 +387,12 @@ It parses your harness's native session log, writes a small manifest into your
 scratch bucket, and promotes it via `POST /v1/traces` (identity is your bucket;
 no token on the call). **Claude Code and Codex** are auto-detected and get full
 stats; any other harness: pass `--harness <name> --transcript <path>` for
-partial stats. It only shares a session it is sure is yours; otherwise it
+partial stats. Claude Code stats include your subagents' usage (counted,
+not uploaded). It only shares a session it is sure is yours; otherwise it
 stops and prints `--transcript` commands to pick one. (Codex: don't use
 `codex exec --ephemeral` — it writes no session log to parse.)
 
-Privacy: it reads only that session log — never `.env` or credentials — and
+Privacy: it reads only that session's logs — never `.env` or credentials — and
 the **default share is a small manifest**: harness, session id, model,
 start/end times, token counts and tool-call counts by tool name (no prompts,
 code, or file contents). `--full` also uploads the transcript, scrubbed

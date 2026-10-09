@@ -817,3 +817,129 @@ def test_scan_accepts_placeholder_url_credentials_only():
     assert st.scan_upload({"t": clean})[0] == []
     hits, _ = st.scan_upload({"t": "curl https://<REDACTED:USERNAME_1>:hunter2@db.example/app"})
     assert [(h["category"], h["masked"]) for h in hits] == [("PASSWORD", "...(7 chars)")]
+
+
+def _cc_line(mid, tokens, *, tool=None, ts="2026-06-29T00:00:00Z", model="m"):
+    """A Claude Code assistant line; tokens=None writes no usage at all."""
+    content = [tool] if tool else [{"type": "text"}]
+    msg = {"id": mid, "content": content}
+    if model:
+        msg["model"] = model
+    if tokens is not None:
+        msg["usage"] = {"input_tokens": tokens, "output_tokens": 0}
+    return json.dumps({"type": "assistant", "sessionId": "s", "timestamp": ts, "message": msg})
+
+
+def test_claude_code_counts_subagent_logs(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text(_cc_line("m1", 100, ts="2026-06-29T01:00:00Z") + "\n")
+    subs = tmp_path / "s" / "subagents"
+    subs.mkdir(parents=True)
+    bash = {"type": "tool_use", "id": "tu1", "name": "Bash"}
+    (subs / "agent-a.jsonl").write_text("\n".join([
+        _cc_line("a1", 10, tool=bash, ts="2026-06-29T00:30:00Z"),
+        _cc_line("a1", 10, tool=bash),  # same response, written twice
+        _cc_line("a2", 20),
+    ]) + "\n")
+    (subs / "agent-b.jsonl").write_text(_cc_line("b1", 5, ts="2026-06-29T02:00:00Z") + "\n")
+    (subs / "agent-b.meta.json").write_text('{"agentType": "Explore"}')
+
+    fields = st.adapter_claude_code(main)
+    assert fields["usage"]["total_tokens"] == 135
+    assert fields["activity"]["tool_calls_by_name"] == {"Bash": 1}
+    assert fields["extensions"] == {"api_requests": 4, "subagent_sessions": 2, "subagent_tokens": 35}
+    assert (fields["started_at"], fields["ended_at"]) == ("2026-06-29T00:30:00Z", "2026-06-29T02:00:00Z")
+    assert fields["session_id"] == "s"
+
+
+def test_claude_code_without_subagents_is_unchanged(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text(_cc_line("m1", 100) + "\n")
+    fields = st.adapter_claude_code(main)
+    assert fields["usage"]["total_tokens"] == 100
+    assert fields["extensions"] == {"api_requests": 1}
+
+
+def _cc_session(tmp_path, main_lines, *subagents):
+    main = tmp_path / "s.jsonl"
+    main.write_text("\n".join(main_lines) + "\n")
+    subs = tmp_path / "s" / "subagents"
+    subs.mkdir(parents=True, exist_ok=True)
+    for i, lines in enumerate(subagents):
+        (subs / f"agent-{i}.jsonl").write_text("\n".join(lines) + "\n")
+    return main
+
+
+def test_subagents_on_other_models_make_the_session_mixed(tmp_path):
+    main = _cc_session(tmp_path, [_cc_line("p", 100, model="parent-model")],
+                       [_cc_line("c", 50, model="child-model")])
+    fields = st.adapter_claude_code(main)
+    assert fields["model"] == "mixed"  # never all 150 tokens on the parent's model
+    assert fields["extensions"]["main_model"] == "parent-model"
+    assert fields["usage"]["total_tokens"] == 150  # still all on this agent's session
+
+
+def test_subagents_on_the_parents_model_keep_it(tmp_path):
+    main = _cc_session(tmp_path, [_cc_line("p", 100)], [_cc_line("c", 50)])
+    fields = st.adapter_claude_code(main)
+    assert fields["model"] == "m" and "main_model" not in fields["extensions"]
+
+
+def test_a_session_without_subagents_keeps_its_model_handling(tmp_path):
+    main = tmp_path / "s.jsonl"
+    main.write_text(_cc_line("p", 100, model=None) + "\n")
+    assert st.adapter_claude_code(main)["model"] is None  # not "mixed"
+
+
+def test_an_unmeasured_subagent_is_counted_as_missing_not_zero(tmp_path):
+    main = _cc_session(tmp_path, [_cc_line("p", 100)],
+                       [_cc_line("c1", 50)], [_cc_line("c2", None)])
+    fields = st.adapter_claude_code(main)
+    assert fields["usage"]["total_tokens"] == 150  # the measured floor
+    assert fields["extensions"]["subagent_tokens"] == 50
+    assert fields["extensions"]["subagent_sessions_unmeasured"] == 1
+
+
+def test_genuine_zero_subagents_are_measured(tmp_path):
+    user_only = json.dumps({"type": "user", "sessionId": "s", "message": {"content": "hi"}})
+    main = _cc_session(tmp_path, [_cc_line("p", 100)], [user_only], [_cc_line("c", 0)])
+    fields = st.adapter_claude_code(main)
+    assert fields["usage"]["total_tokens"] == 100
+    assert fields["extensions"]["subagent_tokens"] == 0
+    assert "subagent_sessions_unmeasured" not in fields["extensions"]
+
+
+def test_an_unmeasured_parent_is_not_hidden_by_subagent_tokens(home, monkeypatch, tmp_path):
+    main = _cc_session(tmp_path, [_cc_line("p", None)], [_cc_line("c", 50)])
+    assert "usage" not in st.adapter_claude_code(main)
+    with pytest.raises(SystemExit, match="did not produce both usage.total_tokens"):
+        _run(monkeypatch, "--harness", "claude-code", "--transcript", str(main), "--dry-run")
+
+
+def test_an_unmeasured_subagent_does_not_decide_the_model(tmp_path):
+    # Its tokens aren't counted, so its missing model can't make the counted
+    # tokens "mixed".
+    main = _cc_session(tmp_path, [_cc_line("p", 100)], [_cc_line("c", None, model=None)])
+    assert st.adapter_claude_code(main)["model"] == "m"
+
+
+def test_a_measured_response_without_a_model_makes_the_session_mixed(tmp_path):
+    # One child log with a known-model response and a measured response that
+    # names no model: its tokens can't be credited to model-a.
+    main = _cc_session(
+        tmp_path,
+        [_cc_line("p", 100, model="model-a")],
+        [_cc_line("c1", 10, model="model-a"), _cc_line("c2", 20, model=None)],
+    )
+    fields = st.adapter_claude_code(main)
+    assert fields["model"] == "mixed"
+    assert fields["extensions"]["main_model"] == "model-a"
+    assert fields["usage"]["total_tokens"] == 130  # still all on this agent's session
+
+
+def test_zero_token_replies_do_not_decide_the_model(tmp_path):
+    # Claude Code's local `<synthetic>` replies report zero tokens: nothing to
+    # attribute, so they don't make a single-model session "mixed".
+    main = _cc_session(tmp_path, [_cc_line("p", 100), _cc_line("x", 0, model="<synthetic>")],
+                       [_cc_line("c", 10), _cc_line("y", 0, model=None)])
+    assert st.adapter_claude_code(main)["model"] == "m"

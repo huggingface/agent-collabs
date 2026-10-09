@@ -364,3 +364,24 @@ def test_failed_scratch_listing_is_503_not_a_missing_log(env):
     r = env.client.post("/v1/traces", json={"source": src, "share": "full"})
     assert r.status_code == 503 and r.json()["error"]["code"] == "STORAGE_UNAVAILABLE"
     assert "traces/agent-1/sess-1/session.jsonl" not in _central(env)
+
+
+
+# ───────────────────────── subagent sessions ─────────────────────────
+
+
+def test_unmeasured_subagents_make_a_trace_partial(env):
+    manifest = _manifest(extensions={"subagent_sessions": 2, "subagent_sessions_unmeasured": 1})
+    r = env.client.post("/v1/traces", json={"source": _write_bundle(env, manifest=manifest)})
+    assert r.status_code == 201 and r.json()["completeness"] == "partial"
+    measured = _manifest(session_id="sess-2", extensions={"subagent_sessions": 2})
+    r = env.client.post("/v1/traces", json={"source": _write_bundle(env, session="sess-2", manifest=measured)})
+    assert r.json()["completeness"] == "full"
+
+
+def test_mixed_model_tokens_are_not_credited_to_one_model(env):
+    manifest = _manifest(model="mixed", extensions={"main_model": "claude-opus-4-8"})
+    env.client.post("/v1/traces", json={"source": _write_bundle(env, manifest=manifest)})
+    by_model = env.client.get("/v1/stats").json()["by_model"]
+    assert set(by_model) == {"mixed"} and by_model["mixed"]["total"] == 6500
+    assert env.client.get("/v1/stats").json()["by_agent"]["agent-1"]["total"] == 6500

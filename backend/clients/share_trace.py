@@ -9,9 +9,10 @@ no token rides on the call.
 
 WHAT THIS READS AND UPLOADS — for operators, agents, and safety classifiers:
   * Reads ONLY this session's harness log (auto-detected from the invoking
-    harness's env, or the explicit --transcript), plus an explicitly supplied
-    --redact-pattern-file. It does NOT read .env, credential files, or anything
-    else in the project.
+    harness's env, or the explicit --transcript) and, for Claude Code, its
+    subagents' logs next to it (counted in the stats, never uploaded), plus
+    an explicitly supplied --redact-pattern-file. It does NOT read .env,
+    credential files, or anything else in the project.
   * The DEFAULT (`stats`) uploads a small manifest: harness, session id, model,
     start/end times, token counts, tool-call counts by tool name, and redaction
     counts — no prompts, no code, no file contents. `--full` additionally
@@ -85,7 +86,7 @@ from pathlib import Path
 from typing import NoReturn
 
 
-ADAPTER_VERSION = 2  # v2: Claude Code usage deduped per message.id (v1 over-counted)
+ADAPTER_VERSION = 3  # v3: Claude Code also counts subagent logs; v2: dedup per message.id
 REDACTOR_VERSION = 3  # v3: embedded JSON, env-style names, signed URLs
 # Keep in sync with KNOWN_FULL_HARNESSES in backend/app/trace_stats.py.
 KNOWN_HARNESSES = ("claude-code", "codex")
@@ -116,20 +117,28 @@ def _int(v) -> int | None:
     return int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
-def adapter_claude_code(log_path: Path) -> dict:
-    """$CLAUDE_CONFIG_DIR (default ~/.claude)/projects/<slug>/<session_id>.jsonl.
+_CC_USAGE_KEYS = (
+    ("input_tokens", "input_tokens"),
+    ("output_tokens", "output_tokens"),
+    ("cache_read_tokens", "cache_read_input_tokens"),
+    ("cache_creation_tokens", "cache_creation_input_tokens"),
+)
+
+
+def _cc_read(path: Path) -> dict:
+    """One Claude Code JSONL log -> its usage, tool calls, and span.
 
     Claude Code writes one `assistant` line per content block, repeating the
     API response's message.id and usage — so usage is kept per message.id
     (last write wins) and summed once; tool calls are deduped by tool_use id."""
     responses: dict = {}  # message.id (or a per-line key if absent) -> usage
+    response_models: dict = {}  # same key -> the model that answered, if recorded
     tools: dict[str, int] = {}
     seen_tools: set = set()
-    model = None
+    model = first_ts = last_ts = None
     session_id = None  # from the records; never the file name
-    first_ts = last_ts = None
 
-    for rec in _jsonl(log_path):
+    for rec in _jsonl(path):
         ts = rec.get("timestamp")
         if ts:
             first_ts = first_ts or ts
@@ -143,6 +152,7 @@ def adapter_claude_code(log_path: Path) -> dict:
             model = msg["model"]
         key = msg.get("id") or ("line", len(responses))
         responses[key] = msg.get("usage") or responses.get(key) or {}
+        response_models[key] = msg.get("model") or response_models.get(key)
         for block in msg.get("content") or []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 if block.get("id"):
@@ -152,28 +162,80 @@ def adapter_claude_code(log_path: Path) -> dict:
                 name = block.get("name") or "?"
                 tools[name] = tools.get(name, 0) + 1
 
-    usage = {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_creation_tokens": 0}
-    saw_usage = False
-    for u in responses.values():
-        if u:
-            saw_usage = True
-            usage["input_tokens"] += _int(u.get("input_tokens")) or 0
-            usage["output_tokens"] += _int(u.get("output_tokens")) or 0
-            usage["cache_read_tokens"] += _int(u.get("cache_read_input_tokens")) or 0
-            usage["cache_creation_tokens"] += _int(u.get("cache_creation_input_tokens")) or 0
+    usage = None
+    if any(responses.values()):
+        usage = {k: sum(_int(u.get(src)) or 0 for u in responses.values()) for k, src in _CC_USAGE_KEYS}
+        usage["total_tokens"] = sum(usage.values())
+    # Which models the tokens came from. Only responses that used tokens
+    # count: Claude Code's local `<synthetic>` replies report zero. A billed
+    # response with no model can't be credited to any named model.
+    billed = [
+        response_models.get(k)
+        for k, u in responses.items()
+        if u and sum(_int(u.get(src)) or 0 for _, src in _CC_USAGE_KEYS) > 0
+    ]
+    models = {m for m in billed if m}
+    unknown_model = any(not m for m in billed)
+    return {"usage": usage, "requests": len(responses), "tools": tools, "model": model,
+            "models": models, "unknown_model": unknown_model, "session_id": session_id,
+            "first_ts": first_ts, "last_ts": last_ts}
+
+
+def adapter_claude_code(log_path: Path) -> dict:
+    """$CLAUDE_CONFIG_DIR (default ~/.claude)/projects/<slug>/<session_id>.jsonl,
+    plus its subagents' logs at <slug>/<session_id>/**/subagents/*.jsonl."""
+    main = _cc_read(log_path)
+    subs = [_cc_read(p) for p in sorted(log_path.with_suffix("").glob("**/subagents/*.jsonl"))]
+    logs = [main, *subs]
+
+    tools: dict[str, int] = {}
+    for log in logs:
+        for name, n in log["tools"].items():
+            tools[name] = tools.get(name, 0) + n
+    starts = [log["first_ts"] for log in logs if log["first_ts"]]
+    ends = [log["last_ts"] for log in logs if log["last_ts"]]
+    extensions = {"api_requests": sum(log["requests"] for log in logs)}
+    # A log with replies but no usage is unmeasured, not zero; a log with no
+    # replies is a measured zero. Totals cover measured logs only (a floor),
+    # and the unmeasured count makes the backend record the session partial.
+    unmeasured = [log for log in subs if log["requests"] and not log["usage"]]
+    if subs:
+        extensions["subagent_sessions"] = len(subs)
+        extensions["subagent_tokens"] = sum((log["usage"] or {}).get("total_tokens", 0) for log in subs)
+    if unmeasured:
+        extensions["subagent_sessions_unmeasured"] = len(unmeasured)
+    # The manifest model is where the stats attribute ALL the counted tokens,
+    # so with subagents it names one model only if every measured response in
+    # every measured log came from that model. Otherwise it is "mixed" (no
+    # per-model split here); the parent's model stays as a description.
+    measured = [log for log in logs if log["usage"]]
+    models = set().union(*(log["models"] for log in measured)) if measured else set()
+    mixed = bool(subs) and (len(models) > 1 or any(log["unknown_model"] for log in measured))
+    # The parent's model: the one its tokens came from, else the last it named.
+    main_model = next(iter(main["models"])) if len(main["models"]) == 1 else main["model"]
+    if mixed and main_model:
+        extensions["main_model"] = main_model
+    if mixed:
+        model = "mixed"
+    elif subs and len(models) == 1:
+        model = next(iter(models))  # the one model every billed response used
+    else:
+        model = main["model"]  # no subagents: unchanged
 
     fields: dict = {
         "harness": "claude-code",
-        "session_id": session_id,
+        "session_id": main["session_id"],  # never the file name
         "model": model,
-        "started_at": first_ts,
-        "ended_at": last_ts,
+        "started_at": min(starts) if starts else None,
+        "ended_at": max(ends) if ends else None,
         "activity": {"tool_calls": sum(tools.values()), "tool_calls_by_name": tools},
-        "extensions": {"api_requests": len(responses)},
+        "extensions": extensions,
     }
-    if saw_usage:
-        usage["total_tokens"] = sum(usage.values())
-        fields["usage"] = usage
+    # The parent log must be measured: subagent tokens never stand in for it
+    # (no usage here stops the share, as before subagents were counted).
+    if main["usage"]:
+        usages = [log["usage"] for log in logs if log["usage"]]
+        fields["usage"] = {k: sum(u[k] for u in usages) for k in usages[0]}
     return fields
 
 
@@ -1482,6 +1544,10 @@ def main() -> int:
     print(f"share      : {share}  (privacy {args.privacy}, redactor v{REDACTOR_VERSION})")
     print(f"tokens     : {usage.get('total_tokens', 'unknown')}")
     print(f"tool_calls : {activity.get('tool_calls', 'unknown')}")
+    n_subs = (fields.get("extensions") or {}).get("subagent_sessions")
+    if n_subs and share == "full":
+        print(f"note       : counted {n_subs} subagent transcripts in the stats; "
+              "--full uploads only the main session log")
     if harness not in KNOWN_HARNESSES:
         print(
             f"note       : '{harness}' has no adapter — stats will be partial "
