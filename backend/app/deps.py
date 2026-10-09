@@ -4,7 +4,7 @@ from functools import lru_cache
 
 from app.audit import AuditLogger
 from app.config import Settings, get_settings
-from app.dedup import PromotionLRU
+from app.dedup import PromotionLRU, RecentPosts
 from app.hub import HubClient
 from app.job_quota import DurableJobQuota
 from app.jobs import JobRunner
@@ -77,6 +77,11 @@ def get_org_roles() -> OrgRoles:
 @lru_cache
 def get_dedup() -> PromotionLRU:
     return PromotionLRU(max_entries=get_settings().dedup_lru_size)
+
+
+@lru_cache
+def get_recent_posts() -> RecentPosts:
+    return RecentPosts(max_entries=get_settings().dedup_lru_size)
 
 
 @lru_cache

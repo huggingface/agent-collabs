@@ -1,6 +1,16 @@
 import json
+import threading
 
-from fakes import seed_agent, seed_message
+import pytest
+
+from app.deps import get_recent_posts
+from app.main import app as fastapi_app
+
+from fakes import _http_error, seed_agent, seed_message
+
+
+def _recent(env):
+    return fastapi_app.dependency_overrides[get_recent_posts]()
 
 
 def seed_board(hub):
@@ -364,3 +374,218 @@ def test_raw_variant_needs_no_allowlist(env):
         json={"agent_id": "agent-1", "body": "hello", "type": "note"},
     )
     assert r.status_code == 201
+
+
+# ── retries (DESIGN.md §5 "Message retries") ─────────────────────────
+
+
+def _board_files(env) -> list[str]:
+    return [p for p in env.hub.buckets[env.settings.central_bucket] if p.startswith("message_board/")]
+
+
+def test_raw_retry_with_idempotency_key_returns_original_with_200(env):
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    post = {"agent_id": "agent-1", "body": "ping @agent-2", "idempotency_key": "k-1"}
+    first = env.client.post("/v1/messages", json=post)
+    assert first.status_code == 201
+    # Same key, even with a changed body: the key identifies the post.
+    again = env.client.post("/v1/messages", json={**post, "body": "ping again @agent-2"})
+    assert again.status_code == 200
+    assert again.json() == first.json()
+    assert len(_board_files(env)) == 1
+    assert len(env.hub.batch_writes) == 1  # no second post, no second fan-out
+    # A new key is a new message, even with the same body.
+    assert env.client.post("/v1/messages", json={**post, "idempotency_key": "k-2"}).status_code == 201
+    assert len(_board_files(env)) == 2
+
+
+def test_idempotency_key_is_scoped_per_agent_and_length_capped(env):
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    for agent in ("agent-1", "agent-2"):
+        r = env.client.post("/v1/messages", json={"agent_id": agent, "body": "hi", "idempotency_key": "k"})
+        assert r.status_code == 201
+    r = env.client.post("/v1/messages", json={"agent_id": "agent-1", "body": "x", "idempotency_key": "k" * 65})
+    assert r.json()["error"]["code"] == "TOO_LARGE"
+
+
+def test_bucket_retry_with_idempotency_key_returns_original_with_200(env):
+    seed_agent(env.hub, "agent-1")
+    uri = _seed_source(env, "agent-1", "drafts/m.md", "---\ntype: note\n---\nbody")
+    first = env.client.post("/v1/messages", json={"source": uri, "idempotency_key": "b-1"})
+    assert first.status_code == 201
+    again = env.client.post("/v1/messages", json={"source": uri, "idempotency_key": "b-1"})
+    assert again.status_code == 200
+    assert again.json()["filename"] == first.json()["filename"]
+    assert len(_board_files(env)) == 1
+
+
+def test_raw_repeat_body_without_key_is_a_duplicate_within_60s(make_env):
+    from app.dedup import RecentPosts
+    from app.deps import get_recent_posts
+    from app.main import app as fastapi_app
+
+    env = make_env()
+    now = [1000.0]
+    recent = RecentPosts(100, clock=lambda: now[0])
+    fastapi_app.dependency_overrides[get_recent_posts] = lambda: recent
+    seed_agent(env.hub, "agent-1")
+    post = {"agent_id": "agent-1", "body": "done with the sweep"}
+    first = env.client.post("/v1/messages", json=post)
+    assert first.status_code == 201
+    now[0] += 59
+    again = env.client.post("/v1/messages", json=post)
+    assert again.status_code == 200
+    assert again.json()["filename"] == first.json()["filename"]
+    assert len(_board_files(env)) == 1
+    # Past the window the same body is a new message.
+    now[0] += 2
+    assert env.client.post("/v1/messages", json=post).status_code == 201
+    assert len(_board_files(env)) == 2
+
+
+# ── retries that overlap the first request ──────────────────────────
+
+
+def _hold_first_write(env, monkeypatch, *, fail: bool = False):
+    """Block the first message write until `release` is set (then fail it, if
+    asked); later writes go straight through. Returns (entered, release, writes)."""
+    entered, release = threading.Event(), threading.Event()
+    write = env.hub.write_many_central
+    writes = []
+
+    def held(items):
+        writes.append([p for _, p in items])
+        if len(writes) == 1:
+            entered.set()
+            assert release.wait(5)
+            if fail:
+                raise _http_error()
+        return write(items)
+
+    monkeypatch.setattr(env.hub, "write_many_central", held)
+    return entered, release, writes
+
+
+def _post_in_thread(env, body: dict) -> tuple[threading.Thread, dict]:
+    out: dict = {}
+    t = threading.Thread(target=lambda: out.update(r=env.client.post("/v1/messages", json=body)))
+    t.start()
+    return t, out
+
+
+def _overlap_post(env, variant: str) -> dict:
+    if variant == "source-key":
+        uri = _seed_source(env, "agent-1", "drafts/m.md", "---\ntype: note\n---\nping @agent-2")
+        return {"source": uri, "idempotency_key": "k"}
+    post = {"agent_id": "agent-1", "body": "ping @agent-2"}
+    if variant == "raw-key":
+        post["idempotency_key"] = "k"
+    return post
+
+
+@pytest.mark.parametrize("variant", ["raw-key", "raw-no-key", "source-key"])
+def test_an_overlapping_retry_waits_and_replays_the_first_post(env, monkeypatch, variant):
+    seed_agent(env.hub, "agent-1")
+    seed_agent(env.hub, "agent-2")
+    post = _overlap_post(env, variant)
+    entered, release, writes = _hold_first_write(env, monkeypatch)
+    first_t, first = _post_in_thread(env, post)
+    assert entered.wait(5)
+    retry_t, retry = _post_in_thread(env, post)
+    retry_t.join(0.3)
+    assert retry_t.is_alive()  # waiting on the first request, not writing
+    release.set()
+    first_t.join(5)
+    retry_t.join(5)
+    assert first["r"].status_code == 201, first["r"].text
+    assert retry["r"].status_code == 200, retry["r"].text
+    assert retry["r"].json() == first["r"].json()
+    assert len(writes) == 1  # one post, one fan-out
+    assert len(_board_files(env)) == 1
+    assert _recent(env)._in_flight == {}
+
+
+def test_a_failed_first_post_lets_the_waiting_retry_post(env, monkeypatch):
+    seed_agent(env.hub, "agent-1")
+    post = {"agent_id": "agent-1", "body": "hi", "idempotency_key": "k"}
+    entered, release, writes = _hold_first_write(env, monkeypatch, fail=True)
+    first_t, first = _post_in_thread(env, post)
+    assert entered.wait(5)
+    retry_t, retry = _post_in_thread(env, post)
+    retry_t.join(0.3)
+    assert retry_t.is_alive()
+    release.set()
+    first_t.join(5)
+    retry_t.join(5)
+    assert first["r"].status_code == 503
+    assert retry["r"].status_code == 201, retry["r"].text
+    assert len(writes) == 2 and len(_board_files(env)) == 1
+    assert _recent(env)._in_flight == {}
+
+
+def test_a_post_under_another_key_does_not_wait(env, monkeypatch):
+    seed_agent(env.hub, "agent-1")
+    entered, release, _ = _hold_first_write(env, monkeypatch)
+    first_t, first = _post_in_thread(env, {"agent_id": "agent-1", "body": "a", "idempotency_key": "k-1"})
+    assert entered.wait(5)
+    other_t, other = _post_in_thread(env, {"agent_id": "agent-1", "body": "b", "idempotency_key": "k-2"})
+    other_t.join(5)
+    assert not other_t.is_alive() and other["r"].status_code == 201
+    release.set()
+    first_t.join(5)
+    assert first["r"].status_code == 201
+
+
+# ── what counts as the same raw post ────────────────────────────────
+
+
+def test_the_same_body_with_other_refs_is_a_new_message(env):
+    for agent in ("agent-1", "agent-2", "agent-3"):
+        seed_agent(env.hub, agent)
+    post = {"agent_id": "agent-1", "body": "building on this"}
+    r2 = env.client.post("/v1/messages", json={**post, "refs": ["20260601-100000-000_agent-2.md"]})
+    r3 = env.client.post("/v1/messages", json={**post, "refs": ["20260601-100000-000_agent-3.md"]})
+    assert (r2.status_code, r3.status_code) == (201, 201)
+    assert r3.json()["mentions_delivered"] == ["agent-3"]
+    # The identical post again is a retry. `refs` as a string means the same list.
+    again = env.client.post("/v1/messages", json={**post, "refs": "20260601-100000-000_agent-3.md"})
+    assert again.status_code == 200 and again.json() == r3.json()
+
+
+def test_the_same_text_as_a_broadcast_is_a_new_message(env):
+    env.hub.org_roles = {"test-user": "admin"}
+    seed_agent(env.hub, "agent-2")
+    headers = {"Authorization": "Bearer organizer-token"}
+    post = {"agent_id": "human-test-user", "body": "heads up"}
+    plain = env.client.post("/v1/messages", json=post, headers=headers)
+    loud = env.client.post("/v1/messages", json={**post, "broadcast": True}, headers=headers)
+    assert (plain.status_code, loud.status_code) == (201, 201)
+    assert loud.json()["broadcast"] is True
+    assert loud.json()["filename"] in env.client.get("/v1/inbox/agent-2").json()["items"]
+    again = env.client.post("/v1/messages", json={**post, "broadcast": True}, headers=headers)
+    assert again.status_code == 200 and again.json() == loud.json()
+
+
+def test_the_same_body_with_another_type_is_a_new_message(env):
+    seed_agent(env.hub, "agent-1")
+    post = {"agent_id": "agent-1", "body": "sweep finished"}
+    assert env.client.post("/v1/messages", json=post).status_code == 201
+    assert env.client.post("/v1/messages", json={**post, "type": "note"}).status_code == 201
+    assert env.client.post("/v1/messages", json={**post, "type": "note"}).status_code == 200
+    assert len(_board_files(env)) == 2
+
+
+def test_an_idempotency_key_replays_even_with_other_refs_or_broadcast(env):
+    env.hub.org_roles = {"test-user": "admin"}
+    headers = {"Authorization": "Bearer organizer-token"}
+    post = {"agent_id": "human-test-user", "body": "heads up", "idempotency_key": "k"}
+    first = env.client.post("/v1/messages", json=post, headers=headers)
+    again = env.client.post(
+        "/v1/messages",
+        json={**post, "broadcast": True, "refs": ["20260601-100000-000_agent-2.md"]},
+        headers=headers,
+    )
+    assert first.status_code == 201 and again.status_code == 200
+    assert again.json() == first.json()

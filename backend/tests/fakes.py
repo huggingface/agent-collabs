@@ -243,14 +243,6 @@ class FakeHub:
     def read_text(self, uri) -> str:
         return self.read_bytes(uri).decode("utf-8")
 
-    def append_jsonl_audit(self, path: str, line: str) -> None:
-        self._maybe_fail_write()
-        b = self.buckets[self._settings.audit_bucket]
-        existing = b.get(path, b"")
-        if existing and not existing.endswith(b"\n"):
-            existing += b"\n"
-        b[path] = existing + line.encode("utf-8") + b"\n"
-
     def read_audit_bytes(self, path: str) -> bytes | None:
         self._maybe_fail_optional_read(path)
         return self.buckets[self._settings.audit_bucket].get(path)

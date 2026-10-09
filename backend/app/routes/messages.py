@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import re
+from contextlib import nullcontext
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Header, Query, Request
+from fastapi import APIRouter, Depends, Header, Query, Request, Response
 
 from app.audit import AuditLogger
 from app.auth import extract_bearer
 from app.config import Settings
-from app.dedup import PromotionLRU, content_hash
+from app.dedup import PromotionLRU, RecentPosts, content_hash
 from app.deps import (
     get_audit,
     get_bucket_write_limiter,
@@ -18,6 +19,7 @@ from app.deps import (
     get_org_roles,
     get_raw_message_limiter,
     get_read_model,
+    get_recent_posts,
     get_settings_dep,
 )
 from app.errors import (
@@ -38,6 +40,7 @@ from app.hub import HubClient, HubIdentity
 from app.org_roles import OrgRoles
 from app.listing import list_message_like
 from app.models import (
+    RAW_DUPLICATE_WINDOW_S,
     MessageListing,
     MessagePostRequest,
     MessageRecord,
@@ -146,11 +149,13 @@ def _server_message_fm(agent_id: str, via: str, dt: datetime) -> dict:
 def post_message(
     req: MessagePostRequest,
     request: Request,
+    response: Response,
     authorization: str | None = Header(default=None),
     settings: Settings = Depends(get_settings_dep),
     hub: HubClient = Depends(get_hub),
     audit: AuditLogger = Depends(get_audit),
     dedup: PromotionLRU = Depends(get_dedup),
+    recent: RecentPosts = Depends(get_recent_posts),
     bucket_limiter: CompoundLimiter = Depends(get_bucket_write_limiter),
     raw_limiter: CompoundLimiter = Depends(get_raw_message_limiter),
     read_model: ReadModel = Depends(get_read_model),
@@ -177,84 +182,94 @@ def post_message(
             )
         parsed, agent_id = resolve_source(settings, req.source)
         require_registered(read_model, hub, agent_id)
+        key = (agent_id, req.idempotency_key)
+        # With a key, a retry that overlaps the first request waits for it and
+        # replays its response instead of posting again (RecentPosts.claim).
+        with (recent.claim(key) if req.idempotency_key else nullcontext()) as replay:
+            if replay:
+                response.status_code = 200
+                return replay
 
-        allowed, retry = bucket_limiter.try_consume(parsed.bucket)
-        if not allowed:
-            raise RateLimited(retry)
+            allowed, retry = bucket_limiter.try_consume(parsed.bucket)
+            if not allowed:
+                raise RateLimited(retry)
 
-        body_text = read_source_text(hub, settings, parsed)
-        body_bytes = body_text.encode("utf-8")
-        client_fm, source_body = parse(body_text)
-        if "broadcast" in client_fm:
-            raise NotOrganizer(
-                "broadcast frontmatter is server-owned and organizer-only",
-                hint="broadcast from a signed-in organizer account with broadcast: true",
+            body_text = read_source_text(hub, settings, parsed)
+            body_bytes = body_text.encode("utf-8")
+            client_fm, source_body = parse(body_text)
+            if "broadcast" in client_fm:
+                raise NotOrganizer(
+                    "broadcast frontmatter is server-owned and organizer-only",
+                    hint="broadcast from a signed-in organizer account with broadcast: true",
+                )
+            if "channel" in client_fm:
+                raise InvalidFrontmatter(
+                    "channel frontmatter is server-stamped; pass `channel` in the "
+                    "POST /v1/messages request body instead"
+                )
+            # §5.5: everything else must be a key the system itself writes. This is
+            # the only path where a client supplies frontmatter at all, so it is the
+            # only place the allowlist has to hold.
+            validate_message_frontmatter(client_fm)
+
+            dest_folder = f"channels/{req.channel}" if req.channel else "message_board"
+            existing = dedup.get(content_hash(body_bytes), dest_folder)
+            if existing:
+                raise AlreadyPromoted(existing)
+
+            client_fm.setdefault("type", "agent")
+            if req.refs is not None:
+                client_fm["refs"] = _refs_list(req.refs)
+
+            auto_subscribed = (
+                req.channel is not None
+                and req.channel not in read_model.channel_subscriptions(agent_id)
             )
-        if "channel" in client_fm:
-            raise InvalidFrontmatter(
-                "channel frontmatter is server-stamped; pass `channel` in the "
-                "POST /v1/messages request body instead"
+            server_fm = _server_message_fm(agent_id, "bucket", now)
+            merged = merge(client_fm, server_fm)
+
+            target, filename, recipients, nbytes = promote_message(
+                settings=settings,
+                hub=hub,
+                read_model=read_model,
+                agent_id=agent_id,
+                fm=merged,
+                body=source_body,
+                now=now,
+                channel=req.channel,
+                notifier=notifier,
             )
-        # §5.5: everything else must be a key the system itself writes. This is
-        # the only path where a client supplies frontmatter at all, so it is the
-        # only place the allowlist has to hold.
-        validate_message_frontmatter(client_fm)
+            dedup.record(content_hash(body_bytes), dest_folder, filename)
 
-        dest_folder = f"channels/{req.channel}" if req.channel else "message_board"
-        existing = dedup.get(content_hash(body_bytes), dest_folder)
-        if existing:
-            raise AlreadyPromoted(existing)
+            audit_extra: dict = {}
+            if recipients:
+                audit_extra["mentions_delivered"] = recipients
+            if req.channel is not None:
+                audit_extra["channel"] = req.channel
+            audit.write(
+                agent_id=agent_id,
+                route="/v1/messages",
+                via="bucket",
+                source=str(parsed),
+                target_path=target,
+                bytes_count=nbytes,
+                status_code=201,
+                caller_ip=request.client.host if request.client else None,
+                user_agent=request.headers.get("user-agent"),
+                extra=audit_extra or None,
+            )
 
-        client_fm.setdefault("type", "agent")
-        if req.refs is not None:
-            client_fm["refs"] = _refs_list(req.refs)
-
-        auto_subscribed = (
-            req.channel is not None
-            and req.channel not in read_model.channel_subscriptions(agent_id)
-        )
-        server_fm = _server_message_fm(agent_id, "bucket", now)
-        merged = merge(client_fm, server_fm)
-
-        target, filename, recipients, nbytes = promote_message(
-            settings=settings,
-            hub=hub,
-            read_model=read_model,
-            agent_id=agent_id,
-            fm=merged,
-            body=source_body,
-            now=now,
-            channel=req.channel,
-            notifier=notifier,
-        )
-        dedup.record(content_hash(body_bytes), dest_folder, filename)
-
-        audit_extra: dict = {}
-        if recipients:
-            audit_extra["mentions_delivered"] = recipients
-        if req.channel is not None:
-            audit_extra["channel"] = req.channel
-        audit.write(
-            agent_id=agent_id,
-            route="/v1/messages",
-            via="bucket",
-            source=str(parsed),
-            target_path=target,
-            bytes_count=nbytes,
-            status_code=201,
-            caller_ip=request.client.host if request.client else None,
-            user_agent=request.headers.get("user-agent"),
-            extra=audit_extra or None,
-        )
-
-        return MessageResponse(
-            filename=filename,
-            via="bucket",
-            path=target,
-            mentions_delivered=recipients,
-            channel=req.channel,
-            auto_subscribed=auto_subscribed,
-        )
+            result = MessageResponse(
+                filename=filename,
+                via="bucket",
+                path=target,
+                mentions_delivered=recipients,
+                channel=req.channel,
+                auto_subscribed=auto_subscribed,
+            )
+            if req.idempotency_key:
+                recent.record(key, result)
+            return result
 
     # raw variant
     assert req.agent_id is not None and req.body is not None
@@ -278,62 +293,87 @@ def post_message(
         via = "raw"
         default_type = "agent"
 
-    allowed, retry = raw_limiter.try_consume(req.agent_id)
-    if not allowed:
-        raise RateLimited(retry)
+    # A retry returns the first post's response: matched on the idempotency
+    # key when given, else on the post's whole identity within the window, so
+    # the same body with other refs, broadcast or type is a new message. An
+    # overlapping retry waits for the first request (RecentPosts.claim).
+    if req.idempotency_key:
+        key, max_age = (req.agent_id, req.idempotency_key), None
+    else:
+        dest = f"channels/{req.channel}" if req.channel else "message_board"
+        refs = tuple(_refs_list(req.refs)) if req.refs is not None else ()
+        key = (
+            req.agent_id,
+            dest,
+            content_hash(req.body.encode("utf-8")),
+            req.broadcast,
+            refs,
+            req.type or default_type,
+        )
+        max_age = RAW_DUPLICATE_WINDOW_S
+    with recent.claim(key, max_age_s=max_age) as replay:
+        if replay:
+            response.status_code = 200
+            return replay
 
-    client_fm: dict = {"type": req.type or default_type}
-    if req.refs is not None:
-        client_fm["refs"] = _refs_list(req.refs)
-    auto_subscribed = (
-        req.channel is not None
-        and req.channel not in read_model.channel_subscriptions(req.agent_id)
-    )
-    server_fm = _server_message_fm(req.agent_id, via, now)
-    merged = merge(client_fm, server_fm)
+        allowed, retry = raw_limiter.try_consume(req.agent_id)
+        if not allowed:
+            raise RateLimited(retry)
 
-    target, filename, recipients, nbytes = promote_message(
-        settings=settings,
-        hub=hub,
-        read_model=read_model,
-        agent_id=req.agent_id,
-        fm=merged,
-        body=req.body,
-        now=now,
-        broadcast=req.broadcast,
-        channel=req.channel,
-        notifier=notifier,
-    )
+        client_fm: dict = {"type": req.type or default_type}
+        if req.refs is not None:
+            client_fm["refs"] = _refs_list(req.refs)
+        auto_subscribed = (
+            req.channel is not None
+            and req.channel not in read_model.channel_subscriptions(req.agent_id)
+        )
+        server_fm = _server_message_fm(req.agent_id, via, now)
+        merged = merge(client_fm, server_fm)
 
-    audit_extra: dict = {}
-    if recipients:
-        audit_extra["mentions_delivered"] = recipients
-    if req.broadcast:
-        audit_extra["broadcast"] = True
-    if req.channel is not None:
-        audit_extra["channel"] = req.channel
-    audit.write(
-        agent_id=req.agent_id,
-        route="/v1/messages",
-        via=via,
-        source=None,
-        target_path=target,
-        bytes_count=nbytes,
-        status_code=201,
-        caller_ip=request.client.host if request.client else None,
-        user_agent=request.headers.get("user-agent"),
-        extra=audit_extra or None,
-    )
+        target, filename, recipients, nbytes = promote_message(
+            settings=settings,
+            hub=hub,
+            read_model=read_model,
+            agent_id=req.agent_id,
+            fm=merged,
+            body=req.body,
+            now=now,
+            broadcast=req.broadcast,
+            channel=req.channel,
+            notifier=notifier,
+        )
 
-    return MessageResponse(
-        filename=filename,
-        via=via,
-        path=target,
-        mentions_delivered=recipients,
-        broadcast=req.broadcast,
-        channel=req.channel,
-        auto_subscribed=auto_subscribed,
-    )
+        audit_extra: dict = {}
+        if recipients:
+            audit_extra["mentions_delivered"] = recipients
+        if req.broadcast:
+            audit_extra["broadcast"] = True
+        if req.channel is not None:
+            audit_extra["channel"] = req.channel
+        audit.write(
+            agent_id=req.agent_id,
+            route="/v1/messages",
+            via=via,
+            source=None,
+            target_path=target,
+            bytes_count=nbytes,
+            status_code=201,
+            caller_ip=request.client.host if request.client else None,
+            user_agent=request.headers.get("user-agent"),
+            extra=audit_extra or None,
+        )
+
+        result = MessageResponse(
+            filename=filename,
+            via=via,
+            path=target,
+            mentions_delivered=recipients,
+            broadcast=req.broadcast,
+            channel=req.channel,
+            auto_subscribed=auto_subscribed,
+        )
+        recent.record(key, result)
+        return result
 
 
 @router.get("/v1/messages", response_model=MessageListing)

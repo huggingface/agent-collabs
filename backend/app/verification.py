@@ -1,29 +1,19 @@
 """Verification-status index for promoted results.
 
 ``results/verification_status.json`` is a flat map of result filename ->
-verification state (``pending`` | ``valid`` | ``invalid``). A human (or a
-downstream verifier) flips entries to ``valid`` / ``invalid``; every newly
-promoted result is inserted as ``pending`` so nothing slips through unreviewed.
+verification state (``pending`` | ``valid`` | ``invalid``). Humans and the
+eval Space edit it out of band; the Space itself writes it only through
+``set_verdict``. A result with no entry reads as ``pending`` everywhere, so
+promotion never touches the file — a promotion-time rewrite would race those
+out-of-band edits and silently drop a verdict (last writer wins).
 
-Maintaining it is a read-modify-write of a single shared JSON object, so a
-process-wide lock serialises the update — the Space runs a single uvicorn worker
-and sync endpoints share a threadpool, the same assumption ``DurableJobQuota``
-relies on. The update is **best-effort and non-fatal**: by the time we get here
-the result file is already promoted, so a storage hiccup must not fail the
-request — we log and move on, and the next promotion (or a manual reconcile)
-heals the index.
+``set_verdict`` is a read-modify-write of the whole object, so a process-wide
+lock serialises it — the Space runs a single uvicorn worker, the same
+assumption ``DurableJobQuota`` relies on. It **fails safe on read**: if the
+index can't be read (transport error) or parsed (corrupt/non-object JSON), it
+refuses to write — overwriting would erase every human verdict.
 
-Two safety properties:
-
-- **Verdicts are never clobbered.** A filename already present (whatever its
-  state) is left untouched — we only ever *insert* a missing entry as
-  ``pending``, never overwrite an existing ``valid`` / ``invalid``.
-- **Fail SAFE on read.** If the index can't be read (transport error) or parsed
-  (corrupt/non-object JSON), we refuse to write — overwriting would erase every
-  human verdict. We skip and log loudly so it can be fixed by hand.
-
-``set_verdict`` (the automated verifier's write path, §5.7) extends the first
-property with a **side-ledger compare-and-set**: every verdict the verifier
+It also never clobbers a human verdict, via a **side-ledger compare-and-set**: every verdict the verifier
 writes is recorded in the private audit bucket
 (``verification_runs/<filename>/verdict.json``), and the index is only updated
 when the current entry is ``pending``/absent **or** equals the verifier's own
@@ -95,28 +85,6 @@ class VerificationStatusStore:
             return None
         return data
 
-    def mark_pending(self, filename: str) -> None:
-        """Insert ``filename`` as ``pending`` if absent. Best-effort; never raises.
-
-        Serialised by a process-wide lock so two concurrent promotions cannot
-        read-then-write the same index and drop each other's entry. Existing
-        entries (including human ``valid`` / ``invalid`` verdicts) are preserved.
-        """
-        with self._lock:
-            data = self._load()
-            if data is None:
-                return  # read/parse failed — fail safe, leave the index untouched
-            if filename in data:
-                return  # already tracked; don't rewrite or clobber a verdict
-            data[filename] = PENDING
-            body = json.dumps(data, indent=2, sort_keys=True) + "\n"
-            try:
-                self._hub.write_text_central(self._path, body)
-            except Exception as exc:
-                log.warning(
-                    "verification-status write failed for %s: %s", self._path, exc
-                )
-
     # ───────────────────── automated verdicts (§5.7) ─────────────────────
 
     def _ledger_path(self, filename: str) -> str:
@@ -159,7 +127,7 @@ class VerificationStatusStore:
         Compare-and-set against the side-ledger: write the index iff the
         current entry is ``pending``/absent or equals the verifier's own
         last-written state. Returns WRITTEN, DEFERRED, or SKIPPED. Serialised
-        by the same process-wide lock as ``mark_pending``.
+        by a process-wide lock.
         """
         if new_state not in (VALID, INVALID):
             raise ValueError(f"verdict must be '{VALID}' or '{INVALID}', got {new_state!r}")
