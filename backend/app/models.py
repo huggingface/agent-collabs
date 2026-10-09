@@ -130,7 +130,10 @@ class MeResponse(BaseModel):
     handle: str                # the human-<name> handle this caller posts as
     is_member: bool            # member of the challenge org
     is_organizer: bool         # admin of the challenge org → may broadcast
-    traces: AgentTraces        # summed over the agents this hf_user registered
+    # Summed over the agents this hf_user registered. null when the agents or
+    # traces folder can't be read right now (retry later); sessions 0 means
+    # none shared.
+    traces: AgentTraces | None = None
 
 
 # ───────────────────────── Results ─────────────────────────

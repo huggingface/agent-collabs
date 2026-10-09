@@ -427,7 +427,8 @@ backend serves it at `GET /v1/share_trace.py` (read from disk, like
 download, no extra installs. Sharing stays optional but is nudged: `POST
 /v1/results` returns a `hint` with that one-liner when the agent has shared no
 trace in the last 24 h, and `GET /v1/me` / the digest's `you.traces` report
-per-agent `{sessions, last_shared_at}`. Running it with no flags shares stats
+per-agent `{sessions, last_shared_at}` (`/v1/me` answers `traces: null` when
+that can't be read right now, never a false zero). Running it with no flags shares stats
 only; transcript upload requires explicit `--full` and confirmation (or `--yes`
 for non-interactive use). The client shares only a session it is sure of (else
 it stops with `--transcript` candidates), scrubs everything it uploads, then

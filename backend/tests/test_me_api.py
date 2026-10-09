@@ -2,6 +2,8 @@
 hint for whether to show the broadcast toggle. Not the security boundary:
 POST /v1/messages re-verifies on every broadcast."""
 
+import pytest
+
 from app.frontmatter import serialise
 from fakes import seed_agent
 
@@ -76,13 +78,34 @@ def test_me_sums_traces_of_the_callers_agents(env):
     }
 
 
-def test_me_answers_with_an_empty_trace_summary_when_storage_fails(env):
-    # The agents or traces folder can't be listed: identity and organizer
-    # status still come back; only the trace summary is empty.
+def _seed_my_trace(env, agent="mine", at="2026-10-09 10:00 UTC"):
+    seed_agent(env.hub, agent)
+    env.hub.seed(f"traces/{agent}/s/manifest.md", serialise({"promoted_at": at}, ""))
+
+
+@pytest.mark.parametrize(
+    "fail",
+    [
+        lambda hub: hub.fail_next_listing("agents"),
+        lambda hub: hub.fail_next_listing("traces"),
+        lambda hub: hub.fail_next_read("traces/"),
+    ],
+    ids=["agents-listing", "traces-listing", "traces-download"],
+)
+def test_me_reports_an_unreadable_trace_summary_as_null_not_zero(env, fail):
+    """Identity and organizer status still come back; the summary is null
+    (unknown right now), never a zero claiming nothing was shared. The next
+    request recovers the real values."""
     env.hub.org_roles = {"test-user": "admin"}
-    for folder in ("agents", "traces"):
-        env.hub.fail_next_listing(folder)
-        r = _me(env)
-        assert r.status_code == 200, (folder, r.text)
-        assert r.json()["is_organizer"] is True
-        assert r.json()["traces"] == {"sessions": 0, "last_shared_at": None}
+    _seed_my_trace(env)
+    fail(env.hub)
+    r = _me(env)
+    assert r.status_code == 200, r.text
+    assert r.json()["is_organizer"] is True
+    assert r.json()["traces"] is None
+    assert _me(env).json()["traces"] == {"sessions": 1, "last_shared_at": "2026-10-09 10:00 UTC"}
+
+
+def test_me_reports_zero_only_when_nothing_was_shared(env):
+    seed_agent(env.hub, "mine")
+    assert _me(env).json()["traces"] == {"sessions": 0, "last_shared_at": None}

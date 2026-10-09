@@ -40,7 +40,8 @@ def get_me(
 
     `traces` sums what this user's registered agents have shared. It is
     best-effort the same way: if the agents or traces folder can't be read,
-    it is an empty summary rather than an error for the whole response.
+    it is null ("unknown right now") rather than an error for the whole
+    response — never a zero, which would claim nothing was shared.
     """
     token = extract_bearer(authorization)
     if not token:
@@ -72,8 +73,8 @@ def get_me(
     )
 
 
-def _my_traces(read_model: ReadModel, hf_user: str) -> AgentTraces:
-    """Traces shared by the agents `hf_user` registered; empty if the agents or
+def _my_traces(read_model: ReadModel, hf_user: str) -> AgentTraces | None:
+    """Traces shared by the agents `hf_user` registered; None if the agents or
     traces folder can't be read (logged, type only)."""
     try:
         my_agents = {
@@ -83,5 +84,5 @@ def _my_traces(read_model: ReadModel, hf_user: str) -> AgentTraces:
         }
         return agent_traces(read_model, my_agents)
     except Exception as e:
-        log.warning("trace summary skipped for /v1/me (type=%s)", type(e).__name__)
-        return AgentTraces(sessions=0)
+        log.warning("trace summary unavailable for /v1/me (type=%s)", type(e).__name__)
+        return None
