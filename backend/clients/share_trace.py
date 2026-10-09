@@ -579,16 +579,23 @@ _UNQUOTED_SECRET_RE = re.compile(
 )
 # Unquoted values next to a secret name that are code, not a secret: null,
 # booleans, masks, placeholders, and references such as $VAR, ${VAR},
-# os.environ[...] or a function call. Numbers are secrets (a numeric password)
-# except after a *_token name, where they are counters (max_token=5).
+# os.environ[...] or a function call. Numbers are secrets (a numeric password
+# or PIN) except under a known counter name (_COUNTER_NAMES).
 _UNQUOTED_REFERENCE_RE = re.compile(
     r"(?is)^(?:null|none|nil|true|false|undefined|\*+|x{3,}|"
     r"<[^>]*>|\$\{?[A-Za-z_][A-Za-z0-9_]*\}?.*|%[A-Za-z_]+%|\{\{.*\}\}|"
     r"(?:os\.environ|os\.getenv|process\.env|env)\b.*|[A-Za-z_][A-Za-z0-9_.]*\(.*)$"
 )
 _NUMBER_RE = re.compile(r"^[-+]?\d+(?:\.\d+)?$")
-# A credential has at least one letter or digit; a lone "," or "" does not.
-_ALNUM_RE = re.compile(r"[A-Za-z0-9]")
+# Telemetry names that end in "token" and hold a count, not a credential. Only
+# these may carry a bare number; AUTH_TOKEN=849271 is a secret.
+_COUNTER_NAMES = frozenset(
+    f"{prefix}_token"
+    for prefix in (
+        "max", "min", "num", "n", "total", "input", "output", "prompt", "completion",
+        "cached", "cache", "reasoning", "context",
+    )
+)
 _EMAIL_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@"
     r"[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![A-Za-z0-9.-])"
@@ -602,6 +609,7 @@ _URL_HOST_RE = re.compile(
 )
 _IPV4_RE = re.compile(r"(?<![A-Za-z0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![A-Za-z0-9.])")
 _PLACEHOLDER_RE = re.compile(r"^<REDACTED:[A-Z0-9_]+_\d+>$")
+_PLACEHOLDER_IN_TEXT_RE = re.compile(r"<REDACTED:[A-Z0-9_]+_\d+>")
 
 _SENSITIVE_KEYS = {
     "authorization": "AUTHORIZATION",
@@ -655,9 +663,9 @@ def _sensitive_key_category(key: object, value: object) -> str | None:
         return _SENSITIVE_KEYS[norm]
     number = isinstance(value, (int, float)) and not isinstance(value, bool)
     for suffix, category in _SENSITIVE_KEY_SUFFIXES:
-        # A string always; a number too (a numeric PIN or password), except
-        # for *_token, where numbers are counters.
-        if norm.endswith(suffix) and (isinstance(value, str) or (number and suffix != "_token")):
+        # A string always; a number too (a numeric PIN or token), except under
+        # a known counter name.
+        if norm.endswith(suffix) and (isinstance(value, str) or (number and norm not in _COUNTER_NAMES)):
             return category
     return None
 
@@ -669,7 +677,7 @@ def _unquoted_secret(key: str, value: str) -> bool:
     if not v or _UNQUOTED_REFERENCE_RE.match(v):
         return False
     if _NUMBER_RE.match(v):
-        return not _normalise_key(key).endswith("token")
+        return _normalise_key(key) not in _COUNTER_NAMES
     return True
 
 
@@ -784,7 +792,7 @@ class TraceRedactor:
             end, _close = _quoted_value_end(text, start, m.group("quote"))
             value = text[start:end]
             out.append(text[pos:start])
-            if _ALNUM_RE.search(value) and not self._is_placeholder(value):
+            if value and not self._is_placeholder(value):
                 key = _full_name(m)
                 out.append(self._alias(_assignment_category(key), value, f"assignment {self._label(key)}"))
             else:
@@ -1134,16 +1142,21 @@ def _mask(value: str) -> str:
     return f"{prefix}...({len(value)} chars)"
 
 
-def _scan_line(line: str, label=lambda name: name):
+def _scan_line(line: str, label=lambda name: name, json_line: bool = False):
     """(category, how it was spotted, value) for each credential left in a
-    line. `label` sanitizes key names for the report."""
+    line. `label` sanitizes key names for the report. On a JSON line an
+    unescaped " is structure, never string content: it opens a value only as
+    a JSON key's value ("key": "..."), and elsewhere it ends the string, so
+    the value there is empty (`HF_TOKEN=` at the end of a string)."""
     for category, how, pattern in _providers_in(line):
         for m in pattern.finditer(line):
             yield category, how, m.group(0)
     for m in _SCAN_PRIVATE_KEY_RE.finditer(line):
         yield "PRIVATE_KEY", "private key block", m.group(0)
-    for m in _CREDENTIAL_URL_RE.finditer(line):
-        if not m.group("password").startswith("<REDACTED:"):
+    # Placeholders contain ":", so swap each for one neutral character first;
+    # the password part must then be exactly a placeholder.
+    for m in _CREDENTIAL_URL_RE.finditer(_PLACEHOLDER_IN_TEXT_RE.sub("\0", line)):
+        if m.group("password") != "\0":
             yield "PASSWORD", "password in a URL", m.group("password")
     for m in _QUERY_SECRET_RE.finditer(line):
         if not m.group("value").startswith("<REDACTED:"):
@@ -1156,9 +1169,11 @@ def _scan_line(line: str, label=lambda name: name):
     # A quoted value after a secret name must be exactly one placeholder: no
     # exemptions for anything that looks like code or a number.
     for m in _QUOTED_SECRET_START_RE.finditer(line):
+        if json_line and m.group("quote") == '"' and not (m.group("kq") == '"' and ":" in m.group("sep")):
+            continue
         end, _close = _quoted_value_end(line, m.end(), m.group("quote"))
         value = line[m.end():end]
-        if _ALNUM_RE.search(value) and not _PLACEHOLDER_RE.fullmatch(value):
+        if value and not _PLACEHOLDER_RE.fullmatch(value):
             key = _full_name(m)
             yield _assignment_category(key), f"assignment {label(key)}", value
     for m in _UNQUOTED_SECRET_RE.finditer(line):
@@ -1167,6 +1182,14 @@ def _scan_line(line: str, label=lambda name: name):
             yield _assignment_category(key), f"assignment {label(key)}", m.group("value")
     for m in _SCAN_SPLIT_VALUE_RE.finditer(line):
         yield "PARTIAL", "text left after a replaced value", m.group("rest")
+
+
+def _is_json(line: str) -> bool:
+    try:
+        json.loads(line)
+    except ValueError:
+        return False
+    return True
 
 
 def scan_upload(
@@ -1180,12 +1203,13 @@ def scan_upload(
     hits: list[dict] = []
     scanned = 0
     for name, text in files.items():
+        json_line = name == "manifest.md"  # JSON frontmatter, line by line
         for lineno, line in enumerate(text.splitlines(), 1):
             scanned += 1
             low = line.lower()
             if not any(word in low for word in _SCAN_TRIGGERS):
                 continue
-            for category, how, value in _scan_line(line, label):
+            for category, how, value in _scan_line(line, label, json_line or _is_json(line)):
                 hits.append({
                     "file": name, "line": lineno, "category": category,
                     "how": how, "masked": _mask(value),

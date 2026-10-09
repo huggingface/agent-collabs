@@ -767,3 +767,53 @@ def test_scan_labels_hide_credential_shaped_key_names():
     token = "hf_" + "Y" * 30
     hits, _ = st.scan_upload({"t": f'{token}_password="leftover-value"'})
     assert hits and all(token not in h["how"] for h in hits)
+
+
+# ── any characters, numeric tokens, JSON structure (third review) ───
+
+
+def test_punctuation_and_unicode_passwords_are_scrubbed(home, monkeypatch, tmp_path, capsys):
+    record = {"content": 'password="!@#$%^&*" secret=\'éééééééé\' api_key="🔑🔑🔑" pwd_note password="" done'}
+    rc, uploads = _full_share(monkeypatch, tmp_path, record)
+    out = capsys.readouterr().out
+    assert rc == 0 and "scan: clean" in out
+    trace = next(body for dest, body in uploads.items() if dest.endswith("/trace.jsonl"))
+    for secret in ("!@#$%^&*", "éééééééé", "🔑🔑🔑"):
+        assert secret not in trace and secret not in out
+    assert 'password=\\"\\" done' in trace  # an empty value stays empty
+
+
+def test_numeric_credentials_named_token_are_scrubbed_but_counters_kept(home, monkeypatch, tmp_path, capsys):
+    record = {
+        "content": "AUTH_TOKEN=849271 access_token=1234567 GITHUB_TOKEN=55443322 max_token=5 total_token=9",
+        "session_token": 7766554,
+        "api_token": 99887766,
+        "input_token": 12,
+        "cached_token": 3,
+    }
+    rc, uploads = _full_share(monkeypatch, tmp_path, record)
+    out = capsys.readouterr().out
+    assert rc == 0 and "scan: clean" in out
+    trace = next(body for dest, body in uploads.items() if dest.endswith("/trace.jsonl"))
+    for secret in ("849271", "1234567", "55443322", "7766554", "99887766"):
+        assert secret not in trace and secret not in out
+    assert "max_token=5 total_token=9" in trace
+    assert '"input_token":12' in trace and '"cached_token":3' in trace
+
+
+def test_scan_reads_json_lines_by_their_structure():
+    # The decoded string ends with `HF_TOKEN=` (empty): the " after = closes
+    # the JSON string, it does not open a value.
+    assert st.scan_upload({"t": json.dumps({"content": "env\nHF_TOKEN=", "next": "x"})})[0] == []
+    hits, _ = st.scan_upload({"t": json.dumps({"db_password": "leak-value"})})
+    assert [h["category"] for h in hits] == ["PASSWORD"]
+    # On a plain-text line a " is content.
+    hits, _ = st.scan_upload({"t": 'not json: password="leak-value"'})
+    assert [h["category"] for h in hits] == ["PASSWORD"]
+
+
+def test_scan_accepts_placeholder_url_credentials_only():
+    clean = "curl https://<REDACTED:USERNAME_1>:<REDACTED:PASSWORD_1>@db.example/app"
+    assert st.scan_upload({"t": clean})[0] == []
+    hits, _ = st.scan_upload({"t": "curl https://<REDACTED:USERNAME_1>:hunter2@db.example/app"})
+    assert [(h["category"], h["masked"]) for h in hits] == [("PASSWORD", "...(7 chars)")]
