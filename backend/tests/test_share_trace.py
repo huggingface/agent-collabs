@@ -51,11 +51,12 @@ def _cc(home: Path, sid: str, *, mtime: float | None = None) -> Path:
     return f
 
 
-def _codex(home: Path, *, cwd: str = CWD) -> Path:
+def _codex(home: Path, *, cwd: str = CWD, name: str = "abc", extra: list | None = None) -> Path:
     d = home / ".codex" / "sessions" / "2026" / "06" / "26"
     d.mkdir(parents=True, exist_ok=True)
-    f = d / "rollout-2026-06-26T00-00-00-abc.jsonl"
-    f.write_text(json.dumps({"type": "session_meta", "payload": {"cwd": cwd}}) + "\n")
+    f = d / f"rollout-2026-06-26T00-00-00-{name}.jsonl"
+    records = [{"type": "session_meta", "payload": {"cwd": cwd}}, *(extra or [])]
+    f.write_text("".join(json.dumps(r) + "\n" for r in records))
     return f
 
 
@@ -65,10 +66,9 @@ def test_cc_pins_invoking_session_not_newest(home, monkeypatch):
     _cc(home, "other-sid", mtime=time.time())  # newer; would win by recency
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "mine-sid")
     monkeypatch.setenv("CLAUDECODE", "1")
-    harness, path, uncertain = st.detect(CWD, "auto")
+    harness, path = st.detect(CWD, "auto")
     assert harness == "claude-code"
     assert path == mine          # the invoking session, not "other-sid"
-    assert uncertain is False     # exact pin → no confirmation needed
 
 
 def test_codex_marker_never_grabs_a_claude_log(home, monkeypatch):
@@ -76,7 +76,7 @@ def test_codex_marker_never_grabs_a_claude_log(home, monkeypatch):
     _cc(home, "cc-sid")                  # co-located CC log (the trap)
     rollout = _codex(home)
     monkeypatch.setenv("CODEX_SANDBOX", "seatbelt")
-    harness, path, _ = st.detect(CWD, "auto")
+    harness, path = st.detect(CWD, "auto")
     assert harness == "codex"
     assert path == rollout               # never the CC log
 
@@ -101,7 +101,7 @@ def test_claude_config_dir_detects_pinned_session(home, monkeypatch, tmp_path):
     mine = d / "sid-1.jsonl"
     mine.write_text("{}\n")
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sid-1")
-    assert st.detect(CWD, "auto") == ("claude-code", mine, False)
+    assert st.detect(CWD, "auto") == ("claude-code", mine)
     assert st._infer_harness(mine) == "claude-code"
 
 
@@ -112,11 +112,13 @@ def test_codex_home_is_not_a_harness_marker(home, monkeypatch):
     assert st._running_harness() == (None, None)
 
 
-def test_codex_cwd_match_respects_path_boundary(home):
-    assert _codex(home, cwd="/work/proj") and st._codex_matches_cwd(st._codex_logs()[0], CWD)
-    assert st._mentions_cwd("cd /work/proj/src && ls", CWD)
-    assert not st._mentions_cwd("/work/proj2", CWD)
-    assert not st._mentions_cwd("cd /work/proj-old", CWD)
+def test_codex_matches_only_the_recorded_working_directory(home):
+    assert st._codex_matches_cwd(_codex(home, cwd="/work/proj", name="mine"), CWD)
+    for other in ("/work/proj2", "/work/proj-old", "/archive/work/proj", "/work/proj@private"):
+        assert not st._codex_matches_cwd(_codex(home, cwd=other, name="other"), CWD)
+    # Mentioning this directory in a command does not make it the session's cwd.
+    mention = {"type": "response_item", "payload": {"command": f"cd {CWD} && ls"}}
+    assert not st._codex_matches_cwd(_codex(home, cwd="/elsewhere", name="m", extra=[mention]), CWD)
 
 
 def test_ambiguous_without_markers_refuses(home):
@@ -129,7 +131,7 @@ def test_ambiguous_without_markers_refuses(home):
 
 def test_no_marker_single_harness_is_used(home):
     rollout = _codex(home)               # only Codex present, no markers
-    harness, path, _ = st.detect(CWD, "auto")
+    harness, path = st.detect(CWD, "auto")
     assert harness == "codex" and path == rollout
 
 
@@ -530,7 +532,7 @@ def test_backend_falls_back_to_api_env(home, monkeypatch, tmp_path):
 
 def test_stats_share_never_needs_confirmation(monkeypatch):
     monkeypatch.setattr(sys.stdin, "isatty", lambda: False, raising=False)
-    kw = dict(log_path=Path("x.jsonl"), uncertain=True, yes=False, raw=False, privacy="balanced")
+    kw = dict(log_path=Path("x.jsonl"), yes=False, privacy="balanced")
     st._confirm_or_exit(share="stats", **kw)  # no exit, no prompt
     with pytest.raises(SystemExit, match="--yes"):
         st._confirm_or_exit(share="full", **kw)
@@ -550,3 +552,139 @@ def test_promotion_failure_exits_non_zero(home, monkeypatch, tmp_path, capsys):
               "--agent-id", "a1", "--org", "o", "--slug", "c", "--backend", "https://b.example")
     assert rc == 1
     assert "backend promotion failed" in capsys.readouterr().out
+
+
+# ── confident selection or stop ─────────────────────────────────────
+
+
+def _share(monkeypatch, *argv):
+    """Run a share with the upload stubbed; returns (exit code, {dest: bytes})."""
+    uploads: dict[str, str] = {}
+    monkeypatch.setattr(st, "_hf_cp", lambda local, dest: uploads.__setitem__(dest, Path(local).read_text()))
+    monkeypatch.setattr(st.shutil, "which", lambda _: "/usr/bin/hf")
+    monkeypatch.setattr(st, "_fetch_v1", lambda backend: None)
+    rc = _run(monkeypatch, *argv, "--upload-only", "--agent-id", "a1", "--org", "o", "--slug", "c")
+    return rc, uploads
+
+
+def test_uncertain_claude_selection_stops_even_a_stats_share(home, monkeypatch):
+    older = _cc(home, "older", mtime=time.time() - 100)
+    newer = _cc(home, "newer", mtime=time.time())
+    monkeypatch.setattr(st.os, "getcwd", lambda: CWD)
+    uploads = {}
+    monkeypatch.setattr(st, "_hf_cp", lambda local, dest: uploads.__setitem__(dest, ""))
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--upload-only", "--agent-id", "a1", "--org", "o", "--slug", "c")
+    message = str(exc.value)
+    assert "refusing to guess" in message
+    assert message.index(str(newer)) < message.index(str(older))  # newest first
+    assert "--transcript" in message
+    assert uploads == {}
+
+
+def test_several_codex_rollouts_for_this_directory_stop(home, monkeypatch):
+    first = _codex(home, name="first")
+    second = _codex(home, name="second")
+    monkeypatch.setenv("CODEX_SANDBOX", "seatbelt")
+    with pytest.raises(SystemExit) as exc:
+        st.detect(CWD, "auto")
+    assert "2 Codex rollouts" in str(exc.value)
+    assert str(first) in str(exc.value) and str(second) in str(exc.value)
+
+
+def test_a_codex_rollout_from_another_project_is_never_selected(home, monkeypatch):
+    other = _codex(home, cwd="/archive/work/proj", name="other")
+    monkeypatch.setenv("CODEX_SANDBOX", "seatbelt")
+    with pytest.raises(SystemExit) as exc:
+        st.detect(CWD, "auto")
+    assert "no Codex rollout records this directory" in str(exc.value)
+    assert str(other) in str(exc.value)  # listed as a candidate, not chosen
+
+
+def test_an_unknown_harness_file_name_is_never_published(home, monkeypatch, tmp_path):
+    transcript = tmp_path / "confidential-client-acquisition.jsonl"
+    transcript.write_text("unrecognized log\n")
+    rc, uploads = _share(monkeypatch, "--harness", "cursor", "--transcript", str(transcript))
+    assert rc == 0 and uploads
+    for dest, body in uploads.items():
+        assert "confidential-client-acquisition" not in dest + body
+    (dest,) = uploads
+    assert re.search(r"/traces/s-[0-9a-f]{16}/manifest\.md$", dest)
+    # Stable: sharing the same transcript again lands in the same place.
+    assert _share(monkeypatch, "--harness", "cursor", "--transcript", str(transcript))[1].keys() == uploads.keys()
+
+
+# ── scrub -> scan -> report, checked at the upload boundary ─────────
+
+MARK = "SYNTHETIC-CREDENTIAL-749201"
+# Distinct values: one value gets one placeholder, named by the first rule that found it.
+LEAKS = {
+    "serialized_json": json.dumps({"password": f"{MARK}-1"}),
+    "double_encoded": json.dumps(json.dumps({"db_password": f"{MARK}-2"})),
+    "truncated_json": '{"api_key": "' + f"{MARK}-3",
+    "shell_env": f"SERVICE_API_KEY={MARK}-4",
+    "export": f'export GITHUB_TOKEN="{MARK}-5"',
+    "signed_url": f"https://example.test/file?X-Amz-Signature={MARK}-6&X-Amz-Credential={MARK}-7",
+}
+
+
+def test_embedded_env_and_signed_url_secrets_never_reach_the_upload(home, monkeypatch, tmp_path, capsys):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"content": LEAKS}) + "\n")
+    rc, uploads = _share(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--full", "--yes")
+    out = capsys.readouterr().out
+    assert rc == 0 and len(uploads) == 2
+    for body in uploads.values():
+        assert MARK not in body
+    assert MARK not in out  # the report names what was replaced, never the value
+    assert "assignment SERVICE_API_KEY" in out
+    assert 'JSON key "password"' in out
+    assert "URL param X-Amz-Signature" in out
+    assert "scan: clean" in out
+
+
+def test_the_scan_blocks_what_the_scrubber_missed(home, monkeypatch, tmp_path, capsys):
+    """The scan reads the exact bytes to upload: with the scrubber disabled it
+    stops the upload, even with --yes, and reports masked values only."""
+    token = "hf_" + "Q" * 30
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"content": f"use {token} and SERVICE_API_KEY={MARK}"}) + "\n")
+    monkeypatch.setattr(st.TraceRedactor, "redact_jsonl", lambda self, text, name="trace": text)
+    rc, uploads = _share(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--full", "--yes")
+    out = capsys.readouterr().out
+    assert rc == 1 and uploads == {}
+    assert "scan: BLOCKED" in out
+    assert "hf_...(33 chars)" in out
+    assert token not in out and MARK not in out
+    assert "--redact-pattern-file" in out
+
+
+def test_scan_ignores_placeholders_references_and_hashes():
+    clean = "\n".join([
+        '{"password":"<REDACTED:PASSWORD_1>","token":"<REDACTED:TOKEN_1>"}',
+        "password = get_password(); api_key=$API_KEY; key=${SECRET_KEY}",
+        "commit 7f4d3b2a7f4d3b2a7f4d3b2a7f4d3b2a7f4d3b2a, input_tokens=1234",
+        "Authorization: Bearer <REDACTED:BEARER_TOKEN_1>",
+    ])
+    assert st.scan_upload({"trace.jsonl": clean}) == ([], 4)
+    hits, _ = st.scan_upload({"trace.jsonl": "the password: hunter2xyz"})
+    assert [(h["line"], h["category"], h["masked"]) for h in hits] == [(1, "PASSWORD", "...(10 chars)")]
+
+
+def test_dry_run_shows_scrubbed_context_never_the_value(home, monkeypatch, tmp_path, capsys):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text(json.dumps({"content": f"deploy with SERVICE_API_KEY={MARK} now"}) + "\n")
+    assert _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript),
+                "--full", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "context (scrubbed):" in out
+    assert "SERVICE_API_KEY=<REDACTED:API_KEY_1> now" in out
+    assert MARK not in out
+
+
+def test_there_is_no_unsafe_raw_mode(home, monkeypatch, tmp_path):
+    transcript = tmp_path / "t.jsonl"
+    transcript.write_text("{}\n")
+    with pytest.raises(SystemExit) as exc:
+        _run(monkeypatch, "--harness", "cursor", "--transcript", str(transcript), "--full", "--raw")
+    assert exc.value.code == 2  # argparse: unrecognized argument

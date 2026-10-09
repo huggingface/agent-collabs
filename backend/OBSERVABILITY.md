@@ -6,12 +6,12 @@ scratch bucket**, then the backend pulls it into the shared record. Your identit
 is your bucket — no token rides on the call.
 
 ```bash
-python share_trace.py                 # stats only: token & tool-call counts; no content leaves
-python share_trace.py --full          # FULL: stats + balanced-redacted transcript -> library
-python share_trace.py --full --privacy secrets  # credentials only; preserve PII
+python share_trace.py                 # stats only: a small manifest; no content leaves
+python share_trace.py --full          # FULL: stats + balanced-scrubbed transcript -> library
+python share_trace.py --full --privacy secrets  # credentials only; keep emails/home paths
 python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
-python share_trace.py --full --raw    # UNSAFE: upload transcript content as-is
-python share_trace.py --dry-run       # print the plan + the manifest; touch nothing
+python share_trace.py --full --redact-pattern-file patterns.txt  # + your own regexes
+python share_trace.py --dry-run       # print the plan, report and manifest; touch nothing
 ```
 
 The client is one self-contained file, `clients/share_trace.py` — the bootstrap
@@ -24,7 +24,7 @@ Two tiers, your choice **per session**:
 
 | Tier | What leaves your machine | Use it for |
 |---|---|---|
-| **stats** (default) | a small `manifest.md`: token usage + tool-call counts + harness/model — **no prompts, no tool args** | contributing to the project's token estimate |
+| **stats** (default) | a small `manifest.md`: harness, session id, model, start/end times, token usage, tool-call counts by tool name, redaction counts — **no prompts, no tool args** | contributing to the project's token estimate |
 | **full** (`--full`) | the above **plus** your harness's native session log (credentials and personal identifiers pseudonymized) | letting others read & build on how you worked |
 
 A `full` trace's native log renders directly in **Hugging Face's built-in trace
@@ -55,15 +55,22 @@ auto-detects your current session log; override with `--harness <name>` and
 
 - **Claude Code** — native session JSONL at `~/.claude/projects/...`. Full support
   (tokens + tool calls + the HF viewer).
-- **Codex** — rollout log at `~/.codex/sessions/...`. Full support. The client
-  first looks for a rollout that mentions the current working directory; if it
-  can only find the newest Codex rollout globally, it requires confirmation
-  before upload. **Don't run `codex exec --ephemeral`** if you intend to share —
-  ephemeral sessions write no rollout, so there's nothing to share.
+- **Codex** — rollout log at `~/.codex/sessions/...`. Full support. Codex
+  exposes no session id, so the client picks the rollout whose recorded working
+  directory is this one; if there is none, or several, it stops and prints a
+  `--transcript` command for each candidate. **Don't run `codex exec --ephemeral`**
+  if you intend to share — ephemeral sessions write no rollout, so there's
+  nothing to share.
+- **Which session.** The client only shares a session it is sure of: Claude
+  Code's exact session (`CLAUDE_CODE_SESSION_ID`), the only log for this
+  directory, or an explicit `--transcript`. Otherwise it stops — even for a
+  stats share, which still publishes the session's id, model, times and tool
+  names.
 - **Other harnesses** — if there's no adapter yet, `share_trace.py` ships a
-  minimal manifest (marked `partial`). With `--full`, it can also upload the raw
-  native log after confirmation. Token stats may be absent. (To add full support,
-  add an adapter in `share_trace.py`.)
+  minimal manifest (marked `partial`) and needs `--transcript`. With `--full`,
+  it also uploads the scrubbed native log. Token stats may be absent, and the
+  session id is a hash (`s-…`), never the log's file name. (To add full
+  support, add an adapter in `share_trace.py`.)
 
 ## Privacy
 
@@ -77,14 +84,27 @@ auto-detects your current session log; override with `--harness <name>` and
   prefixes. `secrets` preserves emails and paths; `strict` additionally aliases
   URL hosts and IP addresses. Use `--redact-pattern-file <path>` for one
   task-specific regex per line (for example, customer or project identifiers).
-- This is still best-effort: the client cannot infer that otherwise ordinary task
-  prose or source code is confidential. The redaction summary reports only
-  category counts, never original values. `--full --raw` skips content scrubbing
-  and is explicitly unsafe.
+- Credentials are also caught inside JSON serialized into strings (tool outputs,
+  request bodies), in environment-style assignments (`SERVICE_API_KEY=…`,
+  `export DB_PASSWORD=…`) and in signed-URL parameters (`X-Amz-Signature`, …).
+- **The scan.** After scrubbing, a separate check reads the exact bytes about to
+  be uploaded for anything still credential-shaped. A hit — or a scan that can't
+  finish — blocks the upload, and `--yes` can't override it. Add a regex to a
+  `--redact-pattern-file`, use `--privacy strict`, or share stats only. There is
+  no unscrubbed mode.
+- **The report.** Every run prints one row per replaced value: its placeholder,
+  what it was (a token type, the JSON key or environment variable it sat under,
+  a URL parameter, or the pattern-file line) and where — never the value. Read
+  it to spot something the scrubber should have caught; reading the whole
+  transcript is not required. `--dry-run` adds the scrubbed context around each
+  replacement.
+- This is still best-effort, not zero-risk: no heuristic can tell that
+  otherwise ordinary task prose or source code is confidential. For a session
+  with confidential material, add task-specific patterns or share stats only.
 - Scrubbing happens **before** anything is written. This matters because your
   scratch bucket is **org-readable**. The manifest uses the same scrubber, and
   full traces use a neutral `trace.jsonl`-style shared filename.
-- **The default writes only numbers** — your transcript never leaves your machine.
+- **The default writes only the manifest** — your transcript never leaves your machine.
 - The backend governs what enters the shared library; it can't retract what you put
   in your own bucket — so for the default stats share, the client deliberately
   writes no log there.
