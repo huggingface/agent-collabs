@@ -429,3 +429,31 @@ def test_jobs_registration_read_failure_is_not_a_missing_registration(env):
         _registered_hf_user(env.hub, "agent-1")
     with pytest.raises(NotRegistered):
         _registered_hf_user(env.hub, "agent-9")
+
+
+def test_a_sync_copies_only_the_files_its_caps_checked(make_env, monkeypatch):
+    """A file uploaded between the cap check's listing and the copy must not
+    be copied uncounted: the copy uses the checked listing, never a new one."""
+    env = make_env(SYNC_MAX_BYTES=2)
+    seed_agent(env.hub, "agent-1")
+    client = hub_module.HubClient(env.settings)
+    for name in ("list_bucket_dir", "copy_tree_to_central"):
+        monkeypatch.setattr(env.hub, name, getattr(client, name))
+    listings, copies = [], []
+
+    def tree(**kwargs):
+        listings.append(kwargs)
+        yield _tree_entry("out/small.bin", 1)
+        if len(listings) > 1:  # what a second listing would see
+            yield _tree_entry("out/late-and-large.bin", 5)
+
+    monkeypatch.setattr(hub_module, "list_bucket_tree", tree)
+    monkeypatch.setattr(hub_module, "batch_bucket_files", lambda **kw: copies.extend(kw.get("copy", [])))
+    r = env.client.post(
+        "/v1/artifacts:sync",
+        json={"source": "hf://buckets/test-org/test-agent-1/out", "dest_slug": "run-1"},
+    )
+    assert r.status_code == 200, r.text
+    assert len(listings) == 1
+    assert [op[3].rsplit("/", 1)[-1] for op in copies] == ["small.bin"]
+    assert r.json()["bytes_copied"] == 1

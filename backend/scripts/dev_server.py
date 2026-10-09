@@ -169,8 +169,8 @@ class PersistentFakeHub(FakeHub):
     def bucket_exists(self, bucket: str) -> bool:
         return super().bucket_exists(bucket) or (self._root / bucket).is_dir()
 
-    def copy_tree_to_central(self, src_bucket: str, src_prefix: str, dest_prefix: str):
-        out = super().copy_tree_to_central(src_bucket, src_prefix, dest_prefix)
+    def copy_tree_to_central(self, src_bucket: str, src_prefix: str, dest_prefix: str, files):
+        out = super().copy_tree_to_central(src_bucket, src_prefix, dest_prefix, files)
         for _src, dest, _size in out:
             self._persist(self._settings.central_bucket, dest)
         return out

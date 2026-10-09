@@ -649,9 +649,11 @@ class HubClient:
         )
 
     def copy_tree_to_central(
-        self, src_bucket: str, src_prefix: str, dest_prefix: str
+        self, src_bucket: str, src_prefix: str, dest_prefix: str, files: list[ListedFile]
     ) -> Iterable[tuple[str, str, int]]:
-        files = self.list_bucket_dir(src_bucket, src_prefix)
+        """Hash-copy `files` (a listing of `src_prefix` the caller already
+        checked) under `dest_prefix`. No second listing: a file uploaded after
+        the caller's cap check must not be copied uncounted."""
         if not files:
             return
         prefix = src_prefix.rstrip("/")

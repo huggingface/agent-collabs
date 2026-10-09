@@ -272,16 +272,20 @@ class FakeHub:
     def write_text_to_bucket(self, bucket: str, path: str, text: str) -> None:
         self.write_bytes_to_bucket(bucket, path, text.encode("utf-8"))
 
-    def copy_tree_to_central(self, src_bucket: str, src_prefix: str, dest_prefix: str):
-        """Mirror of HubClient.copy_tree_to_central: hash-copy a prefix into the
-        central bucket, yielding (src_rel_path, dest_path, size)."""
+    def copy_tree_to_central(self, src_bucket: str, src_prefix: str, dest_prefix: str, files):
+        """Mirror of HubClient.copy_tree_to_central: hash-copy the given listing
+        (no re-listing) into the central bucket, yielding (src_rel_path,
+        dest_path, size)."""
         self._maybe_fail_write()
         prefix = src_prefix.rstrip("/")
         central = self._central()
+        bucket = self.buckets.get(src_bucket, {})
         out = []
-        for path, data in list(self.buckets.get(src_bucket, {}).items()):
-            if prefix and not (path == prefix or path.startswith(prefix + "/")):
+        for f in files:
+            path = f.rel_path
+            if path not in bucket:
                 continue
+            data = bucket[path]
             rel = path[len(prefix) + 1 :] if prefix and path.startswith(prefix + "/") else path
             dest = f"{dest_prefix.rstrip('/')}/{rel}"
             central[dest] = data

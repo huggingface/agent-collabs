@@ -50,9 +50,11 @@ def _execute_sync(
     src_bucket: str,
     src_prefix: str,
     dest_prefix: str,
+    files: list,
 ) -> list[SyncFile]:
+    """Copy exactly `files`, the listing `_check_sync_caps` accepted."""
     out: list[SyncFile] = []
-    for src_path, dest_path, size in hub.copy_tree_to_central(src_bucket, src_prefix, dest_prefix):
+    for src_path, dest_path, size in hub.copy_tree_to_central(src_bucket, src_prefix, dest_prefix, files):
         out.append(SyncFile(src_path=src_path, dest_path=dest_path, bytes=size))
     return out
 
@@ -84,7 +86,7 @@ def artifacts_sync(
     dest_prefix = artifact_dest_dir(req.dest_slug, agent_id)
     check_dest_not_blocked(dest_prefix)
 
-    copied = _execute_sync(hub, src_bucket, src_prefix, dest_prefix)
+    copied = _execute_sync(hub, src_bucket, src_prefix, dest_prefix, files)
     total = sum(f.bytes for f in copied)
 
     audit.write(
@@ -129,7 +131,7 @@ def shared_resources_sync(
 
     dest_prefix = f"shared_resources/{req.dest_path}"
 
-    copied = _execute_sync(hub, src_bucket, src_prefix, dest_prefix)
+    copied = _execute_sync(hub, src_bucket, src_prefix, dest_prefix, files)
     total = sum(f.bytes for f in copied)
 
     audit.write(
