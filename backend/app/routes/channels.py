@@ -16,6 +16,8 @@ subscribed-channel activity rides the digest.
 from __future__ import annotations
 
 import re
+import threading
+from contextlib import contextmanager
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, Header, Query, Request, Response
@@ -283,6 +285,28 @@ def channels_digest(
     return DigestChannels(count=count, channels=items, subscribed=subscribed)
 
 
+# name -> [lock, holders]; an entry lives only while a creation for that name
+# is in flight. In-process is enough: the backend runs as a single worker (the
+# long-poll notifier already requires it).
+_creation_locks: dict[str, list] = {}
+_creation_locks_guard = threading.Lock()
+
+
+@contextmanager
+def _creation_lock(name: str):
+    with _creation_locks_guard:
+        entry = _creation_locks.setdefault(name, [threading.Lock(), 0])
+        entry[1] += 1
+    try:
+        with entry[0]:
+            yield
+    finally:
+        with _creation_locks_guard:
+            entry[1] -= 1
+            if entry[1] == 0:
+                del _creation_locks[name]
+
+
 def _announcement_body(name: str, theme: str) -> str:
     """The server-composed board message announcing a new channel — discovery
     is deterministic, never a favor the creator remembers to do."""
@@ -376,70 +400,76 @@ def create_channel(
     if not body.strip():
         raise ChannelThemeRequired()
 
-    existing = read_model.record(FOLDER, f"{req.name}/README.md")
-    if existing is not None:
-        existing_creator = _fm_str(existing.frontmatter, "creator")
-        if existing_creator != creator:
-            raise ChannelExists(req.name, existing_creator)
-        created = False
-        server_fm = {
-            "channel": req.name,
-            "creator": existing_creator,
-            "created": existing.frontmatter.get("created"),
-            "updated": stamp_yaml(now),
-            "via": via,
-        }
-    else:
-        created = True
-        if via == "bucket":
-            allowed, retry = create_limiter.try_consume(creator)
-            if not allowed:
-                raise RateLimited(
-                    retry,
-                    f"channel creation limit reached ({settings.channel_create_per_hour} "
-                    "per hour); reuse an existing channel or retry later",
-                )
-        server_fm = {
-            "channel": req.name,
-            "creator": creator,
-            "created": stamp_yaml(now),
-            "via": via,
-        }
+    # One creation per channel name at a time, from the existence check
+    # through the write and the cache update: two creators racing for a new
+    # name would otherwise both see it free, both announce, and the later
+    # write would replace the other's README. The loser now sees the winner's
+    # channel: 409 for another creator, an update for the same one.
+    with _creation_lock(req.name):
+        existing = read_model.record(FOLDER, f"{req.name}/README.md")
+        if existing is not None:
+            existing_creator = _fm_str(existing.frontmatter, "creator")
+            if existing_creator != creator:
+                raise ChannelExists(req.name, existing_creator)
+            created = False
+            server_fm = {
+                "channel": req.name,
+                "creator": existing_creator,
+                "created": existing.frontmatter.get("created"),
+                "updated": stamp_yaml(now),
+                "via": via,
+            }
+        else:
+            created = True
+            if via == "bucket":
+                allowed, retry = create_limiter.try_consume(creator)
+                if not allowed:
+                    raise RateLimited(
+                        retry,
+                        f"channel creation limit reached ({settings.channel_create_per_hour} "
+                        "per hour); reuse an existing channel or retry later",
+                    )
+            server_fm = {
+                "channel": req.name,
+                "creator": creator,
+                "created": stamp_yaml(now),
+                "via": via,
+            }
 
-    merged = merge(client_fm, server_fm)
-    content = serialise(merged, body)
-    content_bytes = content.encode("utf-8")
-    items: list[tuple[bytes, str]] = [(content_bytes, target)]
+        merged = merge(client_fm, server_fm)
+        content = serialise(merged, body)
+        content_bytes = content.encode("utf-8")
+        items: list[tuple[bytes, str]] = [(content_bytes, target)]
 
-    announcement: str | None = None
-    if created:
-        member_path = channel_member_path(req.name, creator)
-        marker_fm, marker_text = subscription_marker(req.name, creator, now, via)
-        marker_bytes = marker_text.encode("utf-8")
-        items.append((marker_bytes, member_path))
+        announcement: str | None = None
+        if created:
+            member_path = channel_member_path(req.name, creator)
+            marker_fm, marker_text = subscription_marker(req.name, creator, now, via)
+            marker_bytes = marker_text.encode("utf-8")
+            items.append((marker_bytes, member_path))
 
-        # The announcement is a stamped board message authored as the
-        # creator, so it goes through the same per-author monotonic stamp
-        # guard as promote_message (no same-ms filename collisions).
-        ann_now = unique_stamp_time(creator, now)
-        ann_fm = {
-            "type": "note",
-            "agent": creator,
-            "timestamp": stamp_yaml(ann_now),
-            "via": "server",
-        }
-        ann_body = _announcement_body(req.name, body)
-        ann_content = serialise(ann_fm, ann_body)
-        ann_bytes = ann_content.encode("utf-8")
-        ann_target = message_path(creator, ann_now)
-        announcement = ann_target.rsplit("/", 1)[-1]
-        items.append((ann_bytes, ann_target))
+            # The announcement is a stamped board message authored as the
+            # creator, so it goes through the same per-author monotonic stamp
+            # guard as promote_message (no same-ms filename collisions).
+            ann_now = unique_stamp_time(creator, now)
+            ann_fm = {
+                "type": "note",
+                "agent": creator,
+                "timestamp": stamp_yaml(ann_now),
+                "via": "server",
+            }
+            ann_body = _announcement_body(req.name, body)
+            ann_content = serialise(ann_fm, ann_body)
+            ann_bytes = ann_content.encode("utf-8")
+            ann_target = message_path(creator, ann_now)
+            announcement = ann_target.rsplit("/", 1)[-1]
+            items.append((ann_bytes, ann_target))
 
-    hub.write_many_central(items)
-    read_model.write_through(target, merged, body, len(content_bytes), folder=FOLDER)
-    if created:
-        read_model.write_through(member_path, marker_fm, "", len(marker_bytes), folder=FOLDER)
-        read_model.write_through(ann_target, ann_fm, ann_body, len(ann_bytes))
+        hub.write_many_central(items)
+        read_model.write_through(target, merged, body, len(content_bytes), folder=FOLDER)
+        if created:
+            read_model.write_through(member_path, marker_fm, "", len(marker_bytes), folder=FOLDER)
+            read_model.write_through(ann_target, ann_fm, ann_body, len(ann_bytes))
 
     audit.write(
         agent_id=creator,

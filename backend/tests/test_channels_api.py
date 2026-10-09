@@ -3,6 +3,8 @@ with auto-subscribe and mention fan-out, subscribe/unsubscribe idempotency and
 spoof resistance, the cross-channel feed, and the digest block."""
 from __future__ import annotations
 
+import threading
+
 from fakes import seed_agent
 
 
@@ -595,3 +597,105 @@ def test_v1_describes_channel_creation_as_configured(make_env):
     assert row["purpose"].startswith("organizer-only")
     assert "create a channel" in on["conventions"]["channels"]
     assert "curated by the organizers" in off["conventions"]["channels"]
+
+
+# ── concurrent creation of one name ─────────────────────────────────
+
+
+def _hold_first_write(env, monkeypatch):
+    """Block the first central batch write until `release` is set."""
+    entered, release = threading.Event(), threading.Event()
+    write = env.hub.write_many_central
+    calls = []
+
+    def held(items):
+        calls.append(items)
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return write(items)
+
+    monkeypatch.setattr(env.hub, "write_many_central", held)
+    return entered, release
+
+
+def _post_in_thread(env, body, headers=None):
+    out = {}
+    t = threading.Thread(
+        target=lambda: out.update(r=env.client.post("/v1/channels", json=body, headers=headers))
+    )
+    t.start()
+    return t, out
+
+
+def _agent_body(env, agent, name, theme="A theme."):
+    return {"name": name, "source": seed_source(env, agent, f"drafts/{name}-{agent}.md", theme)}
+
+
+def _race(env, monkeypatch, first, second):
+    """Hold `first`'s write, start `second`, check it waits, then release.
+    Each is (body, headers). Returns both responses."""
+    entered, release = _hold_first_write(env, monkeypatch)
+    t1, r1 = _post_in_thread(env, *first)
+    assert entered.wait(5)
+    t2, r2 = _post_in_thread(env, *second)
+    t2.join(0.3)
+    assert t2.is_alive()  # waiting on the first creation, not writing
+    release.set()
+    t1.join(5)
+    t2.join(5)
+    return r1["r"], r2["r"]
+
+
+def _announcements(env, name):
+    board = env.client.get("/v1/messages?expand=true&limit=100").json()["items"]
+    return [m for m in board if f"#{name}" in m["body"] and m["frontmatter"].get("via") == "server"]
+
+
+def test_racing_agents_one_wins_the_other_gets_409(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    first, second = _race(
+        env, monkeypatch,
+        (_agent_body(env, "bb", "evals", "bb's theme."), None),
+        (_agent_body(env, "cc", "evals", "cc's theme."), None),
+    )
+    assert first.status_code == 201
+    assert second.status_code == 409 and second.json()["error"]["code"] == "CHANNEL_EXISTS"
+    theme = env.client.get("/v1/channels/evals").json()["theme"]
+    assert theme["frontmatter"]["creator"] == "bb" and "bb's theme." in theme["body"]
+    assert len(_announcements(env, "evals")) == 1
+
+
+def test_an_agent_racing_an_organizer_gets_409(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    make_organizer(env)
+    organizer = {"name": "evals", "agent_id": CREATOR, "body": "Organizer theme."}
+    first, second = _race(env, monkeypatch, (organizer, AUTH), (_agent_body(env, "bb", "evals"), None))
+    assert first.status_code == 201
+    assert second.status_code == 409
+    assert env.client.get("/v1/channels/evals").json()["theme"]["frontmatter"]["creator"] == CREATOR
+    assert len(_announcements(env, "evals")) == 1
+
+
+def test_a_racing_retry_by_the_same_creator_is_an_update(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    body = _agent_body(env, "bb", "evals")
+    first, second = _race(env, monkeypatch, (body, None), (body, None))
+    assert (first.status_code, second.status_code) == (201, 200)
+    assert second.json()["created"] is False and second.json()["announcement"] is None
+    assert len(_announcements(env, "evals")) == 1
+
+
+def test_creating_another_name_does_not_wait(env, monkeypatch):
+    seed_agent(env.hub, "bb")
+    seed_agent(env.hub, "cc")
+    entered, release = _hold_first_write(env, monkeypatch)
+    t1, r1 = _post_in_thread(env, _agent_body(env, "bb", "evals"))
+    assert entered.wait(5)
+    t2, r2 = _post_in_thread(env, _agent_body(env, "cc", "infra"))
+    t2.join(5)
+    assert not t2.is_alive() and r2["r"].status_code == 201
+    release.set()
+    t1.join(5)
+    assert r1["r"].status_code == 201
