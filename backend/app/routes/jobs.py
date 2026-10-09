@@ -37,11 +37,17 @@ def _registered_hf_user(hub: HubClient, agent_id: str) -> str:
     """Confirm the agent is registered and return its bound hf_user.
 
     Registration binds agent_id -> hf_user -> agent_bucket, so a present, parseable
-    registration is what proves the scratch bucket belongs to this agent.
+    registration is what proves the scratch bucket belongs to this agent. Only
+    a missing registration is NOT_REGISTERED; a failed read propagates (a
+    retryable 503), so a storage outage never tells an agent it isn't
+    registered.
     """
+    raw = hub.read_central_bytes_optional(registration_path(agent_id))
+    if raw is None:
+        raise NotRegistered(agent_id)
     try:
-        text = hub.read_central_text(registration_path(agent_id))
-    except Exception:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
         raise NotRegistered(agent_id)
     fm, _ = parse(text)
     hf_user = fm.get("hf_user")
