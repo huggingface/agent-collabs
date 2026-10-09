@@ -74,3 +74,15 @@ def test_me_sums_traces_of_the_callers_agents(env):
         "sessions": 2,
         "last_shared_at": "2026-06-02 10:00 UTC",
     }
+
+
+def test_me_answers_with_an_empty_trace_summary_when_storage_fails(env):
+    # The agents or traces folder can't be listed: identity and organizer
+    # status still come back; only the trace summary is empty.
+    env.hub.org_roles = {"test-user": "admin"}
+    for folder in ("agents", "traces"):
+        env.hub.fail_next_listing(folder)
+        r = _me(env)
+        assert r.status_code == 200, (folder, r.text)
+        assert r.json()["is_organizer"] is True
+        assert r.json()["traces"] == {"sessions": 0, "last_shared_at": None}

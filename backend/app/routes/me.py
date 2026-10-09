@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, Header
 
 from app.auth import extract_bearer
@@ -7,12 +9,14 @@ from app.config import Settings
 from app.deps import get_hub, get_org_roles, get_read_model, get_settings_dep
 from app.errors import Unauthorized
 from app.hub import HubClient
-from app.models import MeResponse
+from app.models import AgentTraces, MeResponse
 from app.org_roles import OrgRoles
 from app.read_model import ReadModel
 from app.trace_stats import agent_traces
 from app.validation import HUMAN_HANDLE_PREFIX
 
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -34,7 +38,9 @@ def get_me(
     degrades to is_organizer=false if that lookup is unavailable, so a
     transient outage hides the toggle rather than 503-ing the whole page.
 
-    `traces` sums what this user's registered agents have shared.
+    `traces` sums what this user's registered agents have shared. It is
+    best-effort the same way: if the agents or traces folder can't be read,
+    it is an empty summary rather than an error for the whole response.
     """
     token = extract_bearer(authorization)
     if not token:
@@ -57,15 +63,25 @@ def get_me(
             )
         except Exception:
             is_organizer = False
-    my_agents = {
-        r.filename.removesuffix(".md")
-        for r in read_model.records("agents")
-        if r.frontmatter.get("hf_user") == identity.username
-    }
     return MeResponse(
         hf_user=identity.username,
         handle=f"{HUMAN_HANDLE_PREFIX}{identity.username.lower()}",
         is_member=is_member,
         is_organizer=is_organizer,
-        traces=agent_traces(read_model, my_agents),
+        traces=_my_traces(read_model, identity.username),
     )
+
+
+def _my_traces(read_model: ReadModel, hf_user: str) -> AgentTraces:
+    """Traces shared by the agents `hf_user` registered; empty if the agents or
+    traces folder can't be read (logged, type only)."""
+    try:
+        my_agents = {
+            r.filename.removesuffix(".md")
+            for r in read_model.records("agents")
+            if r.frontmatter.get("hf_user") == hf_user
+        }
+        return agent_traces(read_model, my_agents)
+    except Exception as e:
+        log.warning("trace summary skipped for /v1/me (type=%s)", type(e).__name__)
+        return AgentTraces(sessions=0)
