@@ -132,9 +132,9 @@ def _cc_read(path: Path) -> dict:
     API response's message.id and usage — so usage is kept per message.id
     (last write wins) and summed once; tool calls are deduped by tool_use id."""
     responses: dict = {}  # message.id (or a per-line key if absent) -> usage
+    response_models: dict = {}  # same key -> the model that answered, if recorded
     tools: dict[str, int] = {}
     seen_tools: set = set()
-    models: set[str] = set()
     model = first_ts = last_ts = None
     session_id = None  # from the records; never the file name
 
@@ -150,9 +150,9 @@ def _cc_read(path: Path) -> dict:
         msg = rec.get("message") or {}
         if msg.get("model"):
             model = msg["model"]
-            models.add(model)
         key = msg.get("id") or ("line", len(responses))
         responses[key] = msg.get("usage") or responses.get(key) or {}
+        response_models[key] = msg.get("model") or response_models.get(key)
         for block in msg.get("content") or []:
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 if block.get("id"):
@@ -166,8 +166,19 @@ def _cc_read(path: Path) -> dict:
     if any(responses.values()):
         usage = {k: sum(_int(u.get(src)) or 0 for u in responses.values()) for k, src in _CC_USAGE_KEYS}
         usage["total_tokens"] = sum(usage.values())
+    # Which models the tokens came from. Only responses that used tokens
+    # count: Claude Code's local `<synthetic>` replies report zero. A billed
+    # response with no model can't be credited to any named model.
+    billed = [
+        response_models.get(k)
+        for k, u in responses.items()
+        if u and sum(_int(u.get(src)) or 0 for _, src in _CC_USAGE_KEYS) > 0
+    ]
+    models = {m for m in billed if m}
+    unknown_model = any(not m for m in billed)
     return {"usage": usage, "requests": len(responses), "tools": tools, "model": model,
-            "models": models, "session_id": session_id, "first_ts": first_ts, "last_ts": last_ts}
+            "models": models, "unknown_model": unknown_model, "session_id": session_id,
+            "first_ts": first_ts, "last_ts": last_ts}
 
 
 def adapter_claude_code(log_path: Path) -> dict:
@@ -194,19 +205,27 @@ def adapter_claude_code(log_path: Path) -> dict:
     if unmeasured:
         extensions["subagent_sessions_unmeasured"] = len(unmeasured)
     # The manifest model is where the stats attribute ALL the counted tokens,
-    # so with subagents it names one model only if every measured log used
-    # that model alone. Otherwise it is "mixed" (no per-model split here); the
-    # parent's model stays as a description.
+    # so with subagents it names one model only if every measured response in
+    # every measured log came from that model. Otherwise it is "mixed" (no
+    # per-model split here); the parent's model stays as a description.
     measured = [log for log in logs if log["usage"]]
     models = set().union(*(log["models"] for log in measured)) if measured else set()
-    mixed = bool(subs) and (len(models) > 1 or any(not log["models"] for log in measured))
-    if mixed and main["model"]:
-        extensions["main_model"] = main["model"]
+    mixed = bool(subs) and (len(models) > 1 or any(log["unknown_model"] for log in measured))
+    # The parent's model: the one its tokens came from, else the last it named.
+    main_model = next(iter(main["models"])) if len(main["models"]) == 1 else main["model"]
+    if mixed and main_model:
+        extensions["main_model"] = main_model
+    if mixed:
+        model = "mixed"
+    elif subs and len(models) == 1:
+        model = next(iter(models))  # the one model every billed response used
+    else:
+        model = main["model"]  # no subagents: unchanged
 
     fields: dict = {
         "harness": "claude-code",
         "session_id": main["session_id"],  # never the file name
-        "model": "mixed" if mixed else main["model"],
+        "model": model,
         "started_at": min(starts) if starts else None,
         "ended_at": max(ends) if ends else None,
         "activity": {"tool_calls": sum(tools.values()), "tool_calls_by_name": tools},

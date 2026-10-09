@@ -921,3 +921,25 @@ def test_an_unmeasured_subagent_does_not_decide_the_model(tmp_path):
     # tokens "mixed".
     main = _cc_session(tmp_path, [_cc_line("p", 100)], [_cc_line("c", None, model=None)])
     assert st.adapter_claude_code(main)["model"] == "m"
+
+
+def test_a_measured_response_without_a_model_makes_the_session_mixed(tmp_path):
+    # One child log with a known-model response and a measured response that
+    # names no model: its tokens can't be credited to model-a.
+    main = _cc_session(
+        tmp_path,
+        [_cc_line("p", 100, model="model-a")],
+        [_cc_line("c1", 10, model="model-a"), _cc_line("c2", 20, model=None)],
+    )
+    fields = st.adapter_claude_code(main)
+    assert fields["model"] == "mixed"
+    assert fields["extensions"]["main_model"] == "model-a"
+    assert fields["usage"]["total_tokens"] == 130  # still all on this agent's session
+
+
+def test_zero_token_replies_do_not_decide_the_model(tmp_path):
+    # Claude Code's local `<synthetic>` replies report zero tokens: nothing to
+    # attribute, so they don't make a single-model session "mixed".
+    main = _cc_session(tmp_path, [_cc_line("p", 100), _cc_line("x", 0, model="<synthetic>")],
+                       [_cc_line("c", 10), _cc_line("y", 0, model=None)])
+    assert st.adapter_claude_code(main)["model"] == "m"
