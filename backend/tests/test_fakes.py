@@ -105,11 +105,11 @@ def test_fail_next_read_fails_the_whole_download_many_batch():
         hub.download_many(central, paths)
     assert len(hub.download_many(central, paths)) == 2  # toggle reset
 
-    injected = RuntimeError("injected")
-    hub.fail_next_read("message_board/", injected)
+    hub.fail_next_read("message_board/", RuntimeError("injected"))
     with pytest.raises(DownloadFailed) as caught:
         hub.download_many(central, paths)
-    assert caught.value.__cause__ is injected
+    assert caught.value.type_name == "RuntimeError"  # its type, never its text
+    assert "injected" not in str(caught.value)
 
 
 def test_fail_next_read_is_not_consumed_by_an_empty_batch():

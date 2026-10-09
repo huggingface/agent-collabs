@@ -163,11 +163,13 @@ class ReadModel:
         now = self._clock()
         with self._folders_lock:
             folders = dict(self._folders)
-        errors = {
-            name: {"error": f.last_error[0], "age_s": round(now - f.last_error[1], 1)}
-            for name, f in sorted(folders.items())
-            if f.last_error is not None
-        }
+        errors = {}
+        for name, f in sorted(folders.items()):
+            # Read once, without the folder lock (held across listing calls): a
+            # concurrent recovery may clear it between a check and a re-read.
+            err = f.last_error
+            if err is not None:
+                errors[name] = {"error": err[0], "age_s": round(now - err[1], 1)}
         return {
             "folders": len(folders),
             "content_cache_bytes": self._content_bytes,
@@ -270,20 +272,15 @@ class ReadModel:
         return out
 
     def record(self, folder: str, filename: str) -> Record | None:
-        """One file, resolved through the cache; None if it isn't listed."""
+        """One file, resolved through the cache; None if it isn't listed.
+        Single-flighted with the folder's other resolves, so a cold read of a
+        file another request (or the warm-up) is fetching waits for that fetch
+        and then hits the cache instead of downloading it again."""
         path = f"{folder}/{filename}"
         entry = next((e for e in self.listing(folder) if e.rel_path == path), None)
         if entry is None:
             return None
-        with self._content_lock:
-            rec = self._resolve_cached(entry)
-        if rec is not None:
-            return rec
-        raw = self._hub.download_many(self._settings.central_bucket, [path]).get(path)
-        if raw is None:
-            return None
-        with self._content_lock:
-            return self._insert(entry, raw)
+        return self._resolve_folder(folder, [entry]).get(path)
 
     def _resolve_cached(self, e: ListedFile) -> Record | None:
         """Caller holds ``_content_lock``."""

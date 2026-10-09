@@ -43,8 +43,9 @@ def test_listing_interrupted_mid_pagination_raises(monkeypatch):
     monkeypatch.setattr(hub_mod, "list_bucket_tree", tree)
     with pytest.raises(ListingFailed):
         _client().list_central_dir("message_board")
-    # Scratch-bucket callers keep their [] contract, but never get the prefix.
-    assert _client().list_bucket_dir("test-org/test-agent-1", "message_board") == []
+    # A scratch listing fails the same way: [] would pass for "no files".
+    with pytest.raises(ListingFailed):
+        _client().list_bucket_dir("test-org/test-agent-1", "message_board")
 
 
 def test_download_many_skips_only_genuinely_missing_files(monkeypatch):

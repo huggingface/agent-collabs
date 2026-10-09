@@ -42,16 +42,28 @@ from app.naming import SourceURI, parse_source_uri
 log = logging.getLogger(__name__)
 
 
-class ListingFailed(RuntimeError):
+class _ReadFailed(RuntimeError):
+    """A failed read, keeping only its cause's type and HTTP status (an
+    explicit Xet 401/403 included) — never the cause's text, which can carry
+    signed URLs or Xet credentials. Raised ``from None`` so a logged traceback
+    can't show the cause either."""
+
+    def __init__(self, cause: BaseException):
+        self.type_name = getattr(cause, "type_name", type(cause).__name__)
+        self.status = (
+            getattr(cause, "status", None) or _status(cause) or xet_refusal_status(cause)
+        )
+        super().__init__(f"type={self.type_name} status={self.status}")
+
+
+class ListingFailed(_ReadFailed):
     """A bucket listing did not complete. Never carries partial results: a
-    page-3 failure after pages 1-2 must not pass for the whole folder. Its
-    message is the cause's type and status only (see _failure)."""
+    page-3 failure after pages 1-2 must not pass for the whole folder."""
 
 
-class DownloadFailed(RuntimeError):
+class DownloadFailed(_ReadFailed):
     """A batch download failed (after one retry). Files that are genuinely
-    absent are not a failure — they are just missing from the result. Its
-    message is the cause's type and status only (see _failure)."""
+    absent are not a failure — they are just missing from the result."""
 
 
 @dataclass
@@ -99,7 +111,7 @@ def _failure(e: BaseException) -> str:
     """A failure as "type=... status=...", for logs and the messages of
     ListingFailed/DownloadFailed (which reach /v1/healthz): exception text can
     carry signed URLs or Xet credentials, so it is never included."""
-    status = getattr(e, "status", None) or _status(e)
+    status = getattr(e, "status", None) or _status(e) or xet_refusal_status(e)
     return f"type={getattr(e, 'type_name', type(e).__name__)} status={status}"
 
 
@@ -493,7 +505,7 @@ class HubClient:
                         bucket, len(chunk), attempt, _failure(e),
                     )
                     if attempt == 2:
-                        raise DownloadFailed(_failure(e)) from e
+                        raise DownloadFailed(e) from None
         return out
 
     def _download_chunk(self, bucket: str, chunk: list[str]) -> dict[str, bytes]:
@@ -516,12 +528,15 @@ class HubClient:
         return self._list(self._settings.central_bucket, prefix)
 
     def list_bucket_dir(self, bucket: str, prefix: str) -> list[ListedFile]:
-        """Listing of an agent scratch bucket; [] if it cannot be listed (a
-        missing bucket reads as empty to the callers), never a partial list."""
+        """Listing of an agent scratch bucket: [] only when the bucket does not
+        exist (a 404). Any other failure raises ``ListingFailed`` — read as
+        "no files", it would let a sync skip its caps or a trace look empty."""
         try:
             return self._list(bucket, prefix)
-        except ListingFailed:
-            return []
+        except ListingFailed as e:
+            if e.status == 404:
+                return []
+            raise
 
     def _list(self, bucket: str, prefix: str) -> list[ListedFile]:
         """All files under ``prefix``, or ``ListingFailed``. The tree is
@@ -546,7 +561,7 @@ class HubClient:
             log.warning(
                 "list(%s, %s) failed after %d entries (%s)", bucket, prefix, len(out), _failure(e)
             )
-            raise ListingFailed(_failure(e)) from e
+            raise ListingFailed(e) from None
         return out
 
     # ───────────────────────── Writes (central bucket) ─────────────────────────
@@ -636,7 +651,7 @@ class HubClient:
     def copy_tree_to_central(
         self, src_bucket: str, src_prefix: str, dest_prefix: str
     ) -> Iterable[tuple[str, str, int]]:
-        files = self._list(src_bucket, src_prefix)
+        files = self.list_bucket_dir(src_bucket, src_prefix)
         if not files:
             return
         prefix = src_prefix.rstrip("/")

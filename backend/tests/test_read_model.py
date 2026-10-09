@@ -345,3 +345,66 @@ def test_updates_records_leaves_other_views_untagged():
     hub.seed(f"inbox/agent-1/{fn}", serialise({"agent": "agent-2"}, "ping @agent-1"))
     assert rm.updates_records("agent-1")[0].reasons == ["mention"]
     assert rm.inbox_records("agent-1")[0].reasons is None
+
+
+# ── health stats during recovery; single-flight for record() ────────
+
+
+class _RecoveringFolder:
+    """A folder whose listing recovers right after stats() first looks at it:
+    every later read of last_error sees the cleared value."""
+
+    def __init__(self, err):
+        self._err, self.reads = err, 0
+
+    @property
+    def last_error(self):
+        self.reads += 1
+        return self._err if self.reads == 1 else None
+
+
+def test_stats_reads_each_listing_error_once():
+    rm, _hub, clock, _s = make_rm()
+    rm._folders["message_board"] = _RecoveringFolder(("type=HfHubHTTPError status=503", clock()))
+    errors = rm.stats()["listing_errors"]  # a re-read would see None and crash
+    assert errors["message_board"]["error"] == "type=HfHubHTTPError status=503"
+
+
+def _hold_first_download(hub):
+    """Block the first download_many until `release` is set; count all calls."""
+    entered, release = threading.Event(), threading.Event()
+    download = hub.download_many
+    calls = []
+
+    def held(bucket, paths):
+        calls.append(list(paths))
+        if len(calls) == 1:
+            entered.set()
+            assert release.wait(5)
+        return download(bucket, paths)
+
+    hub.download_many = held
+    return entered, release, calls
+
+
+@pytest.mark.parametrize("first", ["record", "folder"])
+def test_a_cold_record_read_waits_for_an_inflight_fetch(first):
+    """Two cold reads of one message, or a read during the folder's warm-up
+    fetch, cost one download: the second waits, then hits the cache."""
+    rm, hub, _clock, _s = make_rm()
+    fn = seed_message(hub, "20260601-120000-000", "agent-1", "hello")
+    entered, release, calls = _hold_first_download(hub)
+    results = {}
+    start = (lambda: rm.record("message_board", fn)) if first == "record" else (lambda: rm.records("message_board"))
+    a = threading.Thread(target=lambda: results.update(a=start()))
+    a.start()
+    assert entered.wait(5)
+    b = threading.Thread(target=lambda: results.update(b=rm.record("message_board", fn)))
+    b.start()
+    b.join(0.3)
+    assert b.is_alive()  # waiting on the in-flight fetch, not downloading
+    release.set()
+    a.join(5)
+    b.join(5)
+    assert len(calls) == 1
+    assert results["b"].body.strip() == "hello"

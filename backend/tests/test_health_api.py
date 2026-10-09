@@ -57,7 +57,7 @@ def test_healthz_read_model_gauges(make_env):
     assert env.client.get("/v1/messages").json()["count"] == 1
     errors = env.client.get("/v1/healthz").json()["read_model"]["listing_errors"]
     assert set(errors) == {"message_board"}
-    assert "simulated" in errors["message_board"]["error"]
+    assert errors["message_board"]["error"] == "type=HfHubHTTPError status=500"
     assert errors["message_board"]["age_s"] >= 0
 
     env.client.get("/v1/messages")  # the next listing succeeds and clears it

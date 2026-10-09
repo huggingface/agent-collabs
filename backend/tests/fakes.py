@@ -151,14 +151,14 @@ class FakeHub:
         self._maybe_sleep()
         if self._fail_listing_folder == prefix:
             self._fail_listing_folder = None
-            raise ListingFailed(f"simulated listing failure: {prefix}")
+            raise ListingFailed(_http_error("simulated listing failure")) from None
         if self._partial_listing is not None and self._partial_listing[0] == prefix:
             _, drop = self._partial_listing
             self._partial_listing = None
             if drop:
-                raise ListingFailed(
-                    f"simulated failure after {max(len(files) - drop, 0)} entries: {prefix}"
-                )
+                # Interrupted after all but `drop` entries: HubClient discards
+                # the pages it read and raises.
+                raise ListingFailed(_http_error("simulated mid-listing failure")) from None
         return files
 
     # ── HubClient surface used by the app ────────────────────────────
@@ -178,22 +178,21 @@ class FakeHub:
     def list_central_dir(self, prefix: str) -> list[ListedFile]:
         self.list_calls += 1
         if self.fail_listings:
-            raise ListingFailed(f"simulated listing outage: {prefix}")
+            raise ListingFailed(_http_error("simulated listing outage")) from None
         return self._apply_listing_toggles(prefix, self._listed(self._central(), prefix))
 
     def list_bucket_dir(self, bucket: str, prefix: str) -> list[ListedFile]:
+        # A missing bucket lists as [] (HubClient maps only a 404 to []);
+        # any other failure raises, as there.
         files = self._listed(self.buckets.get(bucket, {}), prefix)
-        try:
-            return self._apply_listing_toggles(prefix, files)
-        except ListingFailed:
-            return []  # as HubClient.list_bucket_dir
+        return self._apply_listing_toggles(prefix, files)
 
     def download_many(self, bucket: str, remote_paths: list[str]) -> dict[str, bytes]:
         self.download_calls += 1
         exc = self._take_read_failure(*remote_paths)
         if exc is not None:
             # HubClient retries a failed chunk once, then raises DownloadFailed.
-            raise DownloadFailed(f"simulated batch download failure: {bucket}") from exc
+            raise DownloadFailed(exc) from None
         files = self.buckets.get(bucket, {})
         return {p: files[p] for p in remote_paths if p in files}
 

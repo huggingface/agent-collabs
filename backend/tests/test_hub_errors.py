@@ -2,7 +2,9 @@
 {"error": {code, message, hint?}} body, never a bare 500 or a FastAPI 422."""
 from __future__ import annotations
 
+import json
 import logging
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -317,3 +319,100 @@ def test_failed_batch_download_is_503_not_404(env):
     env.hub.fail_next_read("message_board/")
     _error(env.client.get(f"/v1/messages/{fn}"), 503, "STORAGE_UNAVAILABLE")
     assert env.client.get(f"/v1/messages/{fn}").status_code == 200
+
+
+# ── scratch listings and read failures keep their status ────────────
+
+
+def _tree_entry(path: str, size: int):
+    return SimpleNamespace(type="file", path=path, size=size, xet_hash="ab" * 32)
+
+
+def test_a_failed_scratch_listing_stops_a_sync_before_its_caps(make_env, monkeypatch):
+    """The cap check's listing times out and the copy's listing succeeds: the
+    sync must fail, not pass the caps on zero files and then copy."""
+    env = make_env(SYNC_MAX_BYTES=1)
+    seed_agent(env.hub, "agent-1")
+    client = hub_module.HubClient(env.settings)
+    for name in ("list_bucket_dir", "copy_tree_to_central"):
+        monkeypatch.setattr(env.hub, name, getattr(client, name))
+    listings, copies = [], []
+
+    def tree(**kwargs):
+        listings.append(kwargs)
+        if len(listings) == 1:
+            raise httpx.ReadTimeout("timed out")
+        yield _tree_entry("out/big.bin", 2)
+
+    monkeypatch.setattr(hub_module, "list_bucket_tree", tree)
+    monkeypatch.setattr(hub_module, "batch_bucket_files", lambda **kw: copies.append(kw))
+    r = env.client.post(
+        "/v1/artifacts:sync",
+        json={"source": "hf://buckets/test-org/test-agent-1/out", "dest_slug": "run-1"},
+    )
+    _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert copies == []
+
+
+def test_a_scratch_listing_is_empty_only_for_a_missing_bucket(env, monkeypatch):
+    client = hub_module.HubClient(env.settings)
+
+    def tree_raising(exc):
+        def tree(**kwargs):
+            raise exc
+            yield  # a generator, like list_bucket_tree
+
+        return tree
+
+    monkeypatch.setattr(hub_module, "list_bucket_tree", tree_raising(_hub_error(404, RepositoryNotFoundError)))
+    assert client.list_bucket_dir("test-org/test-agent-1", "out") == []
+    for exc in (_hub_error(403), _hub_error(503), httpx.ReadTimeout("timed out")):
+        monkeypatch.setattr(hub_module, "list_bucket_tree", tree_raising(exc))
+        with pytest.raises(hub_module.ListingFailed):
+            client.list_bucket_dir("test-org/test-agent-1", "out")
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_a_refused_cold_listing_is_the_deployment_503(env, monkeypatch, caplog, status):
+    client = hub_module.HubClient(env.settings)
+    monkeypatch.setattr(env.hub, "list_central_dir", client.list_central_dir)
+
+    def tree(**kwargs):
+        raise _hub_error(status)
+        yield
+
+    monkeypatch.setattr(hub_module, "list_bucket_tree", tree)
+    with caplog.at_level(logging.WARNING):
+        r = env.client.get("/v1/messages")
+    err = _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert f"HTTP {status}" in err["message"] and "tell the organizer" in err["message"]
+    assert f"status={status})" in caplog.text
+    health = env.client.get("/v1/healthz").json()["read_model"]["listing_errors"]
+    assert health["message_board"]["error"] == f"type=HfHubHTTPError status={status}"
+    assert MARKER not in caplog.text + r.text + json.dumps(health)
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        _hub_error(403),
+        ConnectionError(f"Network error: HTTP status client error (403 Forbidden), domain: {SIGNED_URL}"),
+    ],
+    ids=["http", "xet"],
+)
+def test_a_refused_download_is_the_deployment_503(env, monkeypatch, caplog, exc):
+    fn = "20260601-100000-000_agent-1.md"
+    env.hub.seed(f"message_board/{fn}", "---\nagent: agent-1\n---\nhi")
+    client = hub_module.HubClient(env.settings)
+    monkeypatch.setattr(env.hub, "download_many", client.download_many)
+
+    def download(**kwargs):
+        raise exc
+
+    monkeypatch.setattr(hub_module, "download_bucket_files", download)
+    with caplog.at_level(logging.WARNING):
+        r = env.client.get(f"/v1/messages/{fn}")
+    err = _error(r, 503, "STORAGE_UNAVAILABLE")
+    assert "HTTP 403" in err["message"] and "tell the organizer" in err["message"]
+    assert "status=403)" in caplog.text
+    assert MARKER not in caplog.text and MARKER not in r.text
