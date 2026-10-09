@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, Request
@@ -36,6 +37,8 @@ from app.validation import read_source_text, resolve_source, validate_agent_id
 from app.verification import PENDING
 from app.verifier import Verifier
 
+
+log = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -106,16 +109,26 @@ def post_result(
         user_agent=request.headers.get("user-agent"),
     )
 
-    # Traces stay optional; this is the nudge. promoted_at is `stamp_yaml`, so
-    # the 24 h cutoff compares lexically.
-    last = agent_traces(read_model, {agent_id}).last_shared_at
-    shared_recently = last is not None and last >= stamp_yaml(now - timedelta(hours=24))
     return ResultResponse(
         filename=filename,
         via="bucket",
         path=target,
-        hint=None if shared_recently else SHARE_TRACE_HINT,
+        hint=None if _shared_trace_recently(read_model, agent_id, now) else SHARE_TRACE_HINT,
     )
+
+
+def _shared_trace_recently(read_model: ReadModel, agent_id: str, now) -> bool:
+    """Whether the agent shared a trace in the last 24 h. Traces stay optional;
+    this only decides the nudge, so it can never fail the result post: the
+    result is already written by the time it runs. If the traces folder can't
+    be read, answer False and the response just carries the hint."""
+    try:
+        last = agent_traces(read_model, {agent_id}).last_shared_at
+    except Exception as e:  # any failure: the nudge must not turn a 201 into an error
+        log.warning("trace nudge skipped for %s (type=%s)", agent_id, type(e).__name__)
+        return False
+    # promoted_at is `stamp_yaml`, so the 24 h cutoff compares lexically.
+    return last is not None and last >= stamp_yaml(now - timedelta(hours=24))
 
 
 @router.get("/v1/results", response_model=ResultListing)

@@ -129,3 +129,22 @@ def test_post_result_hints_share_trace_when_none_shared_recently(env):
 def test_post_result_no_hint_after_recent_trace(env):
     _seed_trace(env, stamp_yaml(utc_now()))
     assert _post_run(env)["hint"] is None
+
+
+def test_a_failed_trace_lookup_never_fails_the_result_post(env, monkeypatch):
+    """The nudge runs after the result is written: if the traces folder can't
+    be read, the post still answers 201 (with the hint), never an error."""
+    env.hub.fail_next_listing("traces")
+    body = _post_run(env)  # asserts 201
+    assert "share_trace.py" in body["hint"]
+    assert env.client.get(f"/v1/results/{body['filename']}").status_code == 200
+
+
+def test_any_nudge_error_still_answers_201(env, monkeypatch):
+    import app.routes.results as results_route
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("anything at all")
+
+    monkeypatch.setattr(results_route, "agent_traces", broken)
+    assert "share_trace.py" in _post_run(env)["hint"]
