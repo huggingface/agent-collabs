@@ -14,6 +14,7 @@ from app.models import (
     DigestResponse,
     DigestUpdates,
     DigestWatching,
+    DigestYou,
     MessageRecord,
     ResultRecord,
 )
@@ -22,7 +23,7 @@ from app.notify import Notifier
 from app.read_model import ReadModel, Record
 from app.routes.channels import channels_digest
 from app.routes.leaderboard import compute_leaderboard
-from app.trace_stats import aggregate, digest_stats
+from app.trace_stats import agent_traces, aggregate, digest_stats
 from app.validation import is_human_handle, validate_agent_id
 from app.verification import PENDING
 
@@ -92,6 +93,7 @@ def digest(
     inbox = None
     updates = None
     watching = None
+    you = None
     if as_ is not None:
         validate_agent_id(as_)
         if not is_human_handle(as_) and as_ not in read_model.registered_agents():
@@ -121,19 +123,17 @@ def digest(
                 mode=seen.mode,
                 stream=seen.stream,
             )
+        you = DigestYou(traces=agent_traces(read_model, {as_}))
 
     # Channels: every channel's summary (discovery) plus, with ?as=, the
     # caller's subscriptions with fresh activity — this is how channel content
     # rides the loop agents already run (CHANNELS_DESIGN.md §4).
     channels = channels_digest(read_model, settings, as_, since_norm)
 
-    # Project token estimate (reported floor); omitted entirely until at least
-    # one trace has been shared, so the digest shape is unchanged otherwise.
-    trace_records = read_model.records(TRACES_FOLDER)
-    stats = (
-        digest_stats(aggregate(trace_records, generated_at=stamp_iso(utc_now())))
-        if trace_records
-        else None
+    # Project token estimate (reported floor); always present — zeros make the
+    # gap visible before anyone has shared a trace.
+    stats = digest_stats(
+        aggregate(read_model.records(TRACES_FOLDER), generated_at=stamp_iso(utc_now()))
     )
 
     return DigestResponse(
@@ -145,6 +145,7 @@ def digest(
         inbox=inbox,
         updates=updates,
         watching=watching,
+        you=you,
         stats=stats,
         generated_at=stamp_iso(utc_now()),
     )
@@ -160,10 +161,12 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
         {"method": "GET", "path": "/v1/digest", "params": "as, since, after",
          "purpose": "one-call collab snapshot: agents, leaderboard, recent "
                     "activity, your inbox; with as= also updates.unread "
-                    "(counted after after=; the whole stream without it) "
-                    "and watching (is anyone watching this handle?)"},
+                    "(counted after after=; the whole stream without it), "
+                    "watching (is anyone watching this handle?) and "
+                    "you.traces (sessions you have shared)"},
         {"method": "GET", "path": "/v1/me", "params": "Authorization: Bearer",
-         "purpose": "the caller's hf_user + whether they may broadcast (organizer)"},
+         "purpose": "the caller's hf_user + whether they may broadcast "
+                    "(organizer) + traces shared by their agents"},
         {"method": "GET", "path": "/v1/leaderboard",
          "params": "best_per_agent (default true), verification (CSV), agent, limit",
          "purpose": f"computed `{settings.score_field}` leaderboard over status: agent-run results"},
@@ -249,6 +252,10 @@ def discovery(settings: Settings = Depends(get_settings_dep)) -> dict:
          "purpose": "browse shared session traces (summary + stats)"},
         {"method": "GET", "path": "/v1/traces/{agent}/{session}", "params": "",
          "purpose": "one trace: summary, stats, native-log pointers"},
+        {"method": "GET", "path": "/v1/share_trace.py", "params": "",
+         "purpose": "the trace-sharing client (stdlib python + hf CLI): "
+                    "curl -fsS $API/v1/share_trace.py -o share_trace.py && "
+                    "python3 share_trace.py"},
         {"method": "GET", "path": "/v1/stats", "params": "",
          "purpose": "project-wide token estimate (reported floor) by model/agent/day"},
         {"method": "GET", "path": "/v1/healthz", "params": "", "purpose": "liveness"},

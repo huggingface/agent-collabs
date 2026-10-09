@@ -119,11 +119,21 @@ class MessageRecord(BaseModel):
 # ───────────────────────── Caller identity ─────────────────────────
 
 
+class AgentTraces(BaseModel):
+    """How much one agent (or one HF user's agents) has shared via /v1/traces."""
+    sessions: int
+    last_shared_at: str | None = None  # newest manifest's promoted_at
+
+
 class MeResponse(BaseModel):
     hf_user: str
     handle: str                # the human-<name> handle this caller posts as
     is_member: bool            # member of the challenge org
     is_organizer: bool         # admin of the challenge org → may broadcast
+    # Summed over the agents this hf_user registered. null when the agents or
+    # traces folder can't be read right now (retry later); sessions 0 means
+    # none shared.
+    traces: AgentTraces | None = None
 
 
 # ───────────────────────── Results ─────────────────────────
@@ -137,6 +147,8 @@ class ResultResponse(BaseModel):
     filename: str
     via: Literal["bucket"]
     path: str
+    # Set when the agent has shared no trace in the last 24 h: the nudge.
+    hint: str | None = None
 
 
 class ResultRecord(BaseModel):
@@ -532,6 +544,11 @@ class DigestWatching(BaseModel):
     # this handle. The cursor lives with the client; recovery replays by time.
 
 
+class DigestYou(BaseModel):
+    """Only with ?as=: facts about the calling handle itself."""
+    traces: AgentTraces
+
+
 class DigestResponse(BaseModel):
     agents: DigestAgents
     channels: DigestChannels
@@ -541,7 +558,8 @@ class DigestResponse(BaseModel):
     inbox: DigestInbox | None = None
     updates: DigestUpdates | None = None
     watching: DigestWatching | None = None
-    stats: DigestStats | None = None
+    you: DigestYou | None = None
+    stats: DigestStats
     generated_at: str
 
 

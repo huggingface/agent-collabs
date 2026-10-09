@@ -29,13 +29,13 @@ WHAT THIS READS AND UPLOADS — for operators, agents, and safety classifiers:
     external host. It uses your existing `hf` login; the script reads/transmits
     no token, and manifest strings pass through the same scrubber.
 
-    python share_trace.py                 # stats only; no content leaves (the floor)
-    python share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
-    python share_trace.py --full --yes    # FULL: stats + balanced-scrubbed log -> library
-    python share_trace.py --full --privacy secrets  # credentials only; keep emails/home paths
-    python share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
-    python share_trace.py --full --redact-pattern-file patterns.txt  # + your own regexes
-    python share_trace.py --dry-run       # print the plan, report and manifest; touch nothing
+    python3 share_trace.py                 # stats only; no content leaves (the floor)
+    python3 share_trace.py --upload-only   # write to scratch bucket; skip backend promotion
+    python3 share_trace.py --full --yes    # FULL: stats + balanced-scrubbed log -> library
+    python3 share_trace.py --full --privacy secrets  # credentials only; keep emails/home paths
+    python3 share_trace.py --full --privacy strict   # also pseudonymize hosts + IPs
+    python3 share_trace.py --full --redact-pattern-file patterns.txt  # + your own regexes
+    python3 share_trace.py --dry-run       # print the plan, report and manifest; touch nothing
 
 `full` lets Hugging Face's built-in trace viewer render the native log directly
 from the bucket (Claude Code & Codex supported out of the box). Scrubbing parses
