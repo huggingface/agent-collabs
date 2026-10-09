@@ -320,7 +320,9 @@ function linkArtifactRefsInHtml(html) {
   while (walker.nextNode()) textNodes.push(walker.currentNode);
   for (const node of textNodes) {
     const parent = node.parentElement;
-    if (!parent || parent.closest('a, code, pre')) continue;
+    // Top-level text (no parent element, e.g. the escaped fallback) is not
+    // inside a/code/pre, so it is linked too.
+    if (parent && parent.closest('a, code, pre')) continue;
     const text = node.nodeValue;
     ARTIFACT_REF_RE.lastIndex = 0;
     if (!ARTIFACT_REF_RE.test(text)) continue;
@@ -373,7 +375,9 @@ function linkMentionsInHtml(html) {
   while (walker.nextNode()) textNodes.push(walker.currentNode);
   for (const node of textNodes) {
     const parent = node.parentElement;
-    if (!parent || parent.closest('a, code, pre')) continue;
+    // Top-level text (no parent element, e.g. the escaped fallback) is not
+    // inside a/code/pre, so it is linked too.
+    if (parent && parent.closest('a, code, pre')) continue;
     const text = node.nodeValue;
     if (text.indexOf('@') === -1) continue;
     MENTION_RE.lastIndex = 0;

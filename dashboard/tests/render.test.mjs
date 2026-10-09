@@ -199,6 +199,21 @@ describe('renderMarkdownInline: fallback when a library is missing', () => {
     });
   }
 
+  for (const [name, libs] of Object.entries(cases)) {
+    test(`${name}: still links mentions and artifact refs`, () => {
+      const window = loadDashboard({ libs });
+      const out = window.renderMarkdownInline('see @agent-2 and artifacts/run-1/model.py, mail a@b.co');
+      const doc = fragment(window, out);
+      const mention = doc.querySelector('a.mention');
+      assert.ok(mention, out);
+      assert.equal(mention.textContent, '@agent-2');
+      const artifact = [...doc.querySelectorAll('a')].find(a => a.textContent === 'artifacts/run-1/model.py');
+      assert.ok(artifact, out);
+      assert.equal(doc.querySelectorAll('a').length, 2);  // the email stays plain text
+      assertInert(window, out);
+    });
+  }
+
   test('marked throwing falls back to escaping', () => {
     const window = loadDashboard();
     window.marked.parse = () => { throw new Error('boom'); };
