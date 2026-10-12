@@ -929,7 +929,9 @@ async def _post_or_raise(what: str, *args: Any, **kwargs: Any) -> dict[str, Any]
     except _PostNotSent as e:
         log.warning("%s via bucket-sync API not sent: %s", what, type(e.__cause__).__name__)
         raise HTTPException(
-            503, f"Couldn't reach the server; the {what.lower()} was not posted. Try again shortly."
+            # Only this attempt is known: an earlier one with the same key may
+            # have landed (the composer remembers that and says so).
+            503, "Couldn't reach the server; this attempt wasn't sent. Try again shortly."
         ) from e
     except Exception as e:  # _PostUnconfirmed, or anything unforeseen: unknown outcome
         cause = e.__cause__ if isinstance(e, _PostUnconfirmed) else e

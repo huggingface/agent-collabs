@@ -156,17 +156,35 @@ def test_a_lost_answer_is_unconfirmed_and_the_same_key_retry_reconciles(env, das
 
 
 @pytest.mark.parametrize("variant", VARIANTS)
-def test_a_request_that_never_left_says_nothing_was_posted(env, dash, backend, variant):
+def test_a_request_that_never_left_says_this_attempt_was_not_sent(env, dash, backend, variant):
     fields, folder = _variant(env, variant)
     before = len(_stored(env, folder))
     backend.faults = ["not-sent"]
     status, detail = _post(dash, body="hello", idempotency_key="draft-2", **fields)
     assert status == 503
-    assert "was not posted" in detail
+    assert "this attempt wasn't sent" in detail
     assert dash.direct_writes == []  # no direct-write fallback
     assert len(_stored(env, folder)) == before
     assert _post(dash, body="hello", idempotency_key="draft-2", **fields)[0] == 200
     assert len(_stored(env, folder)) == before + 1
+
+
+@pytest.mark.parametrize("variant", VARIANTS)
+def test_a_retry_that_cannot_connect_does_not_settle_an_unconfirmed_post(env, dash, backend, variant):
+    """The first attempt commits and its answer is lost; the retry (same key)
+    can't connect. The retry's error is about that attempt only: it never
+    says the message wasn't posted, because the first attempt's is stored."""
+    fields, folder = _variant(env, variant)
+    before = len(_stored(env, folder))
+    backend.faults = ["answer-lost", "not-sent"]
+    first = _post(dash, body="same message", idempotency_key="draft-9", **fields)
+    retry = _post(dash, body="same message", idempotency_key="draft-9", **fields)
+    assert first[0] == 504 and "may have gone through" in first[1]
+    assert retry[0] == 503 and "this attempt wasn't sent" in retry[1]
+    assert "not posted" not in retry[1]
+    assert backend.statuses == [201]
+    assert len(_stored(env, folder)) == before + 1
+    assert dash.direct_writes == []
 
 
 def test_a_partial_write_passes_the_backends_503_through(env, dash, backend, monkeypatch):

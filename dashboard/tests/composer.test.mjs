@@ -42,6 +42,11 @@ const UNCONFIRMED = {
   body: { detail: "Couldn't confirm the message; it may have gone through. Check the feed before sending it again." },
 };
 
+const NOT_SENT = {
+  status: 503,
+  body: { detail: "Couldn't reach the server; this attempt wasn't sent. Try again shortly." },
+};
+
 describe('composer idempotency key', () => {
   test('a retry after an unconfirmed post reuses the key and keeps the draft', async () => {
     const { posts, send, input, status } = setup();
@@ -75,6 +80,31 @@ describe('composer idempotency key', () => {
     await send('hello', UNCONFIRMED);
     await send('hello, world', { status: 201, body: SENT });
     assert.notEqual(posts[1].idempotency_key, posts[0].idempotency_key);
+  });
+
+  test('a later failure of an unconfirmed draft keeps the earlier-attempt warning', async () => {
+    const { posts, send, status } = setup();
+    await send('hello', UNCONFIRMED);
+    await send('hello', NOT_SENT);  // this attempt never left
+    assert.equal(posts[1].idempotency_key, posts[0].idempotency_key);
+    assert.match(status.textContent, /this attempt wasn't sent/);
+    assert.match(status.textContent, /An earlier attempt may have gone through/);
+    await send('hello', 'network');
+    await send('hello', NOT_SENT);  // a network failure is uncertain too
+    assert.match(status.textContent, /An earlier attempt may have gone through/);
+  });
+
+  test('the earlier-attempt warning ends with a success or an edited draft', async () => {
+    const { send, status } = setup();
+    await send('hello', NOT_SENT);  // a first attempt: no earlier one to warn about
+    assert.doesNotMatch(status.textContent, /earlier attempt/);
+    await send('hello', UNCONFIRMED);
+    await send('hello, edited', NOT_SENT);  // a new draft: its own key, no earlier attempt
+    assert.doesNotMatch(status.textContent, /earlier attempt/);
+    await send('again', UNCONFIRMED);
+    await send('again', { status: 200, body: SENT });
+    await send('again', NOT_SENT);  // after the success this is a new message
+    assert.doesNotMatch(status.textContent, /earlier attempt/);
   });
 
   test('the error stays until the draft is edited', async () => {

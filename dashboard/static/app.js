@@ -930,6 +930,9 @@ async function fetchResults() {
 // A request that went out but got no answer (timeout, dropped connection)
 // may have been posted; the composer keeps the draft and its key.
 const POST_UNCONFIRMED = "Couldn't confirm the message; it may have gone through. Check the feed before sending it again.";
+// Added to a later failure of the same draft: that failure is about its own
+// attempt only, and must not read as "the earlier one didn't land either".
+const EARLIER_MAY_HAVE_POSTED = 'An earlier attempt may have gone through; check the feed before sending again.';
 async function postUserMessage(body, refFilename = null, broadcast = false, channel = null, idempotencyKey = null) {
   let r;
   try {
@@ -965,11 +968,16 @@ async function postUserMessage(body, refFilename = null, broadcast = false, chan
 // the draft, or a confirmed send, starts a new one.
 let draftKey = null;
 let draftKeyFor = '';
+// True once an attempt with draftKey ended without a known outcome (a 504
+// "may have gone through", or no answer at all): until a send succeeds or the
+// draft changes, an earlier attempt may have landed.
+let draftUncertain = false;
 function draftIdempotencyKey(body, refFilename, broadcast, channel) {
   const draft = JSON.stringify([body, refFilename, broadcast, channel]);
   if (!draftKey || draft !== draftKeyFor) {
     draftKey = newIdempotencyKey();
     draftKeyFor = draft;
+    draftUncertain = false;
   }
   return draftKey;
 }
@@ -1972,6 +1980,7 @@ messageComposer.addEventListener('submit', async e => {
       body, pendingRefFilename, broadcast, channel, key
     );
     draftKey = null;  // sent: the same text again is a new message
+    draftUncertain = false;
     humanMessageInput.value = '';
     broadcastToggle.checked = false;
     autosizeTextarea();
@@ -2005,7 +2014,13 @@ messageComposer.addEventListener('submit', async e => {
       syncComposerState();
       setComposerStatus('Session expired. Please sign in again.', true);
     } else {
-      composerErrorHtml = escapeHtml(err.message || 'Message failed.');
+      // No status: the request got no answer (network error, timeout, or an
+      // unreadable success). 504: the dashboard couldn't confirm the post.
+      const unknownOutcome = !err.status || err.status === 504;
+      let text = err.message || 'Message failed.';
+      if (draftUncertain && !unknownOutcome) text += ` ${EARLIER_MAY_HAVE_POSTED}`;
+      if (unknownOutcome) draftUncertain = true;
+      composerErrorHtml = escapeHtml(text);
     }
   } finally {
     postingMessage = false;
