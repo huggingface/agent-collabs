@@ -212,11 +212,27 @@ class OrganizerCheckUnavailable(APIError):
         super().__init__(
             503,
             "ORGANIZER_CHECK_UNAVAILABLE",
-            "could not verify organizer status (org membership lookup failed); "
-            "no message was posted",
+            "could not verify organizer status (org role lookup failed); "
+            "nothing was posted",
             "retry shortly",
         )
         self.headers = {"Retry-After": "30"}
+
+
+class OrganizerRoleUnknown(APIError):
+    """No Hub source states the caller's org role (app/org_roles.py). Not a
+    503: retrying with the same token gets the same answer."""
+
+    def __init__(self, org: str) -> None:
+        super().__init__(
+            403,
+            "ORGANIZER_ROLE_UNKNOWN",
+            f"could not determine your role in '{org}': your token does not "
+            "expose it; nothing was posted",
+            f"use a token scoped to '{org}' (`hf auth login`, or a fine-grained "
+            "token with access to the org); on the dashboard, sign in again and "
+            "grant the org",
+        )
 
 
 class JobsDisabled(APIError):

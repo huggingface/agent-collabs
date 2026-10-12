@@ -389,7 +389,7 @@ def create_channel(
         creator = req.agent_id
         validate_agent_id(creator)
         identity = verify_human_author(creator, authorization, settings, hub)
-        require_organizer(identity, org_roles, settings)
+        require_organizer(identity, authorization, org_roles, settings)
         via = "dashboard"
         allowed, retry = raw_limiter.try_consume(creator)
         if not allowed:

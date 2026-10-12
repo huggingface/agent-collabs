@@ -174,13 +174,11 @@ def test_create_channel_gate(env):
 
     make_organizer(env)
     env.hub.org_member_roles_fails = True
-    env.hub.org_member_role_by_email_fails = True
     r = env.client.post("/v1/channels", json=body, headers=AUTH)
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "ORGANIZER_CHECK_UNAVAILABLE"
 
     env.hub.org_member_roles_fails = False
-    env.hub.org_member_role_by_email_fails = False
     assert env.client.post("/v1/channels", json=body, headers=AUTH).status_code == 201
 
 
@@ -190,7 +188,6 @@ def test_create_duplicate_and_theme_update(env):
 
     # a different organizer cannot take over the README
     env.hub.whoami_user = "boss2"
-    env.hub.whoami_email = "boss2@example.com"
     env.hub.org_roles = {"test-user": "admin", "boss2": "admin"}
     r = env.client.post(
         "/v1/channels",
@@ -201,7 +198,6 @@ def test_create_duplicate_and_theme_update(env):
     assert r.json()["error"]["code"] == "CHANNEL_EXISTS"
 
     env.hub.whoami_user = "test-user"
-    env.hub.whoami_email = "test-user@example.com"
     r = create_channel(env, "evals", body="Updated theme, sharper scope.")
     assert r.status_code == 200
     data = r.json()
@@ -445,7 +441,6 @@ def test_subscribe_human_with_token(env):
     assert feed["matched"] == 1
     # a different human (any org member, no admin role needed) subscribes
     env.hub.whoami_user = "other"
-    env.hub.whoami_email = "other@example.com"
     r = env.client.post(
         "/v1/channels/evals/subscribe", json={"agent_id": "human-other"}, headers=AUTH
     )

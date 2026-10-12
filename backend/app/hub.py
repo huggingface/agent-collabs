@@ -9,7 +9,7 @@ import sys
 import tempfile
 import threading
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable
 
@@ -77,13 +77,20 @@ class ListedFile:
 class HubIdentity:
     username: str
     orgs: set[str]
-    email: str | None = None
+    # {org name: roleInOrg} for the orgs whose role the caller's own token
+    # exposes. An org can be in `orgs` with no role here (e.g. a token not
+    # scoped to it): that is "unknown", not "not an admin".
+    roles: dict[str, str] = field(default_factory=dict)
 
 
-@dataclass(frozen=True)
-class OrgMemberRole:
-    user: str
-    role: str
+class RolesNotExposed(RuntimeError):
+    """The org members listing has no `role` fields: the token may list the
+    members but not see their roles. No evidence either way, so never an
+    empty role map (which would read as "nobody is an admin")."""
+
+
+# A members listing that has not ended after this many pages is broken, not big.
+_MEMBER_PAGES_MAX = 100
 
 
 class HubUnreachable(Exception):
@@ -305,12 +312,9 @@ class HubClient:
         raise ValueError("whoami did not return a `name` field")
 
     def whoami_identity(self, token: str) -> HubIdentity:
-        """Resolve a caller token to HF identity facts used by human posts.
-
-        OAuth tokens expose org membership but not roleInOrg. When the Space's
-        OAuth app requests the email scope, the email lets the organizer gate
-        perform a targeted org-member lookup instead of scanning the full org.
-        """
+        """Resolve a caller token to HF identity facts used by human posts:
+        the username, org names, and each org's ``roleInOrg`` when the token
+        exposes it (a token scoped to the org does; OAuth tokens may not)."""
         try:
             info = whoami(token=token)
         except (HfHubHTTPError, httpx.TransportError) as e:
@@ -319,15 +323,15 @@ class HubClient:
             raise
         if not isinstance(info, dict) or not info.get("name"):
             raise ValueError("whoami did not return a `name` field")
-        orgs = {
-            o["name"]
-            for o in (info.get("orgs") or [])
-            if isinstance(o, dict) and o.get("name")
-        }
-        email = info.get("email")
-        if not isinstance(email, str) or not email.strip():
-            email = None
-        return HubIdentity(info["name"], orgs, email.strip() if email else None)
+        orgs: set[str] = set()
+        roles: dict[str, str] = {}
+        for o in info.get("orgs") or []:
+            if not isinstance(o, dict) or not isinstance(o.get("name"), str):
+                continue
+            orgs.add(o["name"])
+            if isinstance(o.get("roleInOrg"), str):
+                roles[o["name"]] = o["roleInOrg"]
+        return HubIdentity(info["name"], orgs, roles)
 
     def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
         """Resolve a caller token to (hf_user, org names). Used by existing
@@ -335,81 +339,72 @@ class HubClient:
         identity = self.whoami_identity(token)
         return identity.username, identity.orgs
 
-    def org_member_role_by_email(self, org: str, email: str) -> OrgMemberRole | None:
-        """Resolve one org member by email and return its role, if available.
-
-        The members endpoint supports an email filter for orgs with a matching
-        Organization email domain or SSO allowed domain. This is the scalable
-        organizer check path: one request for the caller instead of listing
-        every org member. Transport errors propagate so callers can fall back
-        or fail closed.
-        """
+    def oauth_org_role(self, token: str, username: str, org: str) -> str | None:
+        """The caller's ``roleInOrg`` for ``org`` from ``/oauth/userinfo``,
+        which answers only for OAuth tokens (the dashboard's), whose whoami
+        may omit the role. None when there is no evidence: the Hub refuses
+        the token (401/403: not an OAuth token), the answer is for another
+        user, or it doesn't list the org with a role. The org is matched on
+        its handle (``preferred_username``), never its display name. An
+        outage raises HubUnreachable; other errors propagate."""
         session = get_session()
-        headers = build_hf_headers(token=self._token)
-        url = f"{ENDPOINT}/api/organizations/{org}/members"
-        resp = session.get(
-            url,
-            headers=headers,
-            params={"email": email, "limit": 1},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        page = resp.json()
-        if not isinstance(page, list) or not page:
-            return None
-        member = page[0]
-        if not isinstance(member, dict):
-            return None
-        user, role = member.get("user"), member.get("role")
-        if not isinstance(user, str) or not isinstance(role, str):
-            return None
-        return OrgMemberRole(user=user, role=role)
-
-    def org_member_roles(self, org: str) -> dict[str, str]:
-        """Map {lowercased username: org role} for every member of ``org``.
-
-        whoami omits a caller's org role for OAuth tokens, so the organizer
-        gate can't read it from the caller's own token; instead the Space
-        looks the role up here with its admin token. Lists the members
-        endpoint, following Link pagination and falling back to offset-style
-        pagination if needed. Raises on transport error so the caller
-        can fail closed rather than treat an outage as "not an organizer".
-        """
-        session = get_session()
-        headers = build_hf_headers(token=self._token)
-        url = f"{ENDPOINT}/api/organizations/{org}/members"
-        page_size = 100
-        roles: dict[str, str] = {}
-        offset = 0
-        params: dict[str, int] | None = {"limit": page_size, "offset": offset}
-        while True:
+        try:
             resp = session.get(
-                url,
-                headers=headers,
-                params=params,
+                f"{ENDPOINT}/oauth/userinfo",
+                headers=build_hf_headers(token=token),
                 timeout=10,
             )
+        except httpx.TransportError as e:
+            raise HubUnreachable(type(e).__name__) from None
+        if resp.status_code in (401, 403):
+            return None
+        if resp.status_code >= 500 or resp.status_code == 429:
+            raise HubUnreachable(f"userinfo answered HTTP {resp.status_code}")
+        resp.raise_for_status()
+        info = resp.json()
+        if not isinstance(info, dict):
+            return None
+        if str(info.get("preferred_username") or "").lower() != username.lower():
+            return None
+        for o in info.get("orgs") or []:
+            if isinstance(o, dict) and o.get("preferred_username") == org:
+                role = o.get("roleInOrg")
+                return role if isinstance(role, str) else None
+        return None
+
+    def org_member_roles(self, org: str) -> dict[str, str]:
+        """Map {lowercased username: org role} for every member of ``org``,
+        read with the Space's token: the fallback when the caller's own token
+        doesn't state their role (``HubIdentity.roles``, ``oauth_org_role``).
+
+        The Hub includes ``role`` only for tokens allowed to see member
+        roles; a listing without it raises RolesNotExposed. Pages follow the
+        ``Link: rel="next"`` cursor until the last one, so the map is
+        complete or the call raises. HTTP and transport errors propagate so
+        the caller fails closed.
+        """
+        session = get_session()
+        headers = build_hf_headers(token=self._token)
+        url = f"{ENDPOINT}/api/organizations/{org}/members"
+        params: dict[str, int] | None = {"limit": 500}
+        roles: dict[str, str] = {}
+        for _ in range(_MEMBER_PAGES_MAX):
+            resp = session.get(url, headers=headers, params=params, timeout=10)
             resp.raise_for_status()
             page = resp.json()
-            if not isinstance(page, list) or not page:
-                break
-            before = len(roles)
+            if not isinstance(page, list):
+                raise RolesNotExposed("the members listing is not a list")
             for m in page:
-                if not isinstance(m, dict):
-                    continue
-                user, role = m.get("user"), m.get("role")
-                if user and role:
-                    roles[user.lower()] = role
+                user = m.get("user") if isinstance(m, dict) else None
+                role = m.get("role") if isinstance(m, dict) else None
+                if not isinstance(user, str) or not isinstance(role, str):
+                    raise RolesNotExposed("the members listing has no roles")
+                roles[user.lower()] = role
             next_url = resp.links.get("next", {}).get("url")
-            if next_url:
-                url = next_url
-                params = None
-                continue
-            if len(page) < page_size or len(roles) == before:
-                break
-            offset += page_size
-            params = {"limit": page_size, "offset": offset}
-        return roles
+            if not next_url:
+                return roles
+            url, params = next_url, None
+        raise RuntimeError(f"the members listing did not end after {_MEMBER_PAGES_MAX} pages")
 
     # ───────────────────────── Reads ─────────────────────────
 

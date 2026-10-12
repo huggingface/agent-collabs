@@ -15,7 +15,7 @@ from app.hub import (
     HubUnreachable,
     ListedFile,
     ListingFailed,
-    OrgMemberRole,
+    RolesNotExposed,
 )
 from app.naming import SourceURI, parse_source_uri
 
@@ -53,8 +53,10 @@ class FakeHub:
         # Scripted whoami identity for token-authenticated paths
         # (registration handshake, human message posts).
         self.whoami_user = "test-user"
-        self.whoami_email: str | None = "test-user@example.com"
         self.whoami_orgs: set[str] = {settings.org}
+        # {org: roleInOrg} the caller's own token exposes (none by default,
+        # like an OAuth token's whoami).
+        self.whoami_roles: dict[str, str] = {}
         self.whoami_fails = False
         self.whoami_unreachable = False
         # Writes made with a caller's token: a bucket's creator is its owner
@@ -68,13 +70,17 @@ class FakeHub:
         self.failing_reads: set[str] = set()
         self.caller_writes: list[tuple[str, str, str]] = []  # (bucket, path, token)
         self.created_buckets: list[tuple[str, str]] = []  # (bucket, token)
-        # Scripted challenge-org member roles for the organizer-broadcast gate.
+        # Scripted org roles for the organizer gate: what /oauth/userinfo
+        # says for the caller's token (None: no evidence), and the members
+        # listing read with the Space's token (`org_roles_exposed=False`: the
+        # listing has no role fields).
+        self.oauth_role: str | None = None
+        self.oauth_role_fails = False
+        self.oauth_role_calls = 0
         self.org_roles: dict[str, str] = {}
-        self.org_roles_by_email: dict[str, tuple[str, str]] = {}
+        self.org_roles_exposed = True
         self.org_member_roles_fails = False
-        self.org_member_role_by_email_fails = False
         self.org_member_roles_calls = 0
-        self.org_member_role_by_email_calls = 0
 
     # ── helpers ──────────────────────────────────────────────────────
     def _central(self) -> dict[str, bytes]:
@@ -328,27 +334,25 @@ class FakeHub:
         return HubIdentity(
             username=self.whoami_user,
             orgs=set(self.whoami_orgs),
-            email=self.whoami_email,
+            roles=dict(self.whoami_roles),
         )
 
     def whoami_user_and_orgs(self, token: str) -> tuple[str, set[str]]:
         identity = self.whoami_identity(token)
         return identity.username, identity.orgs
 
-    def org_member_role_by_email(self, org: str, email: str) -> OrgMemberRole | None:
-        self.org_member_role_by_email_calls += 1
-        if self.org_member_role_by_email_fails:
-            raise RuntimeError("member email lookup failed")
-        member = self.org_roles_by_email.get(email.lower())
-        if member is None:
-            return None
-        user, role = member
-        return OrgMemberRole(user=user, role=role)
+    def oauth_org_role(self, token: str, username: str, org: str) -> str | None:
+        self.oauth_role_calls += 1
+        if self.oauth_role_fails:
+            raise HubUnreachable("503 from userinfo")
+        return self.oauth_role
 
     def org_member_roles(self, org: str) -> dict[str, str]:
         self.org_member_roles_calls += 1
         if self.org_member_roles_fails:
             raise RuntimeError("members lookup failed")
+        if not self.org_roles_exposed:
+            raise RolesNotExposed("the members listing has no roles")
         return {u.lower(): r for u, r in self.org_roles.items()}
 
 

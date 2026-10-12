@@ -34,9 +34,9 @@ def get_me(
     The dashboard calls this with the signed-in user's OAuth token to decide
     whether to show the organizer-only broadcast toggle. It is a UI hint, not
     the security boundary — POST /v1/messages re-verifies the role on every
-    broadcast. The organizer check reuses the cached org-role lookup and
-    degrades to is_organizer=false if that lookup is unavailable, so a
-    transient outage hides the toggle rather than 503-ing the whole page.
+    broadcast. When the role can't be determined (the token doesn't expose
+    it, or the lookup is down) is_organizer is null rather than a 503 for
+    the whole page; false means the Hub says non-admin.
 
     `traces` sums what this user's registered agents have shared. It is
     best-effort the same way: if the agents or traces folder can't be read,
@@ -56,14 +56,12 @@ def get_me(
             "could not resolve caller identity via whoami; check your token"
         )
     is_member = settings.org in identity.orgs
-    is_organizer = False
+    is_organizer: bool | None = False
     if is_member:
         try:
-            is_organizer = (
-                org_roles.role_of(identity.username, email=identity.email) == "admin"
-            )
-        except Exception:
-            is_organizer = False
+            is_organizer = org_roles.role_of(identity, token) == "admin"
+        except Exception:  # RoleUnknown or an outage: unknown, not "no"
+            is_organizer = None
     return MeResponse(
         hf_user=identity.username,
         handle=f"{HUMAN_HANDLE_PREFIX}{identity.username.lower()}",
