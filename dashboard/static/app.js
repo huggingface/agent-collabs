@@ -927,27 +927,57 @@ async function fetchResults() {
   return resultItems.map(it => parseResultFile(it.filename, it.content)).filter(Boolean)
     .map(e => ({ ...e, verification: verificationState(verifyMap, e.filename) }));
 }
-async function postUserMessage(body, refFilename = null, broadcast = false, channel = null) {
-  const r = await fetchWithTimeout(MESSAGES_URL, {
-    method: 'POST',
-    credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      body,
-      refs: refFilename ? [refFilename] : [],
-      broadcast,
-      ...(channel ? { channel } : {}),
-    }),
-  });
+// A request that went out but got no answer (timeout, dropped connection)
+// may have been posted; the composer keeps the draft and its key.
+const POST_UNCONFIRMED = "Couldn't confirm the message; it may have gone through. Check the feed before sending it again.";
+async function postUserMessage(body, refFilename = null, broadcast = false, channel = null, idempotencyKey = null) {
+  let r;
+  try {
+    r = await fetchWithTimeout(MESSAGES_URL, {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        body,
+        refs: refFilename ? [refFilename] : [],
+        broadcast,
+        ...(channel ? { channel } : {}),
+        ...(idempotencyKey ? { idempotency_key: idempotencyKey } : {}),
+      }),
+    });
+  } catch {
+    throw new Error(POST_UNCONFIRMED);
+  }
   if (!r.ok) {
     let detail = '';
     try { const p = await r.json(); detail = p?.detail || ''; } catch { detail = await r.text().catch(() => ''); }
     const e = new Error(detail || `HTTP ${r.status}`); e.status = r.status; throw e;
   }
-  const { item, mentions_delivered = [], auto_subscribed = false, board_only = false } = await r.json();
+  const { item, mentions_delivered = [], auto_subscribed = false } = await r.json();
   const parsed = item && parseMessage(item.filename, item.content);
   if (!parsed) throw new Error('Server returned an unreadable message.');
-  return { msg: parsed, delivered: mentions_delivered, autoSubscribed: auto_subscribed, boardOnly: board_only };
+  return { msg: parsed, delivered: mentions_delivered, autoSubscribed: auto_subscribed };
+}
+
+// The idempotency key of the message being composed: every retry of the same
+// draft (body, quote, broadcast, channel) reuses it, so a retry after a lost
+// answer is replayed by the backend instead of posted twice. Any change to
+// the draft, or a confirmed send, starts a new one.
+let draftKey = null;
+let draftKeyFor = '';
+function draftIdempotencyKey(body, refFilename, broadcast, channel) {
+  const draft = JSON.stringify([body, refFilename, broadcast, channel]);
+  if (!draftKey || draft !== draftKeyFor) {
+    draftKey = newIdempotencyKey();
+    draftKeyFor = draft;
+  }
+  return draftKey;
+}
+function newIdempotencyKey() {
+  const c = window.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  const bytes = c.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -1801,12 +1831,9 @@ function setComposerStatus(html = '', isError = false) {
 // comes from the bucket-sync API; an empty list still confirms the send.
 let composerNoticeHtml = '';
 let composerNoticeUntil = 0;
-function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false, boardOnly = false) {
+function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false) {
   const inboxed = (delivered || []).map(h => `@${h}`).join(', ');
-  if (boardOnly) {
-    // The backend was down and the server wrote straight to the board.
-    composerNoticeHtml = `<span class="board-only">⚠ posted to the board only; inboxes were not notified</span>`;
-  } else if (broadcast) {
+  if (broadcast) {
     composerNoticeHtml = `<span class="delivered">✓ broadcast — every inbox</span>`;
   } else if (channel) {
     composerNoticeHtml =
@@ -1932,9 +1959,11 @@ messageComposer.addEventListener('submit', async e => {
   const channel = activeChannel;
   const broadcast = !channel && !!me.is_organizer && broadcastToggle.checked;
   try {
-    const { msg, delivered, autoSubscribed, boardOnly } = await postUserMessage(
-      body, pendingRefFilename, broadcast, channel
+    const key = draftIdempotencyKey(body, pendingRefFilename, broadcast, channel);
+    const { msg, delivered, autoSubscribed } = await postUserMessage(
+      body, pendingRefFilename, broadcast, channel, key
     );
+    draftKey = null;  // sent: the same text again is a new message
     humanMessageInput.value = '';
     broadcastToggle.checked = false;
     autosizeTextarea();
@@ -1960,7 +1989,7 @@ messageComposer.addEventListener('submit', async e => {
       if (!boardMessages.some(m => m.filename === msg.filename)) boardMessages.push(msg);
       writeCache(boardMessages, leaderboardEntries);
     }
-    setComposerNotice(delivered, broadcast, channel, autoSubscribed, boardOnly);
+    setComposerNotice(delivered, broadcast, channel, autoSubscribed);
   } catch (err) {
     if (err.status === 401) {
       // Session expired — bounce to /login.

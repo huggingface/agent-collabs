@@ -128,6 +128,11 @@ class MessagePost(BaseModel):
     broadcast: bool = False
     # Post into a channel instead of the board (CHANNELS_DESIGN.md §8.2).
     channel: str | None = None
+    # One per composed message, reused by every retry of it: forwarded to the
+    # bucket-sync API, which replays the first post's response (200) instead
+    # of posting again. The replay lives in the backend's memory, so a retry
+    # after a backend restart posts anew.
+    idempotency_key: str | None = Field(None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class ChannelCreate(BaseModel):
@@ -810,9 +815,31 @@ def _backend_error_message(resp: httpx.Response) -> str:
     return ""
 
 
+def _backend_error_code(resp: httpx.Response) -> str:
+    """The bucket-sync error code (its top-level ``{"error": {"code"}}``
+    envelope), or "" when the response isn't one of its errors."""
+    try:
+        p = resp.json()
+    except Exception:
+        return ""
+    err = p.get("error") if isinstance(p, dict) else None
+    code = err.get("code") if isinstance(err, dict) else None
+    return code if isinstance(code, str) else ""
+
+
+class _PostNotSent(Exception):
+    """No connection to the bucket-sync API was made: nothing was posted."""
+
+
+class _PostUnconfirmed(Exception):
+    """The request reached the bucket-sync API (or may have) but its answer
+    was lost or unreadable: the post may have landed. A retry with the same
+    idempotency key replays it rather than posting again."""
+
+
 class _ApiPostRejected(Exception):
-    """A bucket-sync verdict the user must see (e.g. rate limit). Falling
-    back to a direct bucket write would silently bypass it."""
+    """A bucket-sync verdict the user must see (e.g. a rate limit or a
+    validation error), passed through as is."""
 
     def __init__(self, status: int, detail: str):
         self.status = status
@@ -827,16 +854,21 @@ async def _post_message_via_api(
     user_token: str,
     broadcast: bool = False,
     channel: str | None = None,
+    idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """POST through the bucket-sync API so @mentions and quote-refs land in
     agent inboxes (its human-post path). The user's OAuth token is the
     identity proof — the API verifies it via whoami and derives the handle
-    itself. Returns the API response dict; raises _ApiPostRejected for
-    verdicts to surface. Only a backend outage (5xx, network) raises anything
-    else, meaning "fall back to the direct bucket write" (board-visible,
-    fan-out reconciled later by the backfill). A refused user token is a
-    session expiry, never a fallback: the admin-token write would hide it.
-    Broadcasts and channel posts never fall back (see the callers)."""
+    itself.
+
+    Returns the response for a 201 (posted) or a 200 (the API replayed an
+    earlier post with the same identity: the same message, not a new one).
+    Raises _ApiPostRejected for the API's own verdicts (4xx, and a 5xx carrying
+    its error envelope, e.g. 503 STORAGE_UNAVAILABLE), _PostNotSent when no
+    connection was made, and _PostUnconfirmed when the request went out but
+    the answer was lost or unreadable: the post may have landed. There is no
+    direct-write fallback: after a request that may have landed, a second
+    write could only duplicate it."""
     payload: dict[str, Any] = {
         "agent_id": _human_handle(username),
         "body": body,
@@ -848,32 +880,64 @@ async def _post_message_via_api(
         payload["broadcast"] = True
     if channel:
         payload["channel"] = channel
-    r = await app.state.plain_client.post(
-        f"{BACKEND_API_URL}/v1/messages",
-        json=payload,
-        headers={"Authorization": f"Bearer {user_token}"},
-    )
+    if idempotency_key:
+        payload["idempotency_key"] = idempotency_key
+    try:
+        r = await app.state.plain_client.post(
+            f"{BACKEND_API_URL}/v1/messages",
+            json=payload,
+            headers={"Authorization": f"Bearer {user_token}"},
+        )
+    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.PoolTimeout) as e:
+        raise _PostNotSent() from e
+    except httpx.TransportError as e:
+        raise _PostUnconfirmed() from e
+    if r.status_code in (200, 201):
+        try:
+            posted = r.json()
+        except ValueError:
+            posted = None
+        filename = posted.get("filename") if isinstance(posted, dict) else None
+        if not (isinstance(filename, str) and REF_FILENAME_RE.fullmatch(filename)):
+            raise _PostUnconfirmed()
+        return posted
+    if r.status_code >= 500 and not _backend_error_code(r):
+        # A proxy's 502/504 or an unhandled crash: the API never said what
+        # happened to the post.
+        raise _PostUnconfirmed()
     if r.status_code == 429:
         raise _ApiPostRejected(
             429, _backend_error_message(r) or "Rate limited — please slow down."
         )
-    if r.status_code != 201:
-        if not (broadcast or channel):
-            if r.status_code in (401, 403):
-                raise _ApiPostRejected(401, "Session expired. Please sign in again.")
-            if r.status_code >= 500:
-                raise RuntimeError(f"bucket-sync API returned {r.status_code}: {r.text[:200]}")
-        # Broadcasts and channel posts never fall back to a direct write
-        # (only the backend can do the gated broadcasts/ write, and a direct
-        # channels/ write would skip validation, mention fan-out, and
-        # auto-subscribe) — surface the backend's verdict verbatim, as for
-        # any other 4xx.
-        what = "Broadcast" if broadcast else "Channel post" if channel else "Message"
-        raise _ApiPostRejected(
-            r.status_code,
-            _backend_error_message(r) or f"{what} rejected ({r.status_code}).",
-        )
-    return r.json()
+    if r.status_code in (401, 403) and not (broadcast or channel):
+        # A refused user token on a board post is a session expiry.
+        raise _ApiPostRejected(401, "Session expired. Please sign in again.")
+    what = "Broadcast" if broadcast else "Channel post" if channel else "Message"
+    raise _ApiPostRejected(
+        r.status_code,
+        _backend_error_message(r) or f"{what} rejected ({r.status_code}).",
+    )
+
+
+async def _post_or_raise(what: str, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    """_post_message_via_api, with each failure as the HTTP error the composer
+    shows. `what` names the post in messages ("Message", "Broadcast", ...)."""
+    try:
+        return await _post_message_via_api(*args, **kwargs)
+    except _ApiPostRejected as e:
+        raise HTTPException(e.status, e.detail)
+    except _PostNotSent as e:
+        log.warning("%s via bucket-sync API not sent: %s", what, type(e.__cause__).__name__)
+        raise HTTPException(
+            503, f"Couldn't reach the server; the {what.lower()} was not posted. Try again shortly."
+        ) from e
+    except _PostUnconfirmed as e:
+        log.warning("%s via bucket-sync API unconfirmed: %s", what, type(e.__cause__).__name__)
+        raise HTTPException(
+            504,
+            f"Couldn't confirm the {what.lower()}; it may have gone through. "
+            "Check the feed before sending it again.",
+        ) from e
 
 
 def _write_message_local(filename: str, content: str) -> None:
@@ -930,15 +994,10 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
             raise HTTPException(
                 503, "Channel posts require the bucket-sync API and a signed-in session."
             )
-        try:
-            posted = await _post_message_via_api(
-                handle, body, refs, user_token, channel=channel
-            )
-        except _ApiPostRejected as e:
-            raise HTTPException(e.status, e.detail)
-        except Exception as e:
-            log.warning("channel post via bucket-sync API failed: %s", e)
-            raise HTTPException(502, "Channel post failed; nothing was posted.") from e
+        posted = await _post_or_raise(
+            "Channel post", handle, body, refs, user_token,
+            channel=channel, idempotency_key=post.idempotency_key,
+        )
         _hub_cache.invalidate("__channels__")
         _hub_cache.invalidate(f"__channel__:{channel}")
         _hub_cache.invalidate_prefix(f"__channel_msgs__:{channel}:")
@@ -968,17 +1027,15 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
                 503, "Broadcasting requires the bucket-sync API and a signed-in session."
             )
         try:
-            posted = await _post_message_via_api(
-                handle, body, refs, user_token, broadcast=True
+            posted = await _post_or_raise(
+                "Broadcast", handle, body, refs, user_token,
+                broadcast=True, idempotency_key=post.idempotency_key,
             )
-            request.session["is_organizer"] = True
-        except _ApiPostRejected as e:
-            if e.status == 403:
+        except HTTPException as e:
+            if e.status_code == 403:
                 request.session["is_organizer"] = False
-            raise HTTPException(e.status, e.detail)
-        except Exception as e:
-            log.warning("broadcast via bucket-sync API failed: %s", e)
-            raise HTTPException(502, "Broadcast failed; nothing was posted.") from e
+            raise
+        request.session["is_organizer"] = True
         _invalidate_list_cache(PREFIX)
         return {
             "item": {
@@ -989,39 +1046,35 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
             "broadcast": True,
         }
 
-    delivered: list[str] = []
-    # Preferred path whenever a backend is configured (hub mode AND the local
-    # test environment): the bucket-sync API fans @mentions and quote-refs out
-    # to inbox/{recipient}/ — a direct write never reaches the inboxes agents
-    # poll. Fallbacks below keep the message board-visible if the API is down.
-    posted: dict[str, Any] | None = None
-    if BACKEND_API_URL and user_token:
-        try:
-            posted = await _post_message_via_api(handle, body, refs, user_token)
-        except _ApiPostRejected as e:
-            raise HTTPException(e.status, e.detail)
-        except Exception as e:
-            log.warning(
-                "bucket-sync API post failed (%s); falling back to direct write.", e
-            )
-    if posted is not None:
+    if BACKEND_API_URL:
+        # The bucket-sync API fans @mentions and quote-refs out to
+        # inbox/{recipient}/, which a direct write never reaches. Its failures
+        # are surfaced, never papered over with a direct write: after a post
+        # that may have landed, that could only duplicate it.
+        if not user_token:
+            raise HTTPException(401, "Session expired. Please sign in again.")
+        posted = await _post_or_raise(
+            "Message", handle, body, refs, user_token,
+            idempotency_key=post.idempotency_key,
+        )
         filename = posted["filename"]
         delivered = posted.get("mentions_delivered") or []
         content = _echo_user_message(handle, body, refs)
     elif LOCAL_BUCKET_DIR:
+        # No backend (local test environment): the board file is the record.
         filename, content = _format_user_message(handle, body, refs)
+        delivered = []
         try:
             _write_message_local(filename, content)
         except OSError as e:
             log.warning("Local message write failed: %s", e)
             raise HTTPException(500, "Could not write message to local bucket.") from e
     else:
+        # No backend: a board-only deployment writes straight to the bucket.
         if not (user_token or HF_TOKEN):
             raise HTTPException(401, "Server is not configured: set HF_TOKEN.")
-        # Fallback: the direct write. Board-visible immediately; the
-        # inbox fan-out for it is reconciled by the backend repo's
-        # scripts/backfill_inbox.py.
         filename, content = _format_user_message(handle, body, refs)
+        delivered = []
         try:
             await asyncio.to_thread(_write_message_hub, filename, content, user_token)
         except Exception as e:
@@ -1033,9 +1086,6 @@ async def post_message(post: MessagePost, request: Request) -> dict[str, Any]:
     return {
         "item": {"filename": filename, "content": content},
         "mentions_delivered": delivered,
-        # A backend exists but did not take the post: nobody's inbox heard of
-        # it until the backfill runs — the composer says so.
-        "board_only": posted is None and bool(BACKEND_API_URL),
     }
 
 
