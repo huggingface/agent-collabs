@@ -224,12 +224,10 @@ def main() -> None:
     root.mkdir(parents=True, exist_ok=True)
     hub = PersistentFakeHub(settings, root)
     hub.whoami_user = args.user
-    hub.whoami_email = f"{args.user}@example.com"
     hub.whoami_orgs = {args.org}
     # The dev user is an org admin: organizer-gated paths (broadcast, /v1/me
     # is_organizer) behave like production for an organizer session.
     hub.org_roles = {args.user: "admin"}
-    hub.org_roles_by_email = {f"{args.user}@example.com": (args.user, "admin")}
 
     if args.seed:
         seed_world(hub, settings)

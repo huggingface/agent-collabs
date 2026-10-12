@@ -429,11 +429,10 @@ async def logout(request: Request):
 async def _fetch_is_organizer(access_token: str | None) -> bool | None:
     """Ask the bucket-sync API whether the signed-in user may broadcast.
 
-    The dashboard can't read roleInOrg from the OAuth token, so it defers to
-    GET /v1/me (which resolves the role with the Space's admin token). Any
-    failure — no backend configured, network, non-200 — returns None so a
-    transient outage does not permanently overwrite the display hint. The post
-    path re-verifies regardless.
+    Defers to GET /v1/me, which reads the role from the Hub. Any failure (no
+    backend configured, network, non-200) and an unknown role
+    (`is_organizer: null`) return None, so they don't overwrite the display
+    hint. The post path re-verifies regardless.
     """
     if not (BACKEND_API_URL and access_token):
         return None
@@ -443,7 +442,8 @@ async def _fetch_is_organizer(access_token: str | None) -> bool | None:
             headers={"Authorization": f"Bearer {access_token}"},
         )
         if r.status_code == 200:
-            return bool(r.json().get("is_organizer"))
+            is_organizer = r.json().get("is_organizer")
+            return is_organizer if isinstance(is_organizer, bool) else None
     except Exception as e:
         log.warning("could not resolve organizer status: %s", e)
     return None

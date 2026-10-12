@@ -13,12 +13,9 @@ def _broadcast(env, body="heads up everyone", token="organizer-token", **extra):
 
 
 def _make_organizer(env, role="admin"):
+    """The role as the members listing (Space token) states it: the last
+    source the gate consults."""
     env.hub.org_roles = {"test-user": role}
-
-
-def _make_organizer_by_email(env, role="admin", user="test-user"):
-    assert env.hub.whoami_email is not None
-    env.hub.org_roles_by_email = {env.hub.whoami_email.lower(): (user, role)}
 
 
 # ── write path ────────────────────────────────────────────────────────
@@ -101,40 +98,104 @@ def test_inbox_union_dedups_by_filename(env):
 # ── the organizer gate ────────────────────────────────────────────────
 
 
-def test_organizer_broadcast_uses_email_filtered_member_lookup(env):
-    _make_organizer_by_email(env)
-    r = _broadcast(env)
-    assert r.status_code == 201
-    assert env.hub.org_member_role_by_email_calls == 1
+def _nothing_posted(env):
+    central = env.hub.buckets[env.settings.central_bucket]
+    return not any(k.startswith(("broadcasts/", "message_board/")) for k in central)
+
+
+def test_role_from_the_callers_own_token_needs_no_other_lookup(env):
+    env.hub.whoami_roles = {env.settings.org: "admin"}
+    env.hub.org_roles_exposed = False  # the Space token can't see roles
+    assert _broadcast(env).status_code == 201
+    assert env.hub.oauth_role_calls == 0
     assert env.hub.org_member_roles_calls == 0
 
 
-def test_email_filtered_non_admin_cannot_broadcast_without_full_scan(env):
-    _make_organizer_by_email(env, role="write")
-    env.hub.org_roles = {"test-user": "admin"}  # would allow if fallback ran
+def test_a_non_admin_role_on_the_callers_token_is_final(env):
+    # Other sources are never asked to promote a contributor.
+    env.hub.whoami_roles = {env.settings.org: "contributor"}
+    env.hub.oauth_role = "admin"
+    _make_organizer(env)
     r = _broadcast(env)
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "NOT_ORGANIZER"
-    assert env.hub.org_member_role_by_email_calls == 1
+    assert env.hub.oauth_role_calls == 0
+    assert env.hub.org_member_roles_calls == 0
+    assert _nothing_posted(env)
+
+
+def test_a_role_for_another_org_does_not_count(env):
+    env.hub.whoami_roles = {"some-other-org": "admin"}
+    env.hub.org_roles_exposed = False
+    r = _broadcast(env)
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "ORGANIZER_ROLE_UNKNOWN"
+
+
+def test_a_demoted_admin_is_refused_on_the_next_request(env):
+    # The caller's own role is read fresh on every request: nothing cached.
+    env.hub.whoami_roles = {env.settings.org: "admin"}
+    assert _broadcast(env, body="first").status_code == 201
+    env.hub.whoami_roles = {env.settings.org: "write"}
+    r = _broadcast(env, body="second")
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "NOT_ORGANIZER"
+
+
+def test_oauth_userinfo_states_the_role_when_whoami_does_not(env):
+    env.hub.oauth_role = "admin"
+    env.hub.org_roles_exposed = False
+    assert _broadcast(env).status_code == 201
+    assert env.hub.oauth_role_calls == 1
     assert env.hub.org_member_roles_calls == 0
 
 
-def test_broadcast_falls_back_to_full_member_scan_without_email(env):
-    env.hub.whoami_email = None
-    _make_organizer(env)
+def test_a_non_admin_role_from_userinfo_is_final(env):
+    env.hub.oauth_role = "write"
+    _make_organizer(env)  # the listing would say admin
     r = _broadcast(env)
-    assert r.status_code == 201
-    assert env.hub.org_member_role_by_email_calls == 0
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "NOT_ORGANIZER"
+    assert env.hub.org_member_roles_calls == 0
+
+
+def test_members_listing_is_the_last_source(env):
+    _make_organizer(env)
+    assert _broadcast(env).status_code == 201
+    assert env.hub.oauth_role_calls == 1
     assert env.hub.org_member_roles_calls == 1
 
 
-def test_broadcast_falls_back_when_email_lookup_errors(env):
-    env.hub.org_member_role_by_email_fails = True
+def test_a_userinfo_outage_still_falls_back_to_the_listing(env):
+    env.hub.oauth_role_fails = True
     _make_organizer(env)
+    assert _broadcast(env).status_code == 201
+
+
+def test_no_source_stating_a_role_is_unknown_not_non_admin(env):
+    """The F1 bug: the deploy token's members listing has no role fields. That
+    is no evidence (403 ORGANIZER_ROLE_UNKNOWN), never an empty role map
+    cached as "nobody is an admin"."""
+    env.hub.org_roles_exposed = False
     r = _broadcast(env)
-    assert r.status_code == 201
-    assert env.hub.org_member_role_by_email_calls == 1
-    assert env.hub.org_member_roles_calls == 1
+    assert r.status_code == 403
+    assert r.json()["error"]["code"] == "ORGANIZER_ROLE_UNKNOWN"
+    assert env.settings.org in r.json()["error"]["hint"]
+    assert _nothing_posted(env)
+    # nothing was cached: once roles are visible, the next request sees them
+    env.hub.org_roles_exposed = True
+    _make_organizer(env)
+    assert _broadcast(env).status_code == 201
+
+
+def test_an_outage_with_no_roles_elsewhere_is_a_retryable_503(env):
+    # userinfo was unreachable and might have answered: fail closed as 503.
+    env.hub.oauth_role_fails = True
+    env.hub.org_roles_exposed = False
+    r = _broadcast(env)
+    assert r.status_code == 503
+    assert r.json()["error"]["code"] == "ORGANIZER_CHECK_UNAVAILABLE"
+    assert _nothing_posted(env)
 
 
 def test_non_admin_member_cannot_broadcast(env):
@@ -213,8 +274,11 @@ def test_broadcast_fails_closed_when_role_lookup_unavailable(env):
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "ORGANIZER_CHECK_UNAVAILABLE"
     # never silently downgraded to a normal post
-    central = env.hub.buckets[env.settings.central_bucket]
-    assert not any(k.startswith("message_board/") for k in central)
+    assert _nothing_posted(env)
+    # the failure was not cached
+    env.hub.org_member_roles_fails = False
+    _make_organizer(env)
+    assert _broadcast(env).status_code == 201
 
 
 def test_non_broadcast_human_post_never_consults_roles(env):

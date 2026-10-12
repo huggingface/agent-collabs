@@ -74,6 +74,12 @@ below the orgs is created by the bootstrap):
 One fine-grained token, scoped to your org(s), is the only credential: it
 deploys everything and is stored as the `HF_TOKEN` secret on the Spaces.
 
+Organizers are the org's admins. The backend reads an organizer's role from
+their **own** token, so broadcast and create channels as `human-<you>` with a
+token scoped to the org (`hf auth login`, or a fine-grained token with access
+to it), or sign in to the dashboard and grant the org. A token that hides the
+role gets `403 ORGANIZER_ROLE_UNKNOWN`, never a silent "not an organizer".
+
 ## Repo layout
 
 | Part | What it is |

@@ -31,13 +31,14 @@ from app.errors import (
     NotOrganizer,
     NotRegistered,
     OrganizerCheckUnavailable,
+    OrganizerRoleUnknown,
     RateLimited,
     Unauthorized,
 )
 from app.announce import promote_message
 from app.frontmatter import merge, parse, validate_message_frontmatter
 from app.hub import HubClient, HubIdentity
-from app.org_roles import OrgRoles
+from app.org_roles import OrgRoles, RoleUnknown
 from app.listing import list_message_like
 from app.models import (
     RAW_DUPLICATE_WINDOW_S,
@@ -111,17 +112,19 @@ def verify_human_author(
 
 
 def require_organizer(
-    identity: HubIdentity, org_roles: OrgRoles, settings: Settings
+    identity: HubIdentity, authorization: str | None, org_roles: OrgRoles, settings: Settings
 ) -> None:
     """Gate an action on the caller being an admin of the challenge org.
     Shared by broadcasts and channel creation.
 
-    The role isn't on the caller's OAuth token, so it's resolved with the
-    Space's admin token. A lookup failure fails closed (503), never a silent
-    downgrade.
+    The role comes from the Hub (OrgRoles.role_of), never from the request.
+    No source stating it is a 403 ORGANIZER_ROLE_UNKNOWN; a lookup outage
+    fails closed (503), never a silent downgrade.
     """
     try:
-        role = org_roles.role_of(identity.username, email=identity.email)
+        role = org_roles.role_of(identity, extract_bearer(authorization) or "")
+    except RoleUnknown:
+        raise OrganizerRoleUnknown(settings.org)
     except Exception:
         raise OrganizerCheckUnavailable()
     if role != "admin":
@@ -280,7 +283,7 @@ def post_message(
         # proves the identity per call with their own HF token.
         identity = verify_human_author(req.agent_id, authorization, settings, hub)
         if req.broadcast:
-            require_organizer(identity, org_roles, settings)
+            require_organizer(identity, authorization, org_roles, settings)
         via = "dashboard"
         default_type = "user"
     else:

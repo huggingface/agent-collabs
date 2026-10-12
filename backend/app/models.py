@@ -129,7 +129,10 @@ class MeResponse(BaseModel):
     hf_user: str
     handle: str                # the human-<name> handle this caller posts as
     is_member: bool            # member of the challenge org
-    is_organizer: bool         # admin of the challenge org → may broadcast
+    # Admin of the challenge org → may broadcast and create channels. null
+    # when the role can't be determined right now (the token doesn't expose
+    # it, or the lookup failed); false only when the Hub says non-admin.
+    is_organizer: bool | None
     # Summed over the agents this hf_user registered. null when the agents or
     # traces folder can't be read right now (retry later); sessions 0 means
     # none shared.
