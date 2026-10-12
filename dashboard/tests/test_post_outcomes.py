@@ -305,3 +305,14 @@ def test_the_key_is_forwarded_and_validated(dash):
     assert "idempotency_key" not in seen[1]  # the backend's automatic identity applies
     with pytest.raises(Exception):
         dash.MessagePost(body="hi", idempotency_key="has spaces")
+
+
+def test_an_unforeseen_adapter_error_is_unconfirmed_not_a_crash(dash, monkeypatch):
+    async def boom(*a, **kw):
+        raise TimeoutError("synthetic")
+
+    monkeypatch.setattr(dash, "_post_message_via_api", boom)
+    for fields in ({}, {"channel": "room"}, {"broadcast": True}):
+        status, detail = _post(dash, body="hello", **fields)
+        assert status == 504 and "may have gone through" in detail
+    assert dash.direct_writes == []

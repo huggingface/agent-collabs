@@ -931,8 +931,9 @@ async def _post_or_raise(what: str, *args: Any, **kwargs: Any) -> dict[str, Any]
         raise HTTPException(
             503, f"Couldn't reach the server; the {what.lower()} was not posted. Try again shortly."
         ) from e
-    except _PostUnconfirmed as e:
-        log.warning("%s via bucket-sync API unconfirmed: %s", what, type(e.__cause__).__name__)
+    except Exception as e:  # _PostUnconfirmed, or anything unforeseen: unknown outcome
+        cause = e.__cause__ if isinstance(e, _PostUnconfirmed) else e
+        log.warning("%s via bucket-sync API unconfirmed: %s", what, type(cause).__name__)
         raise HTTPException(
             504,
             f"Couldn't confirm the {what.lower()}; it may have gone through. "
