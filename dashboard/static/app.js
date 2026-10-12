@@ -1831,6 +1831,10 @@ function setComposerStatus(html = '', isError = false) {
 // comes from the bucket-sync API; an empty list still confirms the send.
 let composerNoticeHtml = '';
 let composerNoticeUntil = 0;
+// The last failed post's message, kept until the draft changes or is sent
+// again: syncComposerState repaints the status line after every post, which
+// would otherwise replace the error with "posting as …" at once.
+let composerErrorHtml = '';
 function setComposerNotice(delivered, broadcast = false, channel = null, autoSubscribed = false) {
   const inboxed = (delivered || []).map(h => `@${h}`).join(', ');
   if (broadcast) {
@@ -1888,7 +1892,9 @@ function syncComposerState() {
   humanMessageInput.disabled = false;
   sendBtn.disabled = postingMessage || !body;
   if (!postingMessage) {
-    if (Date.now() < composerNoticeUntil) {
+    if (composerErrorHtml) {
+      setComposerStatus(composerErrorHtml, true);
+    } else if (Date.now() < composerNoticeUntil) {
       setComposerStatus(composerNoticeHtml);
     } else {
       setComposerStatus(
@@ -1917,6 +1923,7 @@ function autosizeTextarea() {
   ta.style.height = Math.min(ta.scrollHeight + 2, 200) + 'px';
 }
 humanMessageInput.addEventListener('input', () => {
+  composerErrorHtml = '';
   autosizeTextarea();
   syncComposerState();
 });
@@ -1955,6 +1962,7 @@ messageComposer.addEventListener('submit', async e => {
   const body = humanMessageInput.value.trim();
   if (!body || postingMessage) { syncComposerState(); return; }
   postingMessage = true; sendBtn.disabled = true;
+  composerErrorHtml = '';
   setComposerStatus('Sending…');
   const channel = activeChannel;
   const broadcast = !channel && !!me.is_organizer && broadcastToggle.checked;
@@ -1997,7 +2005,7 @@ messageComposer.addEventListener('submit', async e => {
       syncComposerState();
       setComposerStatus('Session expired. Please sign in again.', true);
     } else {
-      setComposerStatus(escapeHtml(err.message || 'Message failed.'), true);
+      composerErrorHtml = escapeHtml(err.message || 'Message failed.');
     }
   } finally {
     postingMessage = false;

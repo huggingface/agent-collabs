@@ -47,6 +47,7 @@ describe('composer idempotency key', () => {
     const { posts, send, input, status } = setup();
     await send('hello', UNCONFIRMED);
     assert.equal(input.value, 'hello');  // the draft survives the failure
+    assert.match(status.textContent, /may have gone through/);
     await send('hello', { status: 200, body: SENT });  // the backend's replay
     assert.equal(posts.length, 2);
     assert.match(posts[0].idempotency_key, /^[A-Za-z0-9_-]{1,64}$/);
@@ -57,6 +58,7 @@ describe('composer idempotency key', () => {
   test('a network failure says the outcome is unknown, and the retry reuses the key', async () => {
     const { posts, send, status } = setup();
     await send('hello', 'network');
+    assert.match(status.textContent, /may have gone through/);
     await send('hello', { status: 201, body: SENT });
     assert.equal(posts[1].idempotency_key, posts[0].idempotency_key);
   });
@@ -73,5 +75,15 @@ describe('composer idempotency key', () => {
     await send('hello', UNCONFIRMED);
     await send('hello, world', { status: 201, body: SENT });
     assert.notEqual(posts[1].idempotency_key, posts[0].idempotency_key);
+  });
+
+  test('the error stays until the draft is edited', async () => {
+    const { send, input, status } = setup();
+    await send('hello', UNCONFIRMED);
+    assert.match(status.textContent, /may have gone through/);
+    assert.ok(status.classList.contains('error'));
+    input.value = 'hello!';
+    input.dispatchEvent(new input.ownerDocument.defaultView.Event('input'));
+    assert.match(status.textContent, /posting as alice/);
   });
 });
